@@ -74,7 +74,7 @@ Launch Viber from /Applications and allow notifications when asked. Notification
     - When a command prints a local URL (a dev server starting), its row offers *Open in preview*.
     - The console button shows errors since the last load.
     - The page keeps running while you look at other sessions, and the URL is restored after a relaunch.
-- **Worktrees**: start a session in a new git worktree at `<repo>/.claude/worktrees/<slug>` on branch `viber/<slug>`. Closing can remove the worktree (refused if it has uncommitted changes) and delete the branch (`git branch -d` only, so unmerged branches are kept).
+- **Worktrees**: start a session in a new git worktree at `<repo>/.claude/worktrees/<slug>` on branch `viber/<slug>`. If the folder isn't a git repository yet, **Create One** in the New Session sheet runs `git init` and commits a README titled after the folder. Closing can remove the worktree (refused if it has uncommitted changes) and delete the branch (`git branch -d` only, so unmerged branches are kept).
 - **Cache ring**: time left on the prompt cache per session; Viber can warn before it expires.
 - **Usage bar**: plan usage from `clauth` (start `clauth daemon` to keep it current).
 - **Notifications** when a session finishes or needs you; clicking one opens that session.
