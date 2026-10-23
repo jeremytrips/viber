@@ -1,0 +1,1 @@
+print("Viber app placeholder")
