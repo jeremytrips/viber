@@ -38,6 +38,9 @@ final class Pane: Identifiable {
     /// The `//` message this session is answering right now, and the chat item it arrived as.
     var answering: (recordID: String, itemID: String)?
     var sessionRules: [RuleEdit] = []
+    /// The project's files for `@` mentions, loaded when first asked for.
+    var files: [String]?
+    @ObservationIgnored private var filesLoadedAt: Date?
     private(set) var started = false
     @ObservationIgnored private var process: ClaudeProcess?
     @ObservationIgnored var onStateChange: ((Pane, PaneState) -> Void)?
@@ -123,10 +126,10 @@ final class Pane: Identifiable {
     func send(_ message: JSON) { process?.send(message) }
 
     /// Sends a user message, starting the process first if needed.
-    func sendUser(_ text: String, binDir: String?, pluginDir: String?) {
+    func sendUser(_ text: String, images: [ImageAttachment] = [], binDir: String?, pluginDir: String?) {
         if !isRunning { start(binDir: binDir, pluginDir: pluginDir) }
         let before = chat.state
-        process?.send(chat.userMessage(text))
+        process?.send(chat.userMessage(text, images: images))
         lastActivity = Date()
         notifyIfChanged(from: before)
     }
@@ -173,6 +176,17 @@ final class Pane: Identifiable {
         spec.resume = nil
         started = false
         start(binDir: binDir, pluginDir: pluginDir)
+    }
+
+    /// Loads the file list for `@` mentions in the background, at most every 30 seconds.
+    func loadFiles() {
+        if let at = filesLoadedAt, Date().timeIntervalSince(at) < 30 { return }
+        filesLoadedAt = Date()
+        let cwd = spec.cwd
+        Task.detached {
+            let list = FileIndex.list(cwd: cwd)
+            await MainActor.run { self.files = list }
+        }
     }
 
     static func transcriptData(sessionID: String, cwd: String) -> Data? {

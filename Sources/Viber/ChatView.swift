@@ -149,6 +149,15 @@ struct ChatItemView: View {
                     .padding(.horizontal, 13).padding(.vertical, 9)
                     .background(RoundedRectangle(cornerRadius: 14).fill(Color(nsColor: .quaternaryLabelColor).opacity(0.6)))
             }
+        case .attachments(let labels):
+            HStack(spacing: 6) {
+                Spacer(minLength: 60)
+                ForEach(Array(labels.enumerated()), id: \.offset) { _, label in
+                    Label(label, systemImage: "photo").font(.caption).lineLimit(1)
+                        .padding(.horizontal, 8).padding(.vertical, 4)
+                        .background(Capsule().fill(Color(nsColor: .quaternaryLabelColor).opacity(0.6)))
+                }
+            }
         case .assistant(let text):
             MarkdownText(text: text)
         case .tool(let call):

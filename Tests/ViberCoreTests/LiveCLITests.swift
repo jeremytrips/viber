@@ -1,3 +1,6 @@
+import CoreGraphics
+import ImageIO
+import UniformTypeIdentifiers
 import XCTest
 @testable import ViberCore
 
@@ -92,5 +95,46 @@ final class LiveCLITests: XCTestCase {
 
         let reply = chat.assistantText(after: received)
         XCTAssertTrue(reply.uppercased().contains("PINEAPPLE"), "reply was: \(reply)")
+    }
+
+    /// An image block and an `@file` mention reach the model: the CLI resolves the mention itself in headless mode.
+    func testImageAndFileMentionAgainstRealCLI() throws {
+        let env = ProcessInfo.processInfo.environment
+        try XCTSkipUnless(env["VIBER_LIVE_TEST"] == "1", "set VIBER_LIVE_TEST=1 to run")
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("viber-live-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try Data("The code word is MANGO.\n".utf8).write(to: dir.appendingPathComponent("secret.txt"))
+
+        let context = try XCTUnwrap(CGContext(data: nil, width: 64, height: 64, bitsPerComponent: 8, bytesPerRow: 0,
+                                              space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.setFillColor(CGColor(red: 1, green: 0, blue: 0, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: 64, height: 64))
+        let png = NSMutableData()
+        let dest = try XCTUnwrap(CGImageDestinationCreateWithData(png, UTType.png.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(dest, try XCTUnwrap(context.makeImage()), nil)
+        CGImageDestinationFinalize(dest)
+        let image = try XCTUnwrap(ImageAttachment(data: png as Data, label: "red.png"))
+
+        var chat = ChatTranscript()
+        let spec = LaunchSpec(profile: env["VIBER_LIVE_PROFILE"], cwd: dir.path, model: "haiku")
+        let process = try ClaudeProcess(spec: spec, paneID: "live-image", binDir: nil)
+        let finished = expectation(description: "turn finished")
+        process.onMessage = { message in
+            for reply in chat.apply(message) { process.send(reply) }
+            // A tool call would mean the mention was not resolved; deny it so the turn ends.
+            for item in chat.items { if case .permission(let p) = item.kind, p.decision == nil,
+                                        let reply = chat.decidePermission(itemID: item.id, allow: false) { process.send(reply) } }
+            if message["type"]?.string == "result" { finished.fulfill() }
+        }
+        process.send(chat.request("initialize"))
+        process.send(chat.userMessage("What single color fills the image, and what is the code word in @secret.txt? "
+            + "Do not use tools. Answer in the form COLOR WORD, in capitals.", images: [image]))
+        wait(for: [finished], timeout: 120)
+        process.terminate()
+
+        let reply = chat.items.compactMap { if case .assistant(let t) = $0.kind { return t }; return nil }.joined().uppercased()
+        XCTAssertTrue(reply.contains("RED"), "reply was: \(reply)")
+        XCTAssertTrue(reply.contains("MANGO"), "reply was: \(reply)")
     }
 }

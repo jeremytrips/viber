@@ -197,22 +197,25 @@ final class AppModel {
     }
 
     /// Routes composer text: skills go to the CLI, terminal-only commands are handled here.
-    func submit(_ text: String, in pane: Pane) {
+    /// Images go with a message to Claude; returns false when the text was not one, so the composer keeps them.
+    @discardableResult
+    func submit(_ text: String, images: [ImageAttachment] = [], in pane: Pane) -> Bool {
         if Relay.isRelay(text) {
             // Without a choice from the menu, use the best match.
             guard let best = Relay.rank(text, candidates: relayCandidates(excluding: pane)).first else {
-                pane.chat.note("There is no other session to send this to.", isError: true); return
+                    pane.chat.note("There is no other session to send this to.", isError: true); return images.isEmpty
             }
             relay(best.message, from: pane, to: best.candidate.id)
-            return
+            return images.isEmpty
         }
         switch SlashRouter.route(text, commands: pane.chat.commands) {
         case .send(let message):
-            guard !message.isEmpty else { return }
-            pane.sendUser(message, binDir: binDir, pluginDir: pluginDir)
+            guard !message.isEmpty || !images.isEmpty else { return true }
+            pane.sendUser(message, images: images, binDir: binDir, pluginDir: pluginDir)
+            return true
         case .setMode(let mode, let then):
             setMode(mode, in: pane)
-            if let then { pane.sendUser(then, binDir: binDir, pluginDir: pluginDir) }
+            if let then { pane.sendUser(then, images: images, binDir: binDir, pluginDir: pluginDir); return true }
         case .setModel(let model):
             ensureRunning(pane)
             pane.run { [$0.setModel(model)] }
@@ -233,6 +236,7 @@ final class AppModel {
         case .openSettings(let tab):
             openSettings(tab, in: pane)
         }
+        return images.isEmpty
     }
 
     // MARK: Session settings (what /mcp, /context, /permissions … show in the terminal)

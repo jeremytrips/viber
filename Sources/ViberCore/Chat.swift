@@ -81,6 +81,8 @@ public struct PlanPrompt: Equatable, Sendable {
 public struct ChatItem: Identifiable, Equatable, Sendable {
     public enum Kind: Equatable, Sendable {
         case user(String)
+        /// Images sent with the next user message, by label.
+        case attachments([String])
         case assistant(String)
         case tool(ToolCall)
         case permission(PermissionPrompt)
@@ -173,11 +175,15 @@ public struct ChatTranscript {
 
     // MARK: Outgoing
 
-    public mutating func userMessage(_ text: String) -> JSON {
-        append(.user(text))
+    /// A message typed by the user. Images go first, as the API recommends, then the text.
+    public mutating func userMessage(_ text: String, images: [ImageAttachment] = []) -> JSON {
+        if !images.isEmpty { append(.attachments(images.map(\.label))) }
+        if !text.isEmpty || images.isEmpty { append(.user(text)) }
         state = .working
         turnStartedByUser = true
-        return ["type": "user", "message": ["role": "user", "content": .string(text)]]
+        let content: JSON = images.isEmpty ? .string(text)
+            : .array(images.map(\.block) + (text.isEmpty ? [] : [["type": "text", "text": .string(text)]]))
+        return ["type": "user", "message": ["role": "user", "content": content]]
     }
 
     public mutating func request(_ subtype: String, _ extra: [String: JSON] = [:], key: String? = nil) -> JSON {
@@ -509,7 +515,12 @@ public struct ChatTranscript {
             if history { appendUserText(text) }
             return
         }
-        for block in body["content"]?.array ?? [] {
+        let blocks = body["content"]?.array ?? []
+        if history {
+            let images = blocks.filter { $0["type"]?.string == "image" }.count
+            if images > 0 { append(.attachments(Array(repeating: "Image", count: images))) }
+        }
+        for block in blocks {
             switch block["type"]?.string {
             case "tool_result":
                 guard let id = block["tool_use_id"]?.string, let index = toolIndex[id] else { continue }
