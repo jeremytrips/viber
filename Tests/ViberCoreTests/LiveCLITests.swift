@@ -178,4 +178,45 @@ final class LiveCLITests: XCTestCase {
         process.terminate()
         XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "one\n", "the file is back")
     }
+
+    /// A backgrounded shell shows up as a running task, its output can be read, and stop_task ends it.
+    func testBackgroundTaskStopAgainstRealCLI() throws {
+        let env = ProcessInfo.processInfo.environment
+        try XCTSkipUnless(env["VIBER_LIVE_TEST"] == "1", "set VIBER_LIVE_TEST=1 to run")
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("viber-live-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        var chat = ChatTranscript()
+        let process = try ClaudeProcess(spec: LaunchSpec(profile: env["VIBER_LIVE_PROFILE"], cwd: dir.path, model: "haiku"),
+                                        paneID: "live-tasks", binDir: nil)
+        var finished: XCTestExpectation? = expectation(description: "turn finished")
+        var answered: XCTestExpectation?
+        var stopped: XCTestExpectation?
+        process.onMessage = { message in
+            for reply in chat.apply(message) { process.send(reply) }
+            for item in chat.items { if case .permission(let p) = item.kind, p.decision == nil,
+                                        let reply = chat.decidePermission(itemID: item.id, allow: true) { process.send(reply) } }
+            if message["type"]?.string == "result" { finished?.fulfill(); finished = nil }
+            if message["type"]?.string == "control_response", chat.controls.busy.isEmpty { answered?.fulfill(); answered = nil }
+            if chat.controls.tasks.contains(where: { $0.status == "stopped" }) { stopped?.fulfill(); stopped = nil }
+        }
+        process.send(chat.request("initialize"))
+        process.send(chat.userMessage("Run exactly this shell command in the background (run_in_background true): echo viber-started; sleep 30. "
+            + "Then reply STARTED right away without waiting for it."))
+        wait(for: [finished!], timeout: 120)
+        let task = try XCTUnwrap(chat.controls.runningTasks.first, "\(chat.controls.tasks)")
+        XCTAssertEqual(task.type, "local_bash")
+
+        answered = expectation(description: "output")
+        for request in chat.refresh(.tasks) { process.send(request) }
+        wait(for: [answered!], timeout: 30)
+        XCTAssertTrue(chat.controls.taskOutput[task.id]?.text.contains("viber-started") == true, "\(chat.controls.taskOutput)")
+
+        stopped = expectation(description: "stopped")
+        process.send(chat.stopTask(task.id))
+        wait(for: [stopped!], timeout: 30)
+        process.terminate()
+        XCTAssertTrue(chat.controls.runningTasks.isEmpty)
+    }
 }

@@ -27,6 +27,7 @@ public enum SlashRouter {
         SlashCommand(name: "context", description: "Context window usage, and compact"),
         SlashCommand(name: "permissions", description: "Permission rules for this session and project"),
         SlashCommand(name: "hooks", description: "Hooks that run in this session"),
+        SlashCommand(name: "tasks", description: "Background shells and agents: see output, stop them"),
         SlashCommand(name: "settings", description: "Session settings: model, effort, output style")
     ]
 
@@ -45,6 +46,7 @@ public enum SlashRouter {
         case "context", "usage": return .openSettings(.context)
         case "permissions", "allowed-tools": return .openSettings(.permissions)
         case "hooks": return .openSettings(.hooks)
+        case "tasks", "bashes": return .openSettings(.tasks)
         case "settings": return .openSettings(.model)
         // With arguments these run headless in the CLI (`/mcp reconnect all`, `/effort high`, `/config key=value`).
         case "mcp" where rest.isEmpty: return .openSettings(.mcp)

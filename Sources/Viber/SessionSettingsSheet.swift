@@ -16,6 +16,7 @@ struct SessionSettingsSheet: View {
         case .context: ["context", "cost"]
         case .permissions: ["permissions", "sessionRules"]
         case .hooks: ["hooks"]
+        case .tasks: pane.chat.controls.busy.filter { $0.hasPrefix("task:") || $0.hasPrefix("output:") }.sorted()
         case .model: ["settings"]
         }
         return keys.contains { pane.chat.controls.busy.contains($0) }
@@ -43,6 +44,7 @@ struct SessionSettingsSheet: View {
                 case .context: ContextTab(pane: pane, close: { dismiss() })
                 case .permissions: PermissionsTab(pane: pane)
                 case .hooks: HooksTab(pane: pane)
+                case .tasks: TasksTab(pane: pane)
                 case .model: ModelTab(pane: pane)
                 }
             }
@@ -422,6 +424,104 @@ private struct HooksTab: View {
                 SettingsFileButton(title: "Open Local Settings", url: SettingsFile.url(.projectLocal, cwd: pane.cwd))
             }
             .padding(12)
+        }
+    }
+}
+
+// MARK: - Tasks
+
+private struct TasksTab: View {
+    let pane: Pane
+
+    var body: some View {
+        let tasks = pane.chat.controls.tasks
+        VStack(spacing: 0) {
+            if tasks.isEmpty {
+                TabStatus(loading: false, error: nil,
+                          empty: "No background tasks in this session.\nShell commands Claude runs in the background and subagents show up here.")
+            } else {
+                List {
+                    let running = tasks.filter(\.isRunning), ended = tasks.filter { !$0.isRunning }.reversed()
+                    if !running.isEmpty { Section("Running") { ForEach(running) { TaskRow(entry: $0, pane: pane) } } }
+                    if !ended.isEmpty { Section("Finished") { ForEach(Array(ended)) { TaskRow(entry: $0, pane: pane) } } }
+                }
+                .listStyle(.inset)
+            }
+            Divider()
+            Text("Like /tasks in the terminal. Stopping a task ends its process; Claude is told it was stopped.")
+                .font(.caption).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
+        }
+    }
+}
+
+private struct TaskRow: View {
+    @Environment(AppModel.self) private var model
+    let entry: SessionTask
+    let pane: Pane
+    @State private var showOutput = false
+
+    private var statusColor: Color {
+        switch entry.status {
+        case "completed": return .green
+        case "failed": return .red
+        case "stopped": return .secondary
+        default: return .blue
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Circle().fill(statusColor).frame(width: 8, height: 8)
+                Chip(text: entry.kindLabel)
+                Text(entry.description.isEmpty ? entry.id : entry.description).fontWeight(.medium).lineLimit(1)
+                Spacer()
+                if pane.chat.controls.busy.contains("task:\(entry.id)") || pane.chat.controls.busy.contains("output:\(entry.id)") {
+                    ProgressView().controlSize(.small)
+                }
+                if entry.hasOutput {
+                    Button(showOutput ? "Hide Output" : "Output") {
+                        showOutput.toggle()
+                        if showOutput { model.control(pane) { [$0.taskOutput(entry.id)] } }
+                    }
+                }
+                if entry.isRunning {
+                    Button("Stop") { model.control(pane) { [$0.stopTask(entry.id)] } }
+                }
+            }
+            let detail = [entry.isRunning ? entry.lastTool : nil, entry.summary].compactMap { $0 }.joined(separator: " · ")
+            let usage = [entry.toolUses.map { "\($0) tool uses" }, entry.tokens.map { "\(AppModel.compact($0)) tokens" }].compactMap { $0 }
+            if !detail.isEmpty || !usage.isEmpty || !entry.isRunning {
+                HStack(spacing: 6) {
+                    if !entry.isRunning { Text(entry.status.capitalized).foregroundStyle(statusColor) }
+                    if !detail.isEmpty { Text(detail).lineLimit(2) }
+                    if !usage.isEmpty { Text(usage.joined(separator: " · ")).foregroundStyle(.tertiary) }
+                }
+                .font(.caption).foregroundStyle(.secondary).padding(.leading, 16)
+            }
+            if showOutput {
+                let output = pane.chat.controls.taskOutput[entry.id]
+                ScrollView {
+                    Text(output.map { $0.text.isEmpty ? "No output yet." : ($0.truncated ? "…" : "") + $0.text } ?? "Loading…")
+                        .font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading).padding(8)
+                }
+                .frame(maxHeight: 180)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .textBackgroundColor)))
+                .padding(.leading, 16)
+            }
+        }
+        .padding(.vertical, 3)
+        // While the output is open and the shell is still running, keep it current.
+        .task(id: showOutput && entry.isRunning) {
+            guard showOutput && entry.isRunning else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(2))
+                guard !Task.isCancelled, !pane.chat.controls.busy.contains("output:\(entry.id)") else { continue }
+                model.control(pane) { [$0.taskOutput(entry.id)] }
+            }
         }
     }
 }

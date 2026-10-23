@@ -29,6 +29,8 @@ public struct ToolCall: Equatable, Sendable {
     public var done = false
     /// Auto mode's classifier refused the call; `result` holds what Claude was told.
     public var blockedByAutoMode = false
+    /// What a running subagent is doing, from `task_progress`.
+    public var progress: String?
 
     public init(id: String, name: String, input: JSON, result: String? = nil, isError: Bool = false, done: Bool = false) {
         self.id = id; self.name = name; self.input = input; self.result = result; self.isError = isError; self.done = done
@@ -307,6 +309,8 @@ public struct ChatTranscript {
         case .context: return [request("get_context_usage", ["detail": "full"], key: "context"), request("get_session_cost", key: "cost")]
         case .permissions: return [request("list_permission_rules", key: "permissions")]
         case .hooks: return [request("get_hooks_listing", key: "hooks")]
+        // Tasks arrive as events; refreshing re-reads the output of running shells.
+        case .tasks: return controls.runningTasks.filter(\.hasOutput).map { taskOutput($0.id) }
         case .model: return [request("get_settings", key: "settings")]
         }
     }
@@ -347,6 +351,78 @@ public struct ChatTranscript {
     }
 
     public mutating func note(_ text: String, isError: Bool = false) { append(.notice(text, isError: isError)) }
+
+    // MARK: Tasks
+
+    /// Stops a background shell or subagent. The CLI reports the end with `task_notification`.
+    public mutating func stopTask(_ id: String) -> JSON {
+        request("stop_task", ["task_id": .string(id)], key: "task:\(id)")
+    }
+
+    /// The last 8 KiB a shell task wrote.
+    public mutating func taskOutput(_ id: String) -> JSON {
+        request("get_task_output", ["task_id": .string(id)], key: "output:\(id)")
+    }
+
+    private mutating func applyTask(_ message: JSON) {
+        let subtype = message["subtype"]?.string
+        if subtype == "background_tasks_changed" {
+            // The full set of live background tasks; ended ones get their own task_notification.
+            for t in message["tasks"]?.array ?? [] {
+                guard let id = t["task_id"]?.string else { continue }
+                updateTask(id, type: t["task_type"]?.string, description: t["description"]?.string) { task in
+                    task.backgrounded = true
+                    if let v = t["subagent_type"]?.string { task.subagentType = v }
+                }
+            }
+            return
+        }
+        guard let id = message["task_id"]?.string else { return }
+        let task = updateTask(id, type: message["task_type"]?.string, description: message["description"]?.string) { task in
+            if let v = message["tool_use_id"]?.string { task.toolUseID = v }
+            if let v = message["subagent_type"]?.string { task.subagentType = v }
+            if let v = message["is_backgrounded"]?.bool { task.backgrounded = v }
+            if let v = message["summary"]?.string, !v.isEmpty { task.summary = v }
+            if let v = message["last_tool_name"]?.string { task.lastTool = v }
+            if let usage = message["usage"] { task.tokens = usage["total_tokens"]?.int; task.toolUses = usage["tool_uses"]?.int }
+            switch subtype {
+            case "task_updated":
+                if let v = message["patch"]?["status"]?.string { task.status = v }
+                if let v = message["patch"]?["is_backgrounded"]?.bool { task.backgrounded = v }
+                if let v = message["patch"]?["description"]?.string { task.description = v }
+            case "task_notification":
+                task.status = message["status"]?.string ?? "completed"
+            default: break
+            }
+        }
+        // A foreground subagent shows what it is doing on its own tool row.
+        if subtype == "task_progress", let toolUseID = task.toolUseID, let index = toolIndex[toolUseID],
+           case .tool(var call) = items[index].kind {
+            call.progress = [task.lastTool, task.summary].compactMap { $0 }.joined(separator: " · ")
+            items[index].kind = .tool(call)
+        }
+    }
+
+    @discardableResult
+    private mutating func updateTask(_ id: String, type: String?, description: String?, _ change: (inout SessionTask) -> Void) -> SessionTask {
+        var tasks = controls.tasks
+        let index = tasks.firstIndex { $0.id == id } ?? {
+            tasks.append(SessionTask(id: id, type: type ?? "task", description: description ?? ""))
+            return tasks.count - 1
+        }()
+        if let type { tasks[index].type = type }
+        if let description, !description.isEmpty { tasks[index].description = description }
+        change(&tasks[index])
+        let task = tasks[index]
+        // Keep every running task and the last 20 that ended.
+        let ended = tasks.filter { !$0.isRunning }
+        if ended.count > 20 {
+            let drop = Set(ended.prefix(ended.count - 20).map(\.id))
+            tasks.removeAll { drop.contains($0.id) }
+        }
+        controls.tasks = tasks
+        return task
+    }
 
     // MARK: Rewind
 
@@ -480,6 +556,8 @@ public struct ChatTranscript {
             if let list = message["commands"] { commands = Self.commands(list) }
         case "compact_boundary":
             append(.notice("Conversation compacted", isError: false))
+        case "task_started", "task_progress", "task_updated", "task_notification", "background_tasks_changed":
+            applyTask(message)
         case "elicitation_complete":
             // A URL-mode elicitation the user accepted: the server says the page flow finished.
             guard let id = message["elicitation_id"]?.string else { break }
@@ -769,6 +847,10 @@ public struct ChatTranscript {
             (controls.rules, controls.directories) = PermissionRule.parse(body)
         case "get_hooks_listing":
             controls.hooks = HookEntry.parseListing(body)
+        case "get_task_output":
+            guard let task = pending.body["task_id"]?.string else { break }
+            controls.taskOutput[task] = TaskOutput(text: body?["output"]?.string ?? "", totalBytes: body?["total_bytes"]?.int ?? 0,
+                                                   truncated: body?["truncated"]?.bool ?? false)
         case "get_settings":
             controls.appliedModel = body?["applied"]?["model"]?.string ?? controls.appliedModel
             controls.effort = body?["applied"]?["effort"]?.string ?? controls.effort

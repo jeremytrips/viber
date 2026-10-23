@@ -36,6 +36,7 @@ Launch Viber from /Applications and allow notifications when asked. Notification
   - `/clear` starts a fresh conversation in the same session
   - `/resume` opens the resume picker
   - `/cost` shows tokens and cost for the session
+  - `/tasks` (or `/bashes`) opens the session's background tasks
   - `/mcp`, `/context` (or `/usage`), `/permissions`, `/hooks` and `/settings` (or bare `/config`, `/effort`, `/output-style`) open the session's settings on that tab. With arguments, `/mcp reconnect all`, `/effort high` and `/config key=value` still go to the CLI, which handles them itself.
 
   Everything else (skills, custom commands) is sent to the CLI as text. Viber's own skills work as `/cleanup` as well as `/viber:cleanup`.
@@ -44,6 +45,7 @@ Launch Viber from /Applications and allow notifications when asked. Notification
   - **Context**: where the context window goes, by category, plus the session's cost. Compact now, with optional instructions.
   - **Permissions**: the rules in effect and where each comes from. Add or remove a rule for *this session* (kept across relaunches, gone when the session closes), *this project, just me* (`.claude/settings.local.json`, which Viber keeps out of git) or *this project, shared* (`.claude/settings.json`). Claude Code picks file changes up right away.
   - **Hooks**: every hook that runs, from settings files and plugins. Read-only; buttons open the settings files.
+  - **Tasks**: shell commands Claude runs in the background, subagents and monitors, running and recently finished. Read a shell's output (kept current while open) or stop a task. The header shows "Tasks 2 running" while any run, and a running subagent's tool row shows what it is doing.
   - **Model**: model, effort and permission mode for this session; output style, saved for the project.
 - **Settings** (⌘, or the gear at the bottom left of the sidebar) hold everything that is not about one conversation:
   - **General**: which notifications to post, how early to warn about cache expiry, and the permission mode new sessions start in.

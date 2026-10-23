@@ -60,6 +60,12 @@ struct PaneHeader: View {
                 Stat(label: "Context", value: "\(AppModel.compact(usage.contextTokens)) · \(AppModel.compact(usage.cacheRead)) cached")
             }
             if pane.chat.costUSD > 0 { Stat(label: "Cost", value: String(format: "$%.2f", pane.chat.costUSD)) }
+            let running = pane.chat.controls.runningTasks.count
+            if running > 0 {
+                Button { model.openSettings(.tasks, in: pane) } label: { Stat(label: "Tasks", value: "\(running) running") }
+                    .buttonStyle(.plain)
+                    .help("Background shells and agents. Click to see their output or stop them.")
+            }
             if let mcp = pane.chat.controls.mcpSummary {
                 Button { model.openSettings(.mcp, in: pane) } label: {
                     Stat(label: "MCP", value: "\(mcp.connected)/\(mcp.total)", warn: mcp.attention)
@@ -317,6 +323,9 @@ struct ToolRow: View {
             }
             .buttonStyle(.plain)
             .font(.callout)
+            if !call.done, let progress = call.progress, !progress.isEmpty {
+                Text(progress).font(.caption).foregroundStyle(.secondary).lineLimit(1).padding(.leading, 15)
+            }
             if open { ToolDetail(call: call).padding(.leading, 15) }
         }
     }
