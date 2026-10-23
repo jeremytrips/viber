@@ -101,9 +101,7 @@ struct NewSessionSheet: View {
                     .disabled(repoRoot == nil)
                     TextField("Name", text: $name, prompt: Text("Session name (used for the branch)"))
                     Picker("Mode", selection: $permissionMode) {
-                        Text("Ask before edits").tag("default")
-                        Text("Edit automatically").tag("acceptEdits")
-                        Text("Plan mode").tag("plan")
+                        ForEach(PermissionMode.offered, id: \.self) { Text($0.label).tag($0.rawValue) }
                     }
                 }
 

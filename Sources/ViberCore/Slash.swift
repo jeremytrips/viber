@@ -18,6 +18,7 @@ public enum SlashRouter {
     /// Commands Viber adds on top of the CLI's own list.
     public static let builtins: [SlashCommand] = [
         SlashCommand(name: "plan", description: "Plan first; edit only after you approve"),
+        SlashCommand(name: "auto", description: "Auto mode: Claude handles permissions and blocks risky actions"),
         SlashCommand(name: "model", description: "Switch model", argumentHint: "<model>"),
         SlashCommand(name: "clear", description: "Start a fresh conversation"),
         SlashCommand(name: "resume", description: "Resume a past session"),
@@ -36,7 +37,7 @@ public enum SlashRouter {
         let name = String(parts.first ?? "")
         let rest = parts.count > 1 ? String(parts[1]).trimmingCharacters(in: .whitespaces) : ""
         switch name {
-        case "plan": return .setMode("plan", then: rest.isEmpty ? nil : rest)
+        case "plan", "auto": return .setMode(name, then: rest.isEmpty ? nil : rest)
         case "model": return rest.isEmpty ? .pickModel : .setModel(rest)
         case "clear": return .clear
         case "resume": return .resume

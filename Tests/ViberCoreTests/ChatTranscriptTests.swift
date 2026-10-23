@@ -76,12 +76,55 @@ final class ChatTranscriptTests: XCTestCase {
             "subtype": "can_use_tool", "tool_name": "ExitPlanMode", "input": ["plan": "# Plan\n1. do it"]]])
         XCTAssertEqual(chat.state, .plan)
         let id = chat.items[0].id
-        let out = chat.decidePlan(itemID: id, decision: .approvedAuto)
+        let out = chat.decidePlan(itemID: id, decision: .approved(.acceptEdits))
         XCTAssertEqual(out.count, 2)
         XCTAssertEqual(out[0]["response"]?["response"]?["behavior"]?.string, "allow")
         XCTAssertEqual(out[1]["request"]?["subtype"]?.string, "set_permission_mode")
         XCTAssertEqual(out[1]["request"]?["mode"]?.string, "acceptEdits")
-        XCTAssertEqual(chat.permissionMode, "acceptEdits")
+        XCTAssertEqual(chat.decidePlan(itemID: id, decision: .approved(.auto)), [], "decided once")
+    }
+
+    func testModeFollowsTheCLI() {
+        var chat = ChatTranscript()
+        func notices() -> [String] { chat.items.compactMap { if case .notice(let text, _) = $0.kind { return text } else { return nil } } }
+        chat.apply(["type": "system", "subtype": "init", "session_id": "s", "permissionMode": "default"])
+        XCTAssertEqual(notices(), [], "the starting mode needs no notice")
+
+        // Refused (auto mode is unavailable on some models): the mode stays, the reason shows.
+        let refused = chat.setPermissionMode("auto")["request_id"]!.string!
+        XCTAssertEqual(chat.permissionMode, "default", "waits for the CLI")
+        chat.apply(ChatTranscript.controlError(refused, "Cannot set permission mode to auto: auto mode unavailable for this model"))
+        XCTAssertEqual(chat.permissionMode, "default")
+
+        // Accepted: the reply and the status message agree, and the switch is noted once.
+        let accepted = chat.setPermissionMode("auto")["request_id"]!.string!
+        chat.apply(ChatTranscript.controlSuccess(accepted, ["mode": "auto"]))
+        chat.apply(["type": "system", "subtype": "status", "status": .null, "permissionMode": "auto", "uuid": "u1"])
+        XCTAssertEqual(chat.permissionMode, "auto")
+
+        // The CLI leaves auto mode on its own when the model switches to one without it.
+        chat.apply(["type": "system", "subtype": "status", "status": .null, "permissionMode": "default", "uuid": "u2"])
+        XCTAssertEqual(chat.permissionMode, "default")
+
+        XCTAssertEqual(notices().count, 3, "\(notices())")
+        XCTAssertTrue(notices()[0].contains("auto mode unavailable"))
+        XCTAssertEqual(Array(notices().dropFirst()), [PermissionMode.auto.notice, "Mode: Ask before edits"])
+    }
+
+    func testToolBlockedByAutoMode() {
+        var chat = ChatTranscript()
+        _ = chat.userMessage("go")
+        chat.apply(assistant("m1", [["type": "tool_use", "id": "t1", "name": "Bash", "input": ["command": "ls"]],
+                                    ["type": "tool_use", "id": "t2", "name": "Bash", "input": ["command": "git push --force"]]]))
+        chat.apply(["type": "user", "message": ["role": "user", "content": [
+            ["type": "tool_result", "tool_use_id": "t1", "content": "a.txt", "is_error": false],
+            ["type": "tool_result", "tool_use_id": "t2", "content": "Blocked: force push", "is_error": true]]],
+            "tool_result_meta": [
+                ["id": "t1", "permission_decision": ["decision": "accept", "source": "config", "reason_type": "classifier"]],
+                ["id": "t2", "permission_decision": ["decision": "reject", "source": "config", "reason_type": "classifier"]]]])
+        let calls = chat.items.compactMap { if case .tool(let call) = $0.kind { return call } else { return nil } }
+        XCTAssertEqual(calls.map(\.blockedByAutoMode), [false, true])
+        XCTAssertEqual(calls.last?.result, "Blocked: force push")
     }
 
     func testKeepPlanningDeniesWithFeedback() {

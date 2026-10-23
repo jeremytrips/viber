@@ -499,9 +499,9 @@ private struct ModelTab: View {
                     .labelsHidden().fixedSize()
                 }
                 LabeledContent("Permission mode") {
-                    Menu(AppModel.modeLabel(pane.chat.permissionMode ?? pane.spec.permissionMode)) {
-                        ForEach(["default", "acceptEdits", "plan"], id: \.self) { mode in
-                            Button(AppModel.modeLabel(mode)) { model.submit("", in: pane, mode: mode) }
+                    Menu(PermissionMode.label(for: pane.chat.permissionMode ?? pane.spec.permissionMode)) {
+                        ForEach(PermissionMode.offered, id: \.self) { mode in
+                            Button(mode.label) { model.setMode(mode.rawValue, in: pane) }.help(mode.summary ?? "")
                         }
                     }
                     .fixedSize()

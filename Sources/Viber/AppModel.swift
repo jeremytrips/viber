@@ -209,9 +209,7 @@ final class AppModel {
             guard !message.isEmpty else { return }
             pane.sendUser(message, binDir: binDir, pluginDir: pluginDir)
         case .setMode(let mode, let then):
-            ensureRunning(pane)
-            pane.run { [$0.setPermissionMode(mode)] }
-            pane.chat.note(mode == "plan" ? "Plan mode is on. Claude plans first and edits only after you approve." : "Mode: \(Self.modeLabel(mode))")
+            setMode(mode, in: pane)
             if let then { pane.sendUser(then, binDir: binDir, pluginDir: pluginDir) }
         case .setModel(let model):
             ensureRunning(pane)
@@ -379,6 +377,12 @@ final class AppModel {
 
     private func ensureRunning(_ pane: Pane) {
         if !pane.isRunning { pane.start(binDir: binDir, pluginDir: pluginDir) }
+    }
+
+    /// The chat notes the new mode once the CLI confirms it.
+    func setMode(_ mode: String, in pane: Pane) {
+        ensureRunning(pane)
+        pane.run { [$0.setPermissionMode(mode)] }
     }
 
     /// Ends a session. Worktree removal runs in the background and reports failures.
@@ -628,16 +632,6 @@ final class AppModel {
     }
 
     // MARK: Formatting
-
-    static func modeLabel(_ mode: String?) -> String {
-        switch mode {
-        case "acceptEdits": return "Edit automatically"
-        case "plan": return "Plan mode"
-        case "bypassPermissions": return "Bypass permissions"
-        case "auto": return "Auto"
-        default: return "Ask before edits"
-        }
-    }
 
     static func compact(_ n: Int) -> String {
         n >= 1_000_000 ? String(format: "%.1fM", Double(n) / 1e6) : n >= 1000 ? String(format: "%.1fk", Double(n) / 1000) : "\(n)"

@@ -43,7 +43,7 @@ private struct GeneralSettings: View {
             }
             Section("New sessions") {
                 Picker("Permission mode", selection: $newSessionMode) {
-                    ForEach(["default", "acceptEdits", "plan"], id: \.self) { Text(AppModel.modeLabel($0)).tag($0) }
+                    ForEach(PermissionMode.offered, id: \.self) { Text($0.label).tag($0.rawValue) }
                 }
             }
         }
