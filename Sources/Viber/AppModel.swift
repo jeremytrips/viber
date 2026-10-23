@@ -110,6 +110,8 @@ final class AppModel {
     var waitingCount: Int { panes.filter { $0.state.needsYou }.count + externals.filter { [.input, .plan, .permission].contains($0.state) }.count }
     var profiles: [ClauthStatus.Profile] { status?.profiles ?? [] }
     var defaultProfile: String? { status?.activeProfile }
+    /// The account the top bar shows: the selected chat's, else clauth's default. Nil means the plain `claude` login.
+    var shownProfileName: String? { selectedPane.map { $0.spec.profile } ?? defaultProfile }
 
     /// Folders seen in clauth's session list, most recent first.
     var recentFolders: [String] {
@@ -713,6 +715,10 @@ final class AppModel {
                 if !result.ok {
                     let detail = (result.stderr.isEmpty ? result.stdout : result.stderr).trimmingCharacters(in: .whitespacesAndNewlines)
                     self.errorMessage = "Login for \(profile) failed." + (detail.isEmpty ? "" : "\n\n\(detail)")
+                }
+                // Chats that hit the dead login pick up the new one on a fresh process.
+                if result.ok {
+                    for pane in self.panes where pane.authFailed && pane.spec.profile == profile { self.restart(pane) }
                 }
                 // The daemon picks up the new login on its next pass; check back a few times.
                 self.reloadStatus()
