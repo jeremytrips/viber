@@ -257,4 +257,51 @@ final class LiveCLITests: XCTestCase {
         let reply = chat.items.compactMap { if case .assistant(let t) = $0.kind { return t }; return nil }.joined()
         XCTAssertTrue(reply.uppercased().contains("KUMQUAT"), "reply was: \(reply)")
     }
+
+    /// A background agent: its card runs past the turn that started it, fills with its steps, then gets its report.
+    /// The CLI then starts a turn by itself for Claude to read the report, which shows as working.
+    func testBackgroundAgentCardAgainstRealCLI() throws {
+        let env = ProcessInfo.processInfo.environment
+        try XCTSkipUnless(env["VIBER_LIVE_TEST"] == "1", "set VIBER_LIVE_TEST=1 to run")
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("viber-live-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        for name in ["a.txt", "b.txt"] { try Data().write(to: dir.appendingPathComponent(name)) }
+
+        var chat = ChatTranscript()
+        let process = try ClaudeProcess(spec: LaunchSpec(profile: env["VIBER_LIVE_PROFILE"], cwd: dir.path, model: "haiku"),
+                                        paneID: "live-agent", binDir: nil)
+        let done = expectation(description: "Claude answered after the agent's report")
+        var results = 0, sawRunningAfterTurn = false, sawSelfStartedTurn = false
+        var askers: [String?] = []
+        process.onMessage = { message in
+            for reply in chat.apply(message) { process.send(reply) }
+            for item in chat.items { if case .permission(let p) = item.kind, p.decision == nil,
+                                        let reply = chat.decidePermission(itemID: item.id, allow: true) { askers.append(p.agent); process.send(reply) } }
+            guard let call = chat.items.lazy.compactMap({ if case .tool(let c) = $0.kind, c.agent != nil { return c }; return nil }).first else { return }
+            if results == 1, call.agent?.isRunning == true { sawRunningAfterTurn = true }
+            if results == 1, chat.state == .working { sawSelfStartedTurn = true }
+            if message["type"]?.string == "result" { results += 1; if results == 2 { done.fulfill() } }
+        }
+        process.send(chat.request("initialize"))
+        process.send(chat.userMessage("Use the Agent tool once with subagent_type general-purpose, model haiku, run_in_background true, "
+            + "and the prompt 'Run ls in the current directory, then reply with one sentence naming the files.' Then end your turn. "
+            + "When its result arrives, reply with the single word DONE."))
+        wait(for: [done], timeout: 240)
+        process.terminate()
+
+        let call = try XCTUnwrap(chat.items.lazy.compactMap { if case .tool(let c) = $0.kind, c.agent != nil { return c }; return nil }.first)
+        let run = try XCTUnwrap(call.agent)
+        XCTAssertTrue(run.background)
+        XCTAssertTrue(sawRunningAfterTurn, "the card kept running after the launching turn ended")
+        XCTAssertTrue(sawSelfStartedTurn, "the turn the CLI started for the report showed as working")
+        XCTAssertEqual(run.status, "completed")
+        XCTAssertTrue(call.done)
+        XCTAssertFalse(run.steps.isEmpty, "the agent's own tool calls are on the card")
+        let report = try XCTUnwrap(run.report)
+        XCTAssertTrue(report.contains("a.txt") && report.contains("b.txt"), "report was: \(report)")
+        XCTAssertFalse(report.contains("Async agent launched"))
+        XCTAssertNotNil(run.tokens)
+        XCTAssertTrue(askers.allSatisfy { $0 == "the general-purpose agent" }, "permission cards came from: \(askers)")
+    }
 }

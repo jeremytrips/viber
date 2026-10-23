@@ -75,8 +75,9 @@ final class Pane: Identifiable {
 
     func start(binDir: String?, pluginDir: String?) {
         guard process == nil || process?.isRunning == false else { return }
-        if !started, let resume = spec.resume, chat.items.isEmpty, let data = Self.transcriptData(sessionID: resume, cwd: spec.cwd) {
-            chat.loadHistory(data)
+        if !started, let resume = spec.resume, chat.items.isEmpty, let url = Self.transcriptURL(sessionID: resume, cwd: spec.cwd),
+           let data = try? Data(contentsOf: url) {
+            chat.loadHistory(data, transcript: url)
         }
         started = true
         spec.pluginDir = pluginDir
@@ -191,16 +192,12 @@ final class Pane: Identifiable {
         }
     }
 
-    static func transcriptData(sessionID: String, cwd: String) -> Data? {
-        let direct = ViberPaths.transcript(sessionID: sessionID, cwd: cwd)
-        if let data = try? Data(contentsOf: direct) { return data }
-        // The folder name encoding is the CLI's business; fall back to a search by file name.
+    static func transcriptURL(sessionID: String, cwd: String) -> URL? {
         let fm = FileManager.default
+        let direct = ViberPaths.transcript(sessionID: sessionID, cwd: cwd)
+        if fm.fileExists(atPath: direct.path) { return direct }
+        // The folder name encoding is the CLI's business; fall back to a search by file name.
         guard let dirs = try? fm.contentsOfDirectory(at: Paths.projects, includingPropertiesForKeys: nil) else { return nil }
-        for dir in dirs {
-            let file = dir.appendingPathComponent("\(sessionID).jsonl")
-            if let data = try? Data(contentsOf: file) { return data }
-        }
-        return nil
+        return dirs.map { $0.appendingPathComponent("\(sessionID).jsonl") }.first { fm.fileExists(atPath: $0.path) }
     }
 }

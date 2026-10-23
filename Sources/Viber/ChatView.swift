@@ -219,9 +219,9 @@ struct ChatItemView: View {
         case .assistant(let text):
             MarkdownText(text: text)
         case .thinking(let text):
-            ThinkingRow(text: text)
+            FoldedText(title: "Thinking", icon: "brain", text: text)
         case .tool(let call):
-            ToolRow(call: call)
+            if let run = call.agent { AgentCard(call: call, run: run, pane: pane) } else { ToolRow(call: call) }
         case .permission(let prompt):
             PermissionCard(itemID: item.id, prompt: prompt, pane: pane)
         case .question(let prompt):
@@ -268,8 +268,10 @@ struct ChatItemView: View {
     }
 }
 
-/// Claude's thinking, folded away until opened.
-struct ThinkingRow: View {
+/// Text folded away until opened: Claude's thinking, or the prompt it gave an agent.
+struct FoldedText: View {
+    let title: String
+    let icon: String
     let text: String
     @State private var open = false
 
@@ -277,8 +279,8 @@ struct ThinkingRow: View {
         VStack(alignment: .leading, spacing: 6) {
             Button { withAnimation(.easeOut(duration: 0.12)) { open.toggle() } } label: {
                 HStack(spacing: 6) {
-                    Image(systemName: "brain").font(.caption)
-                    Text("Thinking").font(.callout)
+                    Image(systemName: icon).font(.caption)
+                    Text(title).font(.callout)
                     if !open { Text(text.replacingOccurrences(of: "\n", with: " ")).font(.callout).lineLimit(1).foregroundStyle(.tertiary) }
                     Image(systemName: open ? "chevron.down" : "chevron.right").font(.caption2).foregroundStyle(.tertiary)
                     Spacer(minLength: 0)
@@ -328,6 +330,140 @@ struct ToolRow: View {
                 Text(progress).font(.caption).foregroundStyle(.secondary).lineLimit(1).padding(.leading, 15)
             }
             if open { ToolDetail(call: call).padding(.leading, 15) }
+        }
+    }
+}
+
+/// A subagent's run: what it is doing while it works, then its report. Its prompt and steps fold open below.
+struct AgentCard: View {
+    @Environment(AppModel.self) private var model
+    let call: ToolCall
+    let run: AgentRun
+    let pane: Pane?
+    @State private var showSteps = false
+    @State private var showFullReport = false
+    @State private var reportHeight: CGFloat = 0
+
+    private static let reportPreview: CGFloat = 160
+
+    private var color: Color {
+        switch run.status {
+        case "running", "pending": return .blue
+        case "completed": return .green
+        case "failed": return .red
+        default: return .secondary
+        }
+    }
+
+    private var statusText: String? {
+        switch run.status {
+        case "running", "pending": return run.background ? "In background" : nil
+        case "completed": return nil
+        case "failed": return "Failed"
+        case "unknown": return "No report yet"
+        default: return "Stopped"
+        }
+    }
+
+    private var stats: String {
+        [run.toolUses.map { $0 == 1 ? "1 tool" : "\($0) tools" },
+         run.tokens.map { "\(AppModel.compact($0)) tokens" },
+         run.durationMs.map { AppModel.duration(Double($0) / 1000) }].compactMap { $0 }.joined(separator: " · ")
+    }
+
+    /// What the agent did last, while it runs.
+    private var latest: String? {
+        switch run.steps.last?.kind {
+        case .tool(let step)?: return "\(step.name) \(ToolSummary.summary(name: step.name, input: step.input))"
+        case .assistant(let text)?: return text.split(separator: "\n").first.map(String.init)
+        default: return call.progress
+        }
+    }
+
+    private var stepsLabel: String {
+        let count = run.activity.count
+        return count == 0 ? "Prompt" : "Prompt and \(count == 1 ? "1 step" : "\(count) steps")"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                if run.isRunning { ProgressView().controlSize(.mini) } else { Circle().fill(color).frame(width: 7, height: 7) }
+                Text(run.type ?? "Agent").fontWeight(.semibold)
+                Text(call.input["description"]?.string ?? "").foregroundStyle(.secondary).lineLimit(1)
+                Spacer(minLength: 8)
+                if let statusText { Text(statusText).font(.caption).foregroundStyle(color) }
+                if !stats.isEmpty { Text(stats).font(.caption.monospacedDigit()).foregroundStyle(.secondary) }
+                if run.isRunning, let id = run.taskID, let pane {
+                    Button("Stop") { model.control(pane) { [$0.stopTask(id)] } }
+                        .controlSize(.small)
+                        .disabled(pane.chat.controls.busy.contains("task:\(id)"))
+                        .help("Stop this agent. Claude is told it was stopped.")
+                }
+            }
+            .font(.callout)
+            if run.isRunning, let latest {
+                Text(latest).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.middle)
+            }
+            if let report = run.report, !report.isEmpty {
+                let cut = !showFullReport && reportHeight > Self.reportPreview
+                MarkdownText(text: report)
+                    .foregroundStyle(run.status == "failed" ? Color.red : Color.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .onGeometryChange(for: CGFloat.self, of: \.size.height) { reportHeight = $0 }
+                    .frame(maxHeight: showFullReport ? nil : Self.reportPreview, alignment: .top)
+                    .clipped()
+                    // A cut-off report fades out rather than ending mid-line.
+                    .mask {
+                        VStack(spacing: 0) {
+                            Rectangle()
+                            if cut { LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom).frame(height: 32) }
+                        }
+                    }
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .textBackgroundColor)))
+                if reportHeight > Self.reportPreview { ExpandButton(expanded: $showFullReport) }
+            }
+            Button { withAnimation(.easeOut(duration: 0.12)) { showSteps.toggle() } } label: {
+                HStack(spacing: 6) {
+                    Text(stepsLabel)
+                    Image(systemName: showSteps ? "chevron.down" : "chevron.right").font(.caption2)
+                }
+                .font(.caption).foregroundStyle(.secondary)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if showSteps {
+                VStack(alignment: .leading, spacing: 6) {
+                    if let prompt = call.input["prompt"]?.string { FoldedText(title: "Prompt", icon: "text.bubble", text: prompt) }
+                    ForEach(run.activity) { step in AgentStep(item: step, pane: pane) }
+                }
+                .padding(.leading, 10)
+                .overlay(alignment: .leading) { Rectangle().fill(Color(nsColor: .separatorColor)).frame(width: 2) }
+            }
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .controlBackgroundColor)))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(color.opacity(0.35)))
+    }
+}
+
+/// One thing a subagent did: a tool call (an agent of its own gets its own card) or a message.
+struct AgentStep: View {
+    let item: ChatItem
+    let pane: Pane?
+
+    var body: some View {
+        switch item.kind {
+        case .tool(let call):
+            // AnyView: a card inside a card would otherwise make the view type contain itself.
+            if let run = call.agent { AnyView(AgentCard(call: call, run: run, pane: pane)) } else { ToolRow(call: call) }
+        case .assistant(let text):
+            Text(text).font(.callout).foregroundStyle(.secondary).lineLimit(4).textSelection(.enabled)
+        default:
+            EmptyView()
         }
     }
 }
@@ -483,7 +619,10 @@ struct PermissionCard: View {
                     .font(.system(.callout, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1)
             }
         } else {
-            Card(title: "Allow Claude to use \(prompt.toolName)?", color: .orange) {
+            Card(title: "Allow \(prompt.agent ?? "Claude") to use \(prompt.toolName)?", color: .orange) {
+                if let task = prompt.agentTask {
+                    Label(task, systemImage: "person.2").font(.caption).foregroundStyle(.secondary)
+                }
                 if let description = prompt.description, !description.isEmpty {
                     Text(description).foregroundStyle(.secondary).font(.callout)
                 }
@@ -777,7 +916,9 @@ struct ExternalView: View {
             let path = session.transcriptPath
             let loaded: ChatTranscript = await Task.detached {
                 var chat = ChatTranscript()
-                if let path, let data = try? Data(contentsOf: URL(fileURLWithPath: path)) { chat.loadHistory(data) }
+                if let path, let data = try? Data(contentsOf: URL(fileURLWithPath: path)) {
+                    chat.loadHistory(data, transcript: URL(fileURLWithPath: path))
+                }
                 return chat
             }.value
             history = loaded

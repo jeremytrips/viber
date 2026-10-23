@@ -31,6 +31,8 @@ public struct ToolCall: Equatable, Sendable {
     public var blockedByAutoMode = false
     /// What a running subagent is doing, from `task_progress`.
     public var progress: String?
+    /// For Agent calls: the subagent's run.
+    public var agent: AgentRun?
 
     public init(id: String, name: String, input: JSON, result: String? = nil, isError: Bool = false, done: Bool = false) {
         self.id = id; self.name = name; self.input = input; self.result = result; self.isError = isError; self.done = done
@@ -51,6 +53,9 @@ public struct PermissionPrompt: Equatable, Sendable {
     public var description: String?
     public var suggestions: [JSON]
     public var decision: PromptDecision?
+    /// Who asks when it is a subagent, like "the Explore agent", and what that agent was sent to do.
+    public var agent: String?
+    public var agentTask: String?
 }
 
 public struct Question: Equatable, Sendable {
@@ -191,6 +196,10 @@ public struct ChatTranscript {
     }
 
     private var toolIndex: [String: Int] = [:]
+    /// Subagents' tool calls, by ID, and the Agent call each ran under.
+    private var stepParent: [String: String] = [:]
+    /// A background task ended while Claude was idle, so the CLI is about to start a turn by itself.
+    private var turnExpected = false
     private var pendingRequests: [String: PendingRequest] = [:]
     private var blockCounts: [String: Int] = [:]
     private var seenRows: Set<String> = []
@@ -417,10 +426,89 @@ public struct ChatTranscript {
             }
         }
         // A foreground subagent shows what it is doing on its own tool row.
-        if subtype == "task_progress", let toolUseID = task.toolUseID, let index = toolIndex[toolUseID],
-           case .tool(var call) = items[index].kind {
-            call.progress = [task.lastTool, task.summary].compactMap { $0 }.joined(separator: " · ")
+        if subtype == "task_progress", let toolUseID = task.toolUseID {
+            updateTool(toolUseID) { $0.progress = [task.lastTool, task.summary].compactMap { $0 }.joined(separator: " · ") }
+        }
+        if subtype == "task_notification", [.idle, .finished, .failed].contains(state) { turnExpected = true }
+        // An agent's card follows its run.
+        guard task.type == "local_agent", let toolUseID = task.toolUseID else { return }
+        updateTool(toolUseID) { call in
+            guard var run = call.agent else { return }
+            run.taskID = task.id
+            run.type = task.subagentType ?? run.type
+            run.background = run.background || task.backgrounded
+            if let usage = message["usage"] {
+                run.tokens = usage["total_tokens"]?.int ?? run.tokens
+                run.toolUses = usage["tool_uses"]?.int ?? run.toolUses
+                run.durationMs = usage["duration_ms"]?.int ?? run.durationMs
+            }
+            switch subtype {
+            case "task_updated":
+                if let status = message["patch"]?["status"]?.string { run.status = status }
+            case "task_notification":
+                run.finish(status: task.status, summary: message["summary"]?.string)
+                call.done = !run.isRunning
+            default: break
+            }
+            call.agent = run
+        }
+    }
+
+    /// Changes a tool call wherever it sits: in the chat, or among a subagent's steps.
+    @discardableResult
+    private mutating func updateTool(_ id: String, _ change: (inout ToolCall) -> Void) -> Bool {
+        if let index = toolIndex[id] {
+            guard case .tool(var call) = items[index].kind else { return false }
+            change(&call)
             items[index].kind = .tool(call)
+            return true
+        }
+        guard let parent = stepParent[id] else { return false }
+        var found = false
+        updateTool(parent) { agent in
+            guard let step = agent.agent?.steps.firstIndex(where: { $0.id == "tool:\(id)" }),
+                  case .tool(var call)? = agent.agent?.steps[step].kind else { return }
+            change(&call)
+            agent.agent?.steps[step].kind = .tool(call)
+            found = true
+        }
+        return found
+    }
+
+    /// A tool call wherever it sits.
+    public func findTool(_ id: String) -> ToolCall? {
+        if let index = toolIndex[id] {
+            if case .tool(let call) = items[index].kind { return call }
+            return nil
+        }
+        guard let parent = stepParent[id], let step = findTool(parent)?.agent?.steps.first(where: { $0.id == "tool:\(id)" }),
+              case .tool(let call) = step.kind else { return nil }
+        return call
+    }
+
+    /// Nothing runs on once the process is gone or history ends. An agent still running then gets `unfinished` as its status.
+    static func settle(_ call: inout ToolCall, unfinished: String) {
+        call.done = true
+        guard var run = call.agent else { return }
+        if run.isRunning { run.status = unfinished }
+        for index in run.steps.indices {
+            if case .tool(var step) = run.steps[index].kind {
+                settle(&step, unfinished: unfinished)
+                run.steps[index].kind = .tool(step)
+            }
+        }
+        call.agent = run
+    }
+
+    /// A background task's end as a transcript records it: an agent's card gets its status and report.
+    private mutating func applyNotification(_ note: TaskNotification) {
+        guard let id = note.toolUseID else { return }
+        updateTool(id) { call in
+            guard var run = call.agent else { return }
+            run.taskID = note.taskID
+            run.finish(note)
+            call.agent = run
+            call.done = !run.isRunning
         }
     }
 
@@ -504,7 +592,7 @@ public struct ChatTranscript {
     }
 
     public mutating func clear() {
-        items.removeAll(); toolIndex.removeAll(); streamingText = ""
+        items.removeAll(); toolIndex.removeAll(); stepParent.removeAll(); streamingText = ""
     }
 
     public mutating func processExited(status: Int32) {
@@ -516,9 +604,12 @@ public struct ChatTranscript {
             case .question(var q) where q.decision == nil && q.requestID != nil: q.decision = .cancelled; items[index].kind = .question(q)
             case .plan(var p) where p.decision == nil && p.requestID != nil: p.decision = .cancelled; items[index].kind = .plan(p)
             case .elicitation(var e) where e.decision == nil: e.decision = .cancelled; items[index].kind = .elicitation(e)
+            // Subagents run inside the CLI's process and end with it.
+            case .tool(var call) where call.agent?.isRunning == true: Self.settle(&call, unfinished: "stopped"); items[index].kind = .tool(call)
             default: break
             }
         }
+        turnExpected = false
         if state != .failed { state = .exited }
         if status != 0 { append(.notice("Claude exited with status \(status).", isError: true)) }
     }
@@ -540,23 +631,49 @@ public struct ChatTranscript {
         case "control_request": return applyControlRequest(message)
         case "control_cancel_request": cancelPrompt(requestID: message["request_id"]?.string ?? "")
         case "control_response": return applyControlResponse(message, now: now)
+        case "attachment":
+            // In transcripts, a task notification that came in mid-turn is stored as a queued command.
+            if let prompt = message["attachment"]?["prompt"]?.string, let note = TaskNotification.parse(prompt) { applyNotification(note) }
         default: break
         }
         return []
     }
 
     /// Rebuild the chat from a transcript file so resumed sessions show their history.
-    public mutating func loadHistory(_ data: Data) {
+    /// `transcript` is the file the data came from: subagents' own transcripts sit beside it.
+    public mutating func loadHistory(_ data: Data, transcript: URL? = nil) {
         for line in data.split(separator: 10) {
             guard let row = JSON(data: Data(line)) else { continue }
             if row["isSidechain"]?.bool == true || row["isMeta"]?.bool == true { continue }
             apply(row, history: true)
         }
+        if let transcript { loadSubagents(transcript.deletingPathExtension().appendingPathComponent("subagents")) }
         for index in items.indices {
-            if case .tool(var call) = items[index].kind, !call.done { call.done = true; items[index].kind = .tool(call) }
+            if case .tool(var call) = items[index].kind { Self.settle(&call, unfinished: "unknown"); items[index].kind = .tool(call) }
         }
         streamingText = ""
         state = .idle
+    }
+
+    /// Each `agent-<id>.jsonl` holds what one subagent did; its `.meta.json` names the Agent call.
+    /// Outer agents go first, so agents they started find their call.
+    private mutating func loadSubagents(_ dir: URL) {
+        let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        let runs = files.filter { $0.lastPathComponent.hasSuffix(".meta.json") }
+            .compactMap { url -> (url: URL, meta: JSON)? in
+                guard let data = try? Data(contentsOf: url), let meta = JSON(data: data) else { return nil }
+                return (url, meta)
+            }
+            .sorted { ($0.meta["spawnDepth"]?.int ?? 1) < ($1.meta["spawnDepth"]?.int ?? 1) }
+        for run in runs {
+            let name = run.url.lastPathComponent.replacingOccurrences(of: ".meta.json", with: ".jsonl")
+            guard let toolUseID = run.meta["toolUseId"]?.string, findTool(toolUseID)?.agent != nil,
+                  let data = try? Data(contentsOf: dir.appendingPathComponent(name)) else { continue }
+            for line in data.split(separator: 10) {
+                guard let row = JSON(data: Data(line)), row["isMeta"]?.bool != true else { continue }
+                apply(row.setting("parent_tool_use_id", .string(toolUseID)), history: true)
+            }
+        }
     }
 
     private mutating func applySystem(_ message: JSON) {
@@ -572,6 +689,14 @@ public struct ChatTranscript {
             // The CLI announces every mode change here, including ones it makes itself,
             // like leaving auto mode when the model switches to one without it.
             applyMode(message["permissionMode"]?.string)
+            // The turn the CLI starts by itself to hand Claude a background task's result shows as working too.
+            if message["status"]?.string == "requesting" {
+                if turnExpected, [.idle, .finished, .failed].contains(state) {
+                    state = .working
+                    turnStartedByUser = false
+                }
+                turnExpected = false
+            }
         case "commands_changed":
             // Plugin and MCP commands that finished loading after initialize.
             if let list = message["commands"] { commands = Self.commands(list) }
@@ -595,7 +720,7 @@ public struct ChatTranscript {
     private mutating func applyAssistant(_ message: JSON, now: Date) {
         guard let body = message["message"] else { return }
         let messageID = body["id"]?.string ?? UUID().uuidString
-        if message["parent_tool_use_id"]?.string != nil { return } // subagent traffic stays inside its Task row
+        if let parent = message["parent_tool_use_id"]?.string { return applyAgentAssistant(body, messageID: messageID, parent: parent) }
         for block in body["content"]?.array ?? [] {
             let n = blockCounts[messageID, default: 0]
             blockCounts[messageID] = n + 1
@@ -614,10 +739,10 @@ public struct ChatTranscript {
                 }
             case "tool_use":
                 let id = block["id"]?.string ?? "\(messageID):\(n)"
-                let call = ToolCall(id: id, name: block["name"]?.string ?? "Tool", input: block["input"] ?? .null)
+                var call = Self.newToolCall(id: id, block)
                 streamingText = ""
                 if let existing = toolIndex[id] {
-                    if case .tool = items[existing].kind { items[existing].kind = .tool(call) }
+                    if case .tool(let old) = items[existing].kind { call.agent = old.agent ?? call.agent; items[existing].kind = .tool(call) }
                 } else if call.name == "ExitPlanMode" {
                     append(.plan(PlanPrompt(requestID: nil, input: call.input, plan: call.input["plan"]?.string ?? "")), id: "tool:\(id)")
                     toolIndex[id] = items.count - 1
@@ -636,6 +761,39 @@ public struct ChatTranscript {
         if let usage = body["usage"], body["model"]?.string != "<synthetic>" {
             applyUsage(usage, messageID: messageID, now: now)
         }
+    }
+
+    /// A subagent's message goes into its Agent call's steps. It never changes the session's own state or usage.
+    private mutating func applyAgentAssistant(_ body: JSON, messageID: String, parent: String) {
+        for block in body["content"]?.array ?? [] {
+            let n = blockCounts[messageID, default: 0]
+            blockCounts[messageID] = n + 1
+            let step: ChatItem
+            switch block["type"]?.string {
+            case "text":
+                let text = block["text"]?.string ?? ""
+                guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+                step = ChatItem(id: "a:\(messageID):\(n)", kind: .assistant(text))
+            case "tool_use":
+                let id = block["id"]?.string ?? "\(messageID):\(n)"
+                step = ChatItem(id: "tool:\(id)", kind: .tool(Self.newToolCall(id: id, block)))
+                stepParent[id] = parent
+            default: continue
+            }
+            updateTool(parent) { call in
+                guard let steps = call.agent?.steps, !steps.contains(where: { $0.id == step.id }) else { return }
+                call.agent?.steps.append(step)
+            }
+        }
+    }
+
+    /// A call from a `tool_use` block. Agent calls get a run to follow.
+    static func newToolCall(id: String, _ block: JSON) -> ToolCall {
+        var call = ToolCall(id: id, name: block["name"]?.string ?? "Tool", input: block["input"] ?? .null)
+        if AgentRun.toolNames.contains(call.name) {
+            call.agent = AgentRun(type: call.input["subagent_type"]?.string, background: call.input["run_in_background"]?.bool == true)
+        }
+        return call
     }
 
     private mutating func applyUsage(_ usage: JSON, messageID: String, now: Date) {
@@ -658,9 +816,17 @@ public struct ChatTranscript {
 
     private mutating func applyUser(_ message: JSON, history: Bool) {
         guard let body = message["message"] else { return }
-        if message["parent_tool_use_id"]?.string != nil { return }
+        if message["parent_tool_use_id"]?.string != nil {
+            // A subagent's tool results. Its prompt is already on the Agent call.
+            for block in body["content"]?.array ?? [] where block["type"]?.string == "tool_result" {
+                if let id = block["tool_use_id"]?.string { applyToolResult(id, block: block, message: message) }
+            }
+            return
+        }
         if message["isReplay"]?.bool == true {
-            if let uuid = message["uuid"]?.string { matchEcho(uuid: uuid, text: Self.userText(body["content"])) }
+            let text = Self.userText(body["content"])
+            if let note = TaskNotification.parse(text) { return applyNotification(note) }
+            if let uuid = message["uuid"]?.string { matchEcho(uuid: uuid, text: text) }
             return
         }
         let before = items.count
@@ -680,20 +846,32 @@ public struct ChatTranscript {
         for block in blocks {
             switch block["type"]?.string {
             case "tool_result":
-                guard let id = block["tool_use_id"]?.string, let index = toolIndex[id] else { continue }
-                if case .tool(var call) = items[index].kind {
-                    call.result = Self.resultText(block["content"])
-                    call.isError = block["is_error"]?.bool ?? false
-                    call.done = true
-                    call.blockedByAutoMode = Self.blockedByAutoMode(id, meta: message["tool_result_meta"])
-                    items[index].kind = .tool(call)
-                    if !call.isError { applyTaskListResult(call, result: message["tool_use_result"] ?? message["toolUseResult"]) }
-                }
+                if let id = block["tool_use_id"]?.string { applyToolResult(id, block: block, message: message) }
             case "text":
                 if history, let text = block["text"]?.string { appendUserText(text) }
             default: break
             }
         }
+    }
+
+    private mutating func applyToolResult(_ id: String, block: JSON, message: JSON) {
+        let meta = message["tool_use_result"] ?? message["toolUseResult"]
+        var finished: ToolCall?
+        updateTool(id) { call in
+            call.result = Self.resultText(block["content"])
+            call.isError = block["is_error"]?.bool ?? false
+            call.done = true
+            call.blockedByAutoMode = Self.blockedByAutoMode(id, meta: message["tool_result_meta"])
+            if var run = call.agent {
+                // A background agent's call returns as soon as it starts; the run goes on.
+                run.applyResult(meta, text: call.result ?? "", isError: call.isError)
+                call.done = !run.isRunning
+                call.agent = run
+            }
+            finished = call
+        }
+        // Claude's checklist follows its own task list tools, not a subagent's.
+        if let call = finished, !call.isError, toolIndex[id] != nil { applyTaskListResult(call, result: meta) }
     }
 
     /// Pairs an echoed message with the item it was sent as. Messages the CLI never echoes are skipped, not mismatched.
@@ -743,6 +921,8 @@ public struct ChatTranscript {
             return
         }
         if raw.hasPrefix("<local-command") || raw.hasPrefix("<system-reminder>") || raw.hasPrefix("Caveat:") { return }
+        // The CLI wrote this for Claude, not the user. An agent's report goes on its card; other tasks stay out of the chat, as live.
+        if let note = TaskNotification.parse(raw) { return applyNotification(note) }
         if let relayed = Relay.parseEnvelope(raw) {
             append(.received(from: relayed.from, text: relayed.text))
             return
@@ -811,9 +991,14 @@ public struct ChatTranscript {
             if let existing { items[existing].kind = .plan(prompt) } else { append(.plan(prompt), id: "p:\(requestID)") }
             state = .plan
         default:
-            let prompt = PermissionPrompt(requestID: requestID, toolName: toolName, input: input, toolUseID: toolUseID,
+            var prompt = PermissionPrompt(requestID: requestID, toolName: toolName, input: input, toolUseID: toolUseID,
                                           description: request["description"]?.string ?? request["decision_reason"]?.string,
                                           suggestions: request["permission_suggestions"]?.array ?? [])
+            if let agentID = request["agent_id"]?.string {
+                let task = controls.tasks.first { $0.id == agentID }
+                prompt.agent = task?.subagentType.map { "the \($0) agent" } ?? "a subagent"
+                prompt.agentTask = task?.toolUseID.flatMap { findTool($0)?.input["description"]?.string }
+            }
             append(.permission(prompt), id: "perm:\(requestID)")
             state = .permission
         }
