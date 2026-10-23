@@ -14,6 +14,8 @@ public struct ClauthStatus: Decodable, Equatable {
         public var tier: String?
         public var authStatus: String?
         public var stale: Bool?
+        /// The daemon's last usage fetch: "Fresh", "Failed", or nil before the first one.
+        public var fetchStatus: String?
         public var fetchedAt: String?
         public var windows: [Window]?
         public var id: String { name }

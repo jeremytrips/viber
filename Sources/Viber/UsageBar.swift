@@ -11,7 +11,8 @@ struct UsageBar: View {
                 Text(model.statusNote ?? "Loading usage…").font(.caption).foregroundStyle(.secondary)
             }
             ForEach(model.profiles) { profile in
-                ProfileUsage(profile: profile, active: profile.name == model.status?.activeProfile, now: model.now)
+                ProfileUsage(profile: profile, active: profile.name == model.status?.activeProfile, now: model.now,
+                             loggingIn: model.loggingIn.contains(profile.name)) { model.login(profile.name) }
             }
             if let note = model.statusNote, !model.profiles.isEmpty {
                 Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange).help(note)
@@ -24,6 +25,8 @@ struct ProfileUsage: View {
     let profile: ClauthStatus.Profile
     let active: Bool
     let now: Date
+    let loggingIn: Bool
+    let login: () -> Void
 
     private var windows: [ClauthStatus.Window] {
         let all = profile.windows ?? []
@@ -32,16 +35,38 @@ struct ProfileUsage: View {
     }
 
     var body: some View {
+        // A broken login makes the whole chip a button that starts the browser sign-in.
+        Button { if profile.loginProblem != nil, !loggingIn { login() } } label: { chip }
+            .buttonStyle(.plain)
+            .contextMenu {
+                Button(loggingIn ? "Waiting for browser sign-in…" : "Log In Again…", action: login).disabled(loggingIn)
+            }
+    }
+
+    private var chip: some View {
         HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 0) {
                 Text(profile.name).font(.caption.weight(.semibold))
                 Text(profile.tier ?? "").font(.caption2).foregroundStyle(.secondary)
             }
-            if let problem = profile.loginProblem {
-                Text(problem).font(.caption2).foregroundStyle(.red)
-                    .help("Run: clauth login \(profile.name)")
+            if loggingIn {
+                HStack(spacing: 4) {
+                    ProgressView().controlSize(.mini)
+                    Text("Finish in browser…").font(.caption2).foregroundStyle(.secondary)
+                }
+            } else if let problem = profile.loginProblem {
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(problem).font(.caption2).foregroundStyle(.red)
+                    Text("Click to log in").font(.caption2).foregroundStyle(Color.accentColor)
+                }
             } else if windows.isEmpty {
-                Text("No usage yet").font(.caption2).foregroundStyle(.secondary)
+                if profile.fetchStatus == "Failed" {
+                    Text("Usage unavailable").font(.caption2).foregroundStyle(.orange)
+                } else if profile.fetchStatus == nil {
+                    Text("Fetching usage…").font(.caption2).foregroundStyle(.secondary)
+                } else {
+                    Text("No usage yet").font(.caption2).foregroundStyle(.secondary)
+                }
             } else {
                 ForEach(windows, id: \.label) { window in
                     Meter(window: window, now: now)
@@ -51,8 +76,16 @@ struct ProfileUsage: View {
         .padding(.horizontal, 8).padding(.vertical, 3)
         .background(RoundedRectangle(cornerRadius: 6).fill(active ? Color.accentColor.opacity(0.1) : Color.clear))
         .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(active ? Color.accentColor.opacity(0.5) : Color(nsColor: .separatorColor)))
+        .contentShape(Rectangle())
         .opacity(profile.stale == true ? 0.75 : 1)
-        .help(profile.stale == true ? "\(profile.name): usage data is stale" : profile.name + (active ? " (active)" : ""))
+        .help(helpText)
+    }
+
+    private var helpText: String {
+        if profile.loginProblem != nil { return "\(profile.name): click to log in again in your browser" }
+        if profile.fetchStatus == "Failed" { return "\(profile.name): clauth could not fetch usage for this account" }
+        if profile.stale == true { return "\(profile.name): usage data is stale" }
+        return profile.name + (active ? " (active)" : "")
     }
 }
 

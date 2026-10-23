@@ -128,6 +128,38 @@ final class WorktreeTests: XCTestCase {
         let second = try Worktree.create(repoDir: repo.path, name: "Login screen")
         XCTAssertEqual(second.branch, "viber/login-screen-2", "names never collide with a kept branch")
     }
+
+    func testCreateRepo() throws {
+        let dir = try plainFolder()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try Worktree.createRepo(dir.path)
+        XCTAssertEqual(try String(contentsOf: dir.appendingPathComponent("README.md"), encoding: .utf8),
+                       "# \(dir.lastPathComponent)\n")
+        XCTAssertNotNil(Worktree.repoRoot(dir.path))
+        XCTAssertTrue(Shell.run("git", ["-C", dir.path, "status", "--porcelain"]).output.isEmpty, "the README is committed")
+        XCTAssertNoThrow(try Worktree.create(repoDir: dir.path, name: "First"), "worktrees have a commit to start from")
+    }
+
+    func testCreateRepoKeepsReadme() throws {
+        let dir = try plainFolder()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try "Mine\n".write(to: dir.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        try "x\n".write(to: dir.appendingPathComponent("other.txt"), atomically: true, encoding: .utf8)
+        try Worktree.createRepo(dir.path)
+        XCTAssertEqual(try String(contentsOf: dir.appendingPathComponent("README.md"), encoding: .utf8), "Mine\n")
+        XCTAssertEqual(Shell.run("git", ["-C", dir.path, "status", "--porcelain"]).output, "?? other.txt", "only the README is committed")
+    }
+
+    /// A folder outside any repository. It is initialized up front only to give it a commit identity;
+    /// `createRepo` running `git init` again is harmless.
+    private func plainFolder() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("My Project-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        for args in [["init", "-q", "-b", "main"], ["config", "user.email", "t@t"], ["config", "user.name", "t"]] {
+            XCTAssertTrue(Shell.run("git", ["-C", dir.path] + args).ok)
+        }
+        return dir
+    }
 }
 
 final class RequestTests: XCTestCase {

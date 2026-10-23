@@ -98,6 +98,9 @@ struct PaneHeader: View {
             Button { model.openSettings(.model, in: pane) } label: { Image(systemName: "slider.horizontal.3") }
                 .help("Session settings: MCP, context, permissions, hooks, model (⌥⌘,)")
             Button("Open in VS Code") { model.openInVSCode(pane.cwd) }
+            if pane.authFailed {
+                Button("Restart Claude") { model.restart(pane) }.help("Restart with the new login, keeping this conversation")
+            }
         }
         .padding(.horizontal, 18).padding(.vertical, 10)
     }
@@ -274,7 +277,7 @@ struct ChatItemView: View {
         case .sent(let to, let text, let status):
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Image(systemName: "arrow.up.right").foregroundStyle(Color.accentColor)
-                Text(status == .queued ? "Queued for \(to)" : "Sent to \(to)").fontWeight(.medium)
+                Text("Sent to \(to)").fontWeight(.medium)
                 Text(text).foregroundStyle(.secondary).lineLimit(2)
                 Text("· \(status.label)").foregroundStyle(.tertiary)
             }

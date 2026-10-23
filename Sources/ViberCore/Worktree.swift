@@ -25,6 +25,21 @@ public enum Worktree {
         return r.ok ? r.output : nil
     }
 
+    /// Makes `dir` a git repository whose first commit is a README titled after the folder,
+    /// so worktrees have a branch to start from. Only the README is committed; an existing one is kept as is.
+    public static func createRepo(_ dir: String) throws {
+        func check(_ r: ShellResult, _ step: String) throws {
+            guard r.ok else { throw WorktreeError(message: "\(step) failed: \(r.stderr.trimmingCharacters(in: .whitespacesAndNewlines))") }
+        }
+        try check(Shell.run("git", ["-C", dir, "init", "-q"]), "git init")
+        let readme = URL(fileURLWithPath: dir).appendingPathComponent("README.md")
+        if !FileManager.default.fileExists(atPath: readme.path) {
+            try "# \(URL(fileURLWithPath: dir).lastPathComponent)\n".write(to: readme, atomically: true, encoding: .utf8)
+        }
+        try check(Shell.run("git", ["-C", dir, "add", "README.md"]), "git add")
+        try check(Shell.run("git", ["-C", dir, "commit", "-q", "-m", "Initial commit"]), "git commit")
+    }
+
     /// Creates `<repo>/.claude/worktrees/<slug>` on a new `viber/<slug>` branch from the current branch.
     public static func create(repoDir: String, name: String) throws -> WorktreeInfo {
         guard let root = repoRoot(repoDir) else { throw WorktreeError(message: "\(repoDir) is not inside a git repository.") }

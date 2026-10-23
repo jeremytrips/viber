@@ -61,6 +61,8 @@ struct NewSessionSheet: View {
     @State private var profile: String?
     @State private var useWorktree = false
     @State private var repoRoot: String?
+    @State private var creatingRepo = false
+    @State private var repoError: String?
     @State private var name = ""
     @State private var permissionMode = "auto"
     @State private var firstMessage = ""
@@ -92,13 +94,21 @@ struct NewSessionSheet: View {
                 }
 
                 Section {
-                    Toggle(isOn: $useWorktree) {
-                        Text("Run in a new git worktree")
-                        Text(repoRoot == nil && !folder.isEmpty
-                             ? "This folder is not in a git repository."
-                             : "Creates .claude/worktrees/<name> on branch viber/<name>, so parallel sessions don't collide")
+                    if repoRoot == nil && !folder.isEmpty {
+                        LabeledContent {
+                            Button("Create One", action: createRepo)
+                                .disabled(creatingRepo)
+                        } label: {
+                            Text("Run in a new git worktree")
+                            worktreeNote("This folder is not in a git repository.")
+                        }
+                    } else {
+                        Toggle(isOn: $useWorktree) {
+                            Text("Run in a new git worktree")
+                            worktreeNote("Creates .claude/worktrees/<name> on branch viber/<name>, so parallel sessions don't collide")
+                        }
+                        .disabled(repoRoot == nil)
                     }
-                    .disabled(repoRoot == nil)
                     TextField("Name", text: $name, prompt: Text("Session name (used for the branch)"))
                     Picker("Mode", selection: $permissionMode) {
                         ForEach(PermissionMode.offered, id: \.self) { Text($0.label).tag($0.rawValue) }
@@ -139,8 +149,15 @@ struct NewSessionSheet: View {
         permissionMode = Prefs.string(Prefs.newSessionMode)
     }
 
+    /// The worktree row's subtitle, or the error from creating a repository.
+    private func worktreeNote(_ text: String) -> Text {
+        guard let repoError else { return Text(text) }
+        return Text(repoError).foregroundStyle(.red)
+    }
+
     private func checkRepo() async {
         let dir = folder
+        repoError = nil
         guard !dir.isEmpty else { repoRoot = nil; useWorktree = false; return }
         let root = await Task.detached { Worktree.repoRoot(dir) }.value
         guard !Task.isCancelled, dir == folder else { return }
@@ -150,6 +167,18 @@ struct NewSessionSheet: View {
         useWorktree = model.panes.contains { pane in
             let paneRepo = pane.worktree?.repo ?? pane.spec.cwd
             return paneRepo == root || paneRepo.hasPrefix(root + "/") || paneRepo == dir
+        }
+    }
+
+    /// `git init` plus a first commit (a README titled after the folder), so the worktree option works right away.
+    private func createRepo() {
+        let dir = folder
+        creatingRepo = true
+        Task {
+            let result = await Task.detached { Result { try Worktree.createRepo(dir) } }.value
+            await checkRepo()
+            if case .failure(let error) = result, dir == folder { repoError = error.localizedDescription }
+            creatingRepo = false
         }
     }
 

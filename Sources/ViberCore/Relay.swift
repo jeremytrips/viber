@@ -34,7 +34,7 @@ public enum RelayStatus: Equatable, Sendable {
 
     public var label: String {
         switch self {
-        case .queued: return "delivered when its reply ends"
+        case .queued: return "not read yet"
         case .delivered: return "waiting for reply"
         case .replied: return "replied"
         case .noReply: return "no reply"

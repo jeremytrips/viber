@@ -50,6 +50,8 @@ final class AppModel {
     var selection: Target?
     var status: ClauthStatus?
     var statusNote: String?
+    /// clauth profiles with a browser login in flight.
+    var loggingIn: Set<String> = []
     var externals: [Session] = []
     var recent: [ClauthSession] = []
     var now = Date()
@@ -175,6 +177,12 @@ final class AppModel {
         open(title: session.title, spec: LaunchSpec(profile: profile, cwd: folder, resume: session.id), worktree: nil, firstMessage: "")
     }
 
+    /// Restart a session's Claude process, keeping the conversation (e.g. after logging in again).
+    func restart(_ pane: Pane) {
+        pane.restart(binDir: binDir, pluginDir: pluginDir)
+        pane.chat.note("Restarted Claude.")
+    }
+
     func continueHere(_ session: Session) {
         if let existing = panes.first(where: { $0.spec.resume == session.id || $0.chat.sessionID == session.id }) {
             select(.pane(existing.id)); return
@@ -201,6 +209,7 @@ final class AppModel {
     private func wire(_ pane: Pane) {
         pane.onStateChange = { [weak self] pane, previous in self?.stateChanged(pane, from: previous) }
         pane.onTurnFinished = { [weak self] pane in self?.turnFinished(pane) }
+        pane.onRelayUpdate = { [weak self] pane, update in self?.relayUpdate(update, in: pane) }
         pane.onOpenURL = { NSWorkspace.shared.open($0) }
         pane.onPersist = { [weak self] in self?.save() }
     }
@@ -368,41 +377,39 @@ final class AppModel {
             }
     }
 
-    /// Sends `text` from one session to another, now if the target is free, else when its turn ends.
+    /// Sends `text` from one session to another right away. A busy target reads it after its running tool call.
     func relay(_ text: String, from source: Pane, to targetID: String) {
         let message = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !message.isEmpty, let target = pane(targetID) else { return }
-        let queued = !target.canReceiveNow || !target.inbox.isEmpty
-        let sentID = source.chat.recordSent(to: target.title, text: message, queued: queued)
-        let incoming = IncomingRelay(sourcePaneID: source.id, sourceTitle: source.title, sentItemID: sentID, text: message)
-        if queued { target.inbox.append(incoming) } else { deliver(incoming, to: target) }
+        let sentID = source.chat.recordSent(to: target.title, text: message)
+        target.deliver(IncomingRelay(sourcePaneID: source.id, sourceTitle: source.title, sentItemID: sentID, text: message),
+                       binDir: binDir, pluginDir: pluginDir)
     }
 
-    private func deliver(_ relay: IncomingRelay, to target: Pane) {
-        target.deliver(relay, binDir: binDir, pluginDir: pluginDir)
-        if let sent = relay.sentItemID { pane(relay.sourcePaneID)?.chat.setSentStatus(itemID: sent, .delivered) }
-    }
-
-    /// When a session finishes answering a `//` message, post what it said back to the sender.
-    private func returnReply(from target: Pane) {
-        guard let answering = target.answering else { return }
-        target.answering = nil
-        let text = target.chat.assistantText(after: answering.itemID).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let source = pane(answering.relay.sourcePaneID) else { return }
-        if let sent = answering.relay.sentItemID { source.chat.setSentStatus(itemID: sent, text.isEmpty ? .noReply : .replied) }
-        guard !text.isEmpty else { return }
-        let reply = IncomingRelay(sourcePaneID: target.id, sourceTitle: target.title, sentItemID: nil, text: text, isReply: true)
-        if source.canReceiveNow && source.inbox.isEmpty { deliver(reply, to: source) } else { source.inbox.append(reply) }
-        if !(NSApp.isActive && selection == .pane(source.id)) {
-            notifier.post(id: "reply:\(target.id):\(answering.itemID)", title: "\(source.title) · reply from \(target.title)",
-                          body: String(text.prefix(180)), target: Target.pane(source.id).key, sound: false)
+    /// The target's Claude read a `//` message, or answered it.
+    private func relayUpdate(_ update: RelayUpdate, in target: Pane) {
+        switch update {
+        case .read(let item):
+            guard let relay = target.answering[item], let sent = relay.sentItemID else { return }
+            pane(relay.sourcePaneID)?.chat.setSentStatus(itemID: sent, .delivered)
+        case .answered(let item, let text):
+            guard let relay = target.answering.removeValue(forKey: item) else { return }
+            returnReply(relay, from: target, text: text)
         }
     }
 
-    /// One queued message per turn, so each gets its own reply.
-    private func flushInbox(_ pane: Pane) {
-        guard pane.canReceiveNow, !pane.inbox.isEmpty else { return }
-        deliver(pane.inbox.removeFirst(), to: pane)
+    /// Posts what a session said in answer to a `//` message back to the sender, right away.
+    private func returnReply(_ relay: IncomingRelay, from target: Pane, text: String) {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let source = pane(relay.sourcePaneID) else { return }
+        if let sent = relay.sentItemID { source.chat.setSentStatus(itemID: sent, text.isEmpty ? .noReply : .replied) }
+        guard !text.isEmpty else { return }
+        source.deliver(IncomingRelay(sourcePaneID: target.id, sourceTitle: target.title, sentItemID: nil, text: text, isReply: true),
+                       binDir: binDir, pluginDir: pluginDir)
+        if !(NSApp.isActive && selection == .pane(source.id)) {
+            notifier.post(id: "reply:\(UUID().uuidString)", title: "\(source.title) · reply from \(target.title)",
+                          body: String(text.prefix(180)), target: Target.pane(source.id).key, sound: false)
+        }
     }
 
     // MARK: Ideas
@@ -512,12 +519,6 @@ final class AppModel {
     private func stateChanged(_ pane: Pane, from previous: PaneState) {
         updateBadge()
         let state = pane.state
-        // A session that just finished starting (or stopped) can take queued `//` messages.
-        // A session that stopped mid-answer still owes the sender a status.
-        if state == .exited, pane.answering != nil { returnReply(from: pane) }
-        if [.idle, .exited].contains(state), !pane.inbox.isEmpty {
-            DispatchQueue.main.async { [weak self] in self?.flushInbox(pane) }
-        }
         let target = Target.pane(pane.id)
         let focused = NSApp.isActive && selection == target
         if focused || !Self.notifies(state) { return }
@@ -545,7 +546,6 @@ final class AppModel {
     }
 
     private func turnFinished(_ pane: Pane) {
-        returnReply(from: pane)
         if let request = pane.pendingClose {
             pane.pendingClose = nil
             close(pane, removeWorktree: request.removeWorktree, deleteBranch: request.deleteBranch)
@@ -553,7 +553,6 @@ final class AppModel {
         }
         refreshDiff(pane)
         save()
-        flushInbox(pane)
     }
 
     func refreshDiff(_ pane: Pane) {
@@ -647,24 +646,77 @@ final class AppModel {
         }
     }
 
+    /// Usage comes from `clauth daemon`, the only clauth process that fetches it; `clauth status`
+    /// just reads the daemon's cache. So when the daemon's snapshot goes stale, start the daemon.
     func reloadStatus() {
+        let path = ViberPaths.clauthStatus
+        // The daemon rewrites its snapshot every refresh (90s by default).
+        let fresh = (try? path.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+            .map { Date().timeIntervalSince($0) < 300 } ?? false
+        let starting = !fresh && startDaemon()
         Task.detached {
             var status: ClauthStatus?
             var note: String?
-            let path = ViberPaths.clauthStatus
-            let fresh = (try? path.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-                .map { Date().timeIntervalSince($0) < 600 } ?? false
             if fresh, let data = try? Data(contentsOf: path) { status = ClauthStatus.decode(data) }
             if status == nil {
                 let result = Shell.run("clauth", ["status", "--json"])
                 status = result.ok ? ClauthStatus.decode(Data(result.stdout.utf8)) : nil
-                if status != nil, !fresh { note = "clauth daemon is not running, so usage may be stale. Start it with: clauth daemon" }
                 if status == nil { note = result.status == 127 ? "clauth not found" : "clauth status failed" }
+                else if !starting { note = "The clauth daemon is not running, so usage and login states are out of date. Check ~/.clauth/daemon.log." }
             }
             let loaded = status, message = note
             await MainActor.run {
                 if let loaded { self.status = loaded }
                 self.statusNote = message
+            }
+        }
+        // The daemon writes its first snapshot within a second or two.
+        if starting { reloadStatus(after: 3) }
+    }
+
+    private func reloadStatus(after seconds: Double) {
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(seconds))
+            self.reloadStatus()
+        }
+    }
+
+    @ObservationIgnored private var daemonStartedAt: Date?
+
+    /// Launch `clauth daemon` in the background; it exits at once if one is already running, and keeps
+    /// running after Viber quits. Returns false when it was tried too recently or could not start.
+    private func startDaemon() -> Bool {
+        if let last = daemonStartedAt, Date().timeIntervalSince(last) < 120 { return false }
+        daemonStartedAt = Date()
+        guard let tool = Executables.find("clauth") else { return false }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: tool)
+        process.arguments = ["daemon"]
+        process.environment = Executables.environment()
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        // clauth caps daemon.log's size only when stderr is opened for appending.
+        let log = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".clauth/daemon.log").path
+        let fd = Darwin.open(log, O_WRONLY | O_CREAT | O_APPEND, 0o600)
+        process.standardError = fd >= 0 ? FileHandle(fileDescriptor: fd, closeOnDealloc: true) : FileHandle.nullDevice
+        return (try? process.run()) != nil
+    }
+
+    /// Re-authenticate a clauth profile. clauth opens the browser itself and waits for the redirect,
+    /// so this finishes once the user completes (or abandons) the sign-in there.
+    func login(_ profile: String) {
+        guard loggingIn.insert(profile).inserted else { return }
+        Task.detached {
+            let result = Shell.run("clauth", ["login", profile])
+            await MainActor.run {
+                self.loggingIn.remove(profile)
+                if !result.ok {
+                    let detail = (result.stderr.isEmpty ? result.stdout : result.stderr).trimmingCharacters(in: .whitespacesAndNewlines)
+                    self.errorMessage = "Login for \(profile) failed." + (detail.isEmpty ? "" : "\n\n\(detail)")
+                }
+                // The daemon picks up the new login on its next pass; check back a few times.
+                self.reloadStatus()
+                for delay in [5.0, 15, 45] { self.reloadStatus(after: delay) }
             }
         }
     }
