@@ -1,1 +1,0 @@
-print("Viber app placeholder")

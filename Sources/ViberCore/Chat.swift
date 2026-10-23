@@ -27,6 +27,10 @@ public struct ToolCall: Equatable, Sendable {
     public var result: String?
     public var isError = false
     public var done = false
+
+    public init(id: String, name: String, input: JSON, result: String? = nil, isError: Bool = false, done: Bool = false) {
+        self.id = id; self.name = name; self.input = input; self.result = result; self.isError = isError; self.done = done
+    }
 }
 
 public enum PromptDecision: String, Equatable, Sendable {

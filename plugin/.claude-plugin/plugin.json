@@ -1,0 +1,5 @@
+{
+  "name": "viber",
+  "description": "Skills for Claude Code sessions run by the Viber macOS app: clean up merged worktrees, ship a PR, sync with the base branch, and write handoff notes.",
+  "version": "0.1.0"
+}
