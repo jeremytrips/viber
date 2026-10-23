@@ -54,6 +54,8 @@ final class AppModel {
     var selection: Target?
     var status: ClauthStatus?
     var statusNote: String?
+    /// clauth profiles with a browser login in flight.
+    var loggingIn: Set<String> = []
     var externals: [Session] = []
     var recent: [ClauthSession] = []
     var now = Date()
@@ -178,6 +180,12 @@ final class AppModel {
         }
         guard let folder = session.workspace else { errorMessage = "This session has no recorded folder."; return }
         open(title: session.title, spec: LaunchSpec(profile: profile, cwd: folder, resume: session.id), worktree: nil, firstMessage: "")
+    }
+
+    /// Restart a session's Claude process, keeping the conversation (e.g. after logging in again).
+    func restart(_ pane: Pane) {
+        pane.restart(binDir: binDir, pluginDir: pluginDir)
+        pane.chat.note("Restarted Claude.")
     }
 
     func continueHere(_ session: Session) {
@@ -656,24 +664,77 @@ final class AppModel {
         }
     }
 
+    /// Usage comes from `clauth daemon`, the only clauth process that fetches it; `clauth status`
+    /// just reads the daemon's cache. So when the daemon's snapshot goes stale, start the daemon.
     func reloadStatus() {
+        let path = ViberPaths.clauthStatus
+        // The daemon rewrites its snapshot every refresh (90s by default).
+        let fresh = (try? path.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+            .map { Date().timeIntervalSince($0) < 300 } ?? false
+        let starting = !fresh && startDaemon()
         Task.detached {
             var status: ClauthStatus?
             var note: String?
-            let path = ViberPaths.clauthStatus
-            let fresh = (try? path.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-                .map { Date().timeIntervalSince($0) < 600 } ?? false
             if fresh, let data = try? Data(contentsOf: path) { status = ClauthStatus.decode(data) }
             if status == nil {
                 let result = Shell.run("clauth", ["status", "--json"])
                 status = result.ok ? ClauthStatus.decode(Data(result.stdout.utf8)) : nil
-                if status != nil, !fresh { note = "clauth daemon is not running, so usage may be stale. Start it with: clauth daemon" }
                 if status == nil { note = result.status == 127 ? "clauth not found" : "clauth status failed" }
+                else if !starting { note = "The clauth daemon is not running, so usage and login states are out of date. Check ~/.clauth/daemon.log." }
             }
             let loaded = status, message = note
             await MainActor.run {
                 if let loaded { self.status = loaded }
                 self.statusNote = message
+            }
+        }
+        // The daemon writes its first snapshot within a second or two.
+        if starting { reloadStatus(after: 3) }
+    }
+
+    private func reloadStatus(after seconds: Double) {
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(seconds))
+            self.reloadStatus()
+        }
+    }
+
+    @ObservationIgnored private var daemonStartedAt: Date?
+
+    /// Launch `clauth daemon` in the background; it exits at once if one is already running, and keeps
+    /// running after Viber quits. Returns false when it was tried too recently or could not start.
+    private func startDaemon() -> Bool {
+        if let last = daemonStartedAt, Date().timeIntervalSince(last) < 120 { return false }
+        daemonStartedAt = Date()
+        guard let tool = Executables.find("clauth") else { return false }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: tool)
+        process.arguments = ["daemon"]
+        process.environment = Executables.environment()
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = FileHandle.nullDevice
+        // clauth caps daemon.log's size only when stderr is opened for appending.
+        let log = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".clauth/daemon.log").path
+        let fd = Darwin.open(log, O_WRONLY | O_CREAT | O_APPEND, 0o600)
+        process.standardError = fd >= 0 ? FileHandle(fileDescriptor: fd, closeOnDealloc: true) : FileHandle.nullDevice
+        return (try? process.run()) != nil
+    }
+
+    /// Re-authenticate a clauth profile. clauth opens the browser itself and waits for the redirect,
+    /// so this finishes once the user completes (or abandons) the sign-in there.
+    func login(_ profile: String) {
+        guard loggingIn.insert(profile).inserted else { return }
+        Task.detached {
+            let result = Shell.run("clauth", ["login", profile])
+            await MainActor.run {
+                self.loggingIn.remove(profile)
+                if !result.ok {
+                    let detail = (result.stderr.isEmpty ? result.stdout : result.stderr).trimmingCharacters(in: .whitespacesAndNewlines)
+                    self.errorMessage = "Login for \(profile) failed." + (detail.isEmpty ? "" : "\n\n\(detail)")
+                }
+                // The daemon picks up the new login on its next pass; check back a few times.
+                self.reloadStatus()
+                for delay in [5.0, 15, 45] { self.reloadStatus(after: delay) }
             }
         }
     }

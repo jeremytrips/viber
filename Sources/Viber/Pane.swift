@@ -57,6 +57,9 @@ final class Pane: Identifiable {
     var files: [String]?
     @ObservationIgnored private var filesLoadedAt: Date?
     private(set) var started = false
+    /// The CLI reported a dead login. It keeps its credentials in memory, so only a new process
+    /// sees a re-login; the next message restarts it.
+    private(set) var authFailed = false
     @ObservationIgnored private var process: ClaudeProcess?
     /// Preview tool calls in flight, by control request ID.
     @ObservationIgnored private var mcpTasks: [String: Task<Void, Never>] = [:]
@@ -137,7 +140,13 @@ final class Pane: Identifiable {
         }
         if let session = chat.sessionID, spec.resume != session { spec.resume = session }
         lastActivity = Date()
-        if message["type"]?.string == "result" { onTurnFinished?(self) }
+        if message["type"]?.string == "result" {
+            if message["is_error"]?.bool == true, Self.isAuthError(message["result"]?.string ?? ""), !authFailed {
+                authFailed = true
+                chat.note("Log in to \(profileLabel) again (click its chip in the top bar), then send your message again. Viber will restart Claude with the new login and keep this conversation.", isError: true)
+            }
+            onTurnFinished?(self)
+        }
         notifyIfChanged(from: before)
     }
 
@@ -167,6 +176,7 @@ final class Pane: Identifiable {
 
     /// Sends a user message, starting the process first if needed.
     func sendUser(_ text: String, images: [ImageAttachment] = [], binDir: String?, pluginDir: String?) {
+        if authFailed { restart(binDir: binDir, pluginDir: pluginDir) }
         if !isRunning { start(binDir: binDir, pluginDir: pluginDir) }
         let before = chat.state
         process?.send(chat.userMessage(text, images: images))
@@ -204,6 +214,22 @@ final class Pane: Identifiable {
         process?.terminate()
     }
 
+    /// A new CLI process on the same conversation, so it re-reads the login and settings.
+    func restart(binDir: String?, pluginDir: String?) {
+        cancelToolCalls()
+        process?.onExit = nil
+        process?.terminate()
+        process = nil
+        authFailed = false
+        chat.processExited(status: 0)
+        start(binDir: binDir, pluginDir: pluginDir)
+    }
+
+    static func isAuthError(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        return lower.contains("failed to authenticate") || lower.contains("oauth") || lower.contains("/login")
+    }
+
     /// /clear: a fresh conversation in the same folder, under the same account.
     func restartFresh(binDir: String?, pluginDir: String?) {
         // The new conversation won't answer what the old one was sent.
@@ -215,6 +241,7 @@ final class Pane: Identifiable {
         chat = ChatTranscript()
         spec.resume = nil
         started = false
+        authFailed = false
         start(binDir: binDir, pluginDir: pluginDir)
     }
 
