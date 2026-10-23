@@ -12,6 +12,8 @@ public enum SlashAction: Equatable {
     case showCost
     /// Terminal panels (`/mcp`, `/context`, …) open the session's settings sheet on a tab.
     case openSettings(SettingsTab)
+    /// `/add-dir <path>`: let Claude work in another folder for this session.
+    case addDirectory(String)
 }
 
 public enum SlashRouter {
@@ -26,6 +28,7 @@ public enum SlashRouter {
         SlashCommand(name: "mcp", description: "MCP servers: status, sign in, enable or disable", argumentHint: "[reconnect|enable|disable <server>]"),
         SlashCommand(name: "context", description: "Context window usage, and compact"),
         SlashCommand(name: "permissions", description: "Permission rules for this session and project"),
+        SlashCommand(name: "add-dir", description: "Let Claude work in another folder for this session", argumentHint: "<path>"),
         SlashCommand(name: "hooks", description: "Hooks that run in this session"),
         SlashCommand(name: "tasks", description: "Background shells and agents: see output, stop them"),
         SlashCommand(name: "settings", description: "Session settings: model, effort, output style")
@@ -45,6 +48,7 @@ public enum SlashRouter {
         case "cost": return .showCost
         case "context", "usage": return .openSettings(.context)
         case "permissions", "allowed-tools": return .openSettings(.permissions)
+        case "add-dir": return rest.isEmpty ? .openSettings(.permissions) : .addDirectory(rest)
         case "hooks": return .openSettings(.hooks)
         case "tasks", "bashes": return .openSettings(.tasks)
         case "settings": return .openSettings(.model)

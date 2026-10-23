@@ -364,9 +364,11 @@ public struct ChatTranscript {
         return request("update_settings", ["source": "localSettings", "settings": ["outputStyle": .string(style)]], key: "outputStyle")
     }
 
-    /// Replaces this session's own permission rules (the CLI's flag settings layer).
-    public mutating func setSessionRules(_ edits: [RuleEdit]) -> JSON {
-        request("apply_flag_settings", ["settings": ["permissions": SettingsFile.permissionsJSON(edits)]], key: "sessionRules")
+    /// Replaces this session's own permission rules and extra folders (the CLI's flag settings layer).
+    /// Both go in one `permissions` object so neither update drops the other.
+    public mutating func setSessionPermissions(rules: [RuleEdit], directories: [String] = []) -> JSON {
+        let permissions = SettingsFile.permissionsJSON(rules).setting("additionalDirectories", .array(directories.map(JSON.string)))
+        return request("apply_flag_settings", ["settings": ["permissions": permissions]], key: "sessionRules")
     }
 
     public mutating func note(_ text: String, isError: Bool = false) { append(.notice(text, isError: isError)) }

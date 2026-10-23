@@ -311,9 +311,11 @@ final class ChatTranscriptTests: XCTestCase {
 
     func testSessionRulesGoToTheFlagLayerAndRefreshTheList() {
         var chat = ChatTranscript()
-        let apply = chat.setSessionRules([RuleEdit(behavior: "allow", rule: "Bash(echo:*)")])
+        let apply = chat.setSessionPermissions(rules: [RuleEdit(behavior: "allow", rule: "Bash(echo:*)")], directories: ["/work/shared"])
         XCTAssertEqual(apply["request"]?["settings"]?["permissions"]?["allow"], ["Bash(echo:*)"])
         XCTAssertEqual(apply["request"]?["settings"]?["permissions"]?["deny"], [], "every list is sent so removals clear")
+        XCTAssertEqual(apply["request"]?["settings"]?["permissions"]?["additionalDirectories"], ["/work/shared"], "folders ride along so neither drops the other")
+        XCTAssertEqual(chat.setSessionPermissions(rules: [])["request"]?["settings"]?["permissions"]?["additionalDirectories"], [])
         let out = chat.apply(reply(to: apply))
         XCTAssertEqual(out.first?["request"]?["subtype"]?.string, "list_permission_rules")
     }

@@ -18,6 +18,11 @@ final class SlashRouterTests: XCTestCase {
         XCTAssertEqual(SlashRouter.route("/unknown", commands: commands), .send("/unknown"))
     }
 
+    func testAddDirRouting() {
+        XCTAssertEqual(SlashRouter.route("/add-dir ../shared", commands: []), .addDirectory("../shared"))
+        XCTAssertEqual(SlashRouter.route("/add-dir", commands: []), .openSettings(.permissions))
+    }
+
     func testTerminalPanelsOpenTheSettingsSheet() {
         XCTAssertEqual(SlashRouter.route("/mcp", commands: commands), .openSettings(.mcp))
         XCTAssertEqual(SlashRouter.route("/mcp reconnect all", commands: commands), .send("/mcp reconnect all"))

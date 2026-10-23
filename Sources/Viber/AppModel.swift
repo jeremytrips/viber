@@ -235,6 +235,8 @@ final class AppModel {
                                   usage.map { Self.compact($0.contextTokens) } ?? "unknown"))
         case .openSettings(let tab):
             openSettings(tab, in: pane)
+        case .addDirectory(let path):
+            addDirectory(path, in: pane)
         }
         return images.isEmpty
     }
@@ -257,9 +259,7 @@ final class AppModel {
         if scope == .session {
             guard !pane.sessionRules.contains(edit) else { return }
             pane.sessionRules.append(edit)
-            save()
-            let rules = pane.sessionRules
-            control(pane) { [$0.setSessionRules(rules)] }
+            applySessionPermissions(pane)
             return
         }
         editSettings(scope, cwd: pane.cwd, then: pane) { try SettingsFile.addRule(edit, to: $0) }
@@ -270,12 +270,36 @@ final class AppModel {
         guard let scope = rule.scope else { return }
         if scope == .session {
             pane.sessionRules.removeAll { $0 == edit }
-            save()
-            let rules = pane.sessionRules
-            control(pane) { [$0.setSessionRules(rules)] }
+            applySessionPermissions(pane)
             return
         }
         editSettings(scope, cwd: pane.cwd, then: pane) { try SettingsFile.removeRule(edit, from: $0) }
+    }
+
+    /// `/add-dir`: lets Claude work in another folder for this session. `~` and paths relative to the session's folder work.
+    func addDirectory(_ raw: String, in pane: Pane) {
+        let expanded = (raw.trimmingCharacters(in: CharacterSet(charactersIn: "\"' ")) as NSString).expandingTildeInPath
+        let path = URL(fileURLWithPath: expanded, relativeTo: URL(fileURLWithPath: pane.cwd, isDirectory: true)).standardizedFileURL.path
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            pane.chat.note("\(path) is not a folder.", isError: true); return
+        }
+        guard !pane.extraDirs.contains(path), path != pane.cwd else { return }
+        pane.extraDirs.append(path)
+        applySessionPermissions(pane)
+        pane.chat.note("Claude can now work in \(path) too, for this session.")
+    }
+
+    func removeDirectory(_ path: String, in pane: Pane) {
+        pane.extraDirs.removeAll { $0 == path }
+        applySessionPermissions(pane)
+    }
+
+    /// Saves the session's own rules and folders and sends them to the CLI; the reply re-reads the rule list.
+    private func applySessionPermissions(_ pane: Pane) {
+        save()
+        let rules = pane.sessionRules, dirs = pane.extraDirs
+        control(pane) { [$0.setSessionPermissions(rules: rules, directories: dirs)] }
     }
 
     /// Writes a settings file off the main thread. The CLI watches its settings files and applies the change itself;

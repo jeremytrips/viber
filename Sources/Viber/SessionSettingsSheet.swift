@@ -318,6 +318,17 @@ private struct PermissionsTab: View {
         ["allow": "Allow", "ask": "Ask first", "deny": "Deny"][behavior] ?? behavior
     }
 
+    private func pickFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        panel.directoryURL = URL(fileURLWithPath: pane.cwd).deletingLastPathComponent()
+        panel.prompt = "Add"
+        guard panel.runModal() == .OK else { return }
+        for url in panel.urls { model.addDirectory(url.path, in: pane) }
+    }
+
     var body: some View {
         let controls = pane.chat.controls
         VStack(spacing: 0) {
@@ -334,10 +345,20 @@ private struct PermissionsTab: View {
                             }
                         }
                     }
-                    if !controls.directories.isEmpty {
-                        Section("Folders Claude can work in") {
-                            ForEach(controls.directories, id: \.self) { Text($0).font(.callout.monospaced()).textSelection(.enabled) }
+                    Section("Folders Claude can work in") {
+                        ForEach(controls.directories, id: \.self) { dir in
+                            HStack {
+                                Text(dir).font(.callout.monospaced()).textSelection(.enabled)
+                                Spacer()
+                                if pane.extraDirs.contains(dir) {
+                                    Text("This session").font(.caption).foregroundStyle(.secondary)
+                                    Button { model.removeDirectory(dir, in: pane) } label: { Image(systemName: "minus.circle") }
+                                        .buttonStyle(.borderless).help("Remove this folder from the session")
+                                }
+                            }
                         }
+                        Button("Add Folder…", action: pickFolder)
+                            .help("Let Claude read and edit files in another folder for this session, like /add-dir in the terminal")
                     }
                 }
                 .listStyle(.inset)

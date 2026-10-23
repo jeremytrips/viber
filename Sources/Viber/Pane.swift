@@ -10,6 +10,8 @@ struct PaneRecord: Codable {
     var worktree: WorktreeInfo?
     /// Permission rules added for this session only, re-applied whenever its process starts.
     var sessionRules: [RuleEdit]?
+    /// Folders added with /add-dir, re-applied the same way.
+    var extraDirs: [String]?
 }
 
 /// A `//` message, or the reply to one, waiting to be delivered to a session.
@@ -38,6 +40,7 @@ final class Pane: Identifiable {
     /// The `//` message this session is answering right now, and the chat item it arrived as.
     var answering: (recordID: String, itemID: String)?
     var sessionRules: [RuleEdit] = []
+    var extraDirs: [String] = []
     /// The project's files for `@` mentions, loaded when first asked for.
     var files: [String]?
     @ObservationIgnored private var filesLoadedAt: Date?
@@ -57,10 +60,12 @@ final class Pane: Identifiable {
     convenience init(record: PaneRecord) {
         self.init(id: record.id, title: record.title, spec: record.spec, worktree: record.worktree)
         sessionRules = record.sessionRules ?? []
+        extraDirs = record.extraDirs ?? []
     }
 
     var record: PaneRecord {
-        PaneRecord(id: id, title: title, spec: spec, worktree: worktree, sessionRules: sessionRules.isEmpty ? nil : sessionRules)
+        PaneRecord(id: id, title: title, spec: spec, worktree: worktree, sessionRules: sessionRules.isEmpty ? nil : sessionRules,
+                   extraDirs: extraDirs.isEmpty ? nil : extraDirs)
     }
     var state: PaneState { chat.state }
     var profileLabel: String { spec.profile ?? "Default login" }
@@ -86,7 +91,7 @@ final class Pane: Identifiable {
             p.onExit = { [weak self] status, stderr in self?.exited(status: status, stderr: stderr) }
             process = p
             p.send(chat.request("initialize"))
-            if !sessionRules.isEmpty { p.send(chat.setSessionRules(sessionRules)) }
+            if !sessionRules.isEmpty || !extraDirs.isEmpty { p.send(chat.setSessionPermissions(rules: sessionRules, directories: extraDirs)) }
         } catch {
             chat.note(error.localizedDescription, isError: true)
             chat.state = .failed

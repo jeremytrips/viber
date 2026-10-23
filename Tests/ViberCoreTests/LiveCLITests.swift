@@ -63,7 +63,7 @@ final class LiveCLITests: XCTestCase {
         }
         process.send(chat.request("initialize"))
         for tab in [SettingsTab.context, .permissions, .hooks, .model] { for request in chat.refresh(tab) { process.send(request) } }
-        process.send(chat.setSessionRules([RuleEdit(behavior: "allow", rule: "Bash(echo viber:*)")]))
+        process.send(chat.setSessionPermissions(rules: [RuleEdit(behavior: "allow", rule: "Bash(echo viber:*)")]))
         wait(for: [done], timeout: 60)
         process.terminate()
 
@@ -218,5 +218,43 @@ final class LiveCLITests: XCTestCase {
         wait(for: [stopped!], timeout: 30)
         process.terminate()
         XCTAssertTrue(chat.controls.runningTasks.isEmpty)
+    }
+
+    /// A folder added through the session layer becomes a working directory: reading in it needs no permission.
+    func testAddedDirectoryAgainstRealCLI() throws {
+        let env = ProcessInfo.processInfo.environment
+        try XCTSkipUnless(env["VIBER_LIVE_TEST"] == "1", "set VIBER_LIVE_TEST=1 to run")
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("viber-live-\(UUID().uuidString)")
+        let cwd = root.appendingPathComponent("project"), other = root.appendingPathComponent("shared")
+        try FileManager.default.createDirectory(at: cwd, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: other, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("The password is KUMQUAT.\n".utf8).write(to: other.appendingPathComponent("note.txt"))
+
+        var chat = ChatTranscript()
+        let process = try ClaudeProcess(spec: LaunchSpec(profile: env["VIBER_LIVE_PROFILE"], cwd: cwd.path, model: "haiku"),
+                                        paneID: "live-dirs", binDir: nil)
+        var listed: XCTestExpectation? = expectation(description: "rules re-read")
+        var finished: XCTestExpectation?
+        var asked = false
+        process.onMessage = { message in
+            for reply in chat.apply(message) { process.send(reply) }
+            for item in chat.items { if case .permission(let p) = item.kind, p.decision == nil,
+                                        let reply = chat.decidePermission(itemID: item.id, allow: false) { asked = true; process.send(reply) } }
+            if chat.controls.rules != nil, chat.controls.busy.isEmpty { listed?.fulfill(); listed = nil }
+            if message["type"]?.string == "result" { finished?.fulfill(); finished = nil }
+        }
+        process.send(chat.request("initialize"))
+        process.send(chat.setSessionPermissions(rules: [], directories: [other.path]))
+        wait(for: [listed!], timeout: 60)
+        XCTAssertTrue(chat.controls.directories.contains { $0.hasSuffix("/shared") }, "\(chat.controls.directories)")
+
+        finished = expectation(description: "turn finished")
+        process.send(chat.userMessage("Use the Read tool on \(other.path)/note.txt and reply with just the password."))
+        wait(for: [finished!], timeout: 120)
+        process.terminate()
+        XCTAssertFalse(asked, "reading in an added folder should not ask")
+        let reply = chat.items.compactMap { if case .assistant(let t) = $0.kind { return t }; return nil }.joined()
+        XCTAssertTrue(reply.uppercased().contains("KUMQUAT"), "reply was: \(reply)")
     }
 }
