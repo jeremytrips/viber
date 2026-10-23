@@ -16,7 +16,7 @@ public final class ClaudeProcess {
 
     public var isRunning: Bool { process.isRunning }
 
-    public init(spec: LaunchSpec, paneID: String, binDir: String?) throws {
+    public init(spec: LaunchSpec, paneID: String, binDir: String?, project: String? = nil) throws {
         let command = spec.command
         guard let executable = Executables.find(command.tool) else {
             throw NSError(domain: "Viber", code: 1, userInfo: [NSLocalizedDescriptionKey:
@@ -25,7 +25,9 @@ public final class ClaudeProcess {
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = command.arguments
         process.currentDirectoryURL = URL(fileURLWithPath: spec.cwd)
-        process.environment = Executables.environment(adding: binDir.map { [$0] } ?? [], extra: ["VIBER_PANE_ID": paneID])
+        var extra = ["VIBER_PANE_ID": paneID]
+        if let project { extra["VIBER_PROJECT"] = project }
+        process.environment = Executables.environment(adding: binDir.map { [$0] } ?? [], extra: extra)
         process.standardInput = stdin
         process.standardOutput = stdout
         process.standardError = stderr
