@@ -125,6 +125,16 @@ public struct TurnUsage: Equatable, Sendable {
     public var contextTokens: Int { input + cacheRead + cacheCreation }
 }
 
+/// What rewinding files to before a message would change (`rewind_files` with `dry_run`).
+public struct RewindPreview: Equatable, Sendable {
+    public var itemID: String
+    public var canRewind: Bool
+    public var error: String?
+    public var files: [String]
+    public var insertions: Int
+    public var deletions: Int
+}
+
 /// Folds the CLI's stream-json output (and transcript rows when restoring history) into a chat.
 /// The protocol is the one the Agent SDK speaks; unknown messages are ignored.
 public struct ChatTranscript {
@@ -145,6 +155,8 @@ public struct ChatTranscript {
     public var turnStartedByUser = true
     /// MCP servers, context, rules and the like, for the settings sheet.
     public var controls = SessionControls()
+    /// A rewind waiting for the user to confirm it.
+    public var rewindPreview: RewindPreview?
 
     private struct PendingRequest {
         var subtype: String
@@ -158,6 +170,12 @@ public struct ChatTranscript {
     private var blockCounts: [String: Int] = [:]
     private var seenRows: Set<String> = []
     private var nextID = 0
+    /// Messages sent but not yet echoed back with their ID: the chat item and the text that went out.
+    private var awaitingEcho: [(itemID: String, text: String)] = []
+    /// The CLI's ID for each user message item, which rewinding needs.
+    private var userMessageIDs: [String: String] = [:]
+    /// Rewind requests in flight, by request ID, and the item they rewind to.
+    private var rewinds: [String: String] = [:]
 
     public init() {}
 
@@ -179,6 +197,7 @@ public struct ChatTranscript {
     public mutating func userMessage(_ text: String, images: [ImageAttachment] = []) -> JSON {
         if !images.isEmpty { append(.attachments(images.map(\.label))) }
         if !text.isEmpty || images.isEmpty { append(.user(text)) }
+        awaitingEcho.append((items[items.count - 1].id, text))
         state = .working
         turnStartedByUser = true
         let content: JSON = images.isEmpty ? .string(text)
@@ -325,12 +344,28 @@ public struct ChatTranscript {
 
     public mutating func note(_ text: String, isError: Bool = false) { append(.notice(text, isError: isError)) }
 
+    // MARK: Rewind
+
+    /// Whether files can be rewound to before this item: the CLI has told us the message's ID.
+    public func canRewind(itemID: String) -> Bool { userMessageIDs[itemID] != nil }
+
+    /// Restores files to how they were before a message. A dry run fills `rewindPreview` for confirmation.
+    public mutating func rewind(itemID: String, dryRun: Bool) -> JSON? {
+        guard let id = userMessageIDs[itemID] else { return nil }
+        if !dryRun { rewindPreview = nil }
+        let message = request("rewind_files", ["user_message_id": .string(id), "dry_run": .bool(dryRun)])
+        if let requestID = message["request_id"]?.string { rewinds[requestID] = itemID }
+        return message
+    }
+
     /// Delivers a `//` message from another session as a user turn, keeping who sent it.
     public mutating func receiveRelay(from source: String, text: String) -> JSON {
         append(.received(from: source, text: text))
         state = .working
         turnStartedByUser = true
-        return ["type": "user", "message": ["role": "user", "content": .string(Relay.envelope(from: source, text: text))]]
+        let wire = Relay.envelope(from: source, text: text)
+        awaitingEcho.append((items[items.count - 1].id, wire))
+        return ["type": "user", "message": ["role": "user", "content": .string(wire)]]
     }
 
     /// Posts the answer to an earlier `//` message back into the sender's conversation.
@@ -338,7 +373,9 @@ public struct ChatTranscript {
         append(.reply(from: source, text: text))
         state = .working
         turnStartedByUser = true
-        return ["type": "user", "message": ["role": "user", "content": .string(Relay.replyEnvelope(from: source, text: text))]]
+        let wire = Relay.replyEnvelope(from: source, text: text)
+        awaitingEcho.append((items[items.count - 1].id, wire))
+        return ["type": "user", "message": ["role": "user", "content": .string(wire)]]
     }
 
     public var lastItemID: String? { items.last?.id }
@@ -511,6 +548,15 @@ public struct ChatTranscript {
     private mutating func applyUser(_ message: JSON, history: Bool) {
         guard let body = message["message"] else { return }
         if message["parent_tool_use_id"]?.string != nil { return }
+        if message["isReplay"]?.bool == true {
+            if let uuid = message["uuid"]?.string { matchEcho(uuid: uuid, text: Self.userText(body["content"])) }
+            return
+        }
+        let before = items.count
+        defer {
+            // In history, the row's ID belongs to the item it produced.
+            if history, items.count > before, let uuid = message["uuid"]?.string { userMessageIDs[items[items.count - 1].id] = uuid }
+        }
         if let text = body["content"]?.string {
             if history { appendUserText(text) }
             return
@@ -536,6 +582,18 @@ public struct ChatTranscript {
             default: break
             }
         }
+    }
+
+    /// Pairs an echoed message with the item it was sent as. Messages the CLI never echoes are skipped, not mismatched.
+    private mutating func matchEcho(uuid: String, text: String) {
+        guard let index = awaitingEcho.firstIndex(where: { $0.text == text }) else { return }
+        userMessageIDs[awaitingEcho[index].itemID] = uuid
+        awaitingEcho.removeFirst(index + 1)
+    }
+
+    static func userText(_ content: JSON?) -> String {
+        if let text = content?.string { return text }
+        return (content?.array ?? []).compactMap { $0["type"]?.string == "text" ? $0["text"]?.string : nil }.joined(separator: "\n")
     }
 
     private mutating func appendUserText(_ raw: String) {
@@ -642,6 +700,11 @@ public struct ChatTranscript {
         if let key = pending.key { controls.busy.remove(key) }
         if response["subtype"]?.string == "error" {
             let error = response["error"]?.string ?? "unknown error"
+            if subtype == "rewind_files" {
+                rewinds[id] = nil
+                append(.notice("Could not rewind files: \(error)", isError: true))
+                return []
+            }
             // Settings-sheet errors show in the sheet, next to what failed.
             if let key = pending.key { controls.errors[key] = error } else { append(.notice("\(subtype) failed: \(error)", isError: true)) }
             if let server { controls.signingIn[server] = nil }
@@ -693,6 +756,19 @@ public struct ChatTranscript {
             controls.appliedModel = body?["applied"]?["model"]?.string ?? controls.appliedModel
             controls.effort = body?["applied"]?["effort"]?.string ?? controls.effort
             controls.outputStyle = body?["effective"]?["outputStyle"]?.string ?? controls.outputStyle
+        case "rewind_files":
+            guard let itemID = rewinds.removeValue(forKey: id) else { return [] }
+            let files = (body?["filesChanged"]?.array ?? []).compactMap(\.string)
+            let insertions = body?["insertions"]?.int ?? 0, deletions = body?["deletions"]?.int ?? 0
+            if pending.body["dry_run"]?.bool == true {
+                rewindPreview = RewindPreview(itemID: itemID, canRewind: body?["canRewind"]?.bool ?? false,
+                                              error: body?["error"]?.string, files: files, insertions: insertions, deletions: deletions)
+            } else if body?["canRewind"]?.bool == false {
+                append(.notice("Could not rewind files: \(body?["error"]?.string ?? "no checkpoint for that message")", isError: true))
+            } else {
+                let count = files.count == 1 ? "1 file" : "\(files.count) files"
+                append(.notice("Rewound \(count) (+\(insertions) −\(deletions)) to before that message. The conversation is unchanged.", isError: false))
+            }
         case "apply_flag_settings" where pending.key == "sessionRules":
             return [request("list_permission_rules", key: "permissions")]
         default: break

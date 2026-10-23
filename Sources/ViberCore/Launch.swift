@@ -19,9 +19,10 @@ public struct LaunchSpec: Codable, Equatable {
     }
 
     /// The `claude` arguments for a headless session that speaks the Agent SDK protocol on stdio.
+    /// Replayed user messages carry the IDs that rewinding files needs.
     public var claudeArguments: [String] {
         var args = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
-                    "--include-partial-messages", "--permission-prompt-tool", "stdio"]
+                    "--include-partial-messages", "--permission-prompt-tool", "stdio", "--replay-user-messages"]
         if let resume { args += ["--resume", resume] }
         if let permissionMode { args += ["--permission-mode", permissionMode] }
         if let model { args += ["--model", model] }

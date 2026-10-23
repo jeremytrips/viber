@@ -137,4 +137,45 @@ final class LiveCLITests: XCTestCase {
         XCTAssertTrue(reply.contains("RED"), "reply was: \(reply)")
         XCTAssertTrue(reply.contains("MANGO"), "reply was: \(reply)")
     }
+
+    /// Replayed messages carry IDs, and `rewind_files` puts an edited file back.
+    func testRewindFilesAgainstRealCLI() throws {
+        let env = ProcessInfo.processInfo.environment
+        try XCTSkipUnless(env["VIBER_LIVE_TEST"] == "1", "set VIBER_LIVE_TEST=1 to run")
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("viber-live-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("a.txt")
+        try Data("one\n".utf8).write(to: file)
+
+        var chat = ChatTranscript()
+        let spec = LaunchSpec(profile: env["VIBER_LIVE_PROFILE"], cwd: dir.path, permissionMode: "acceptEdits", model: "haiku")
+        let process = try ClaudeProcess(spec: spec, paneID: "live-rewind", binDir: nil)
+        var finished: XCTestExpectation? = expectation(description: "turn finished")
+        var answered: XCTestExpectation?
+        process.onMessage = { message in
+            for reply in chat.apply(message) { process.send(reply) }
+            if message["type"]?.string == "result" { finished?.fulfill(); finished = nil }
+            if message["type"]?.string == "control_response" { answered?.fulfill(); answered = nil }
+        }
+        process.send(chat.request("initialize"))
+        process.send(chat.userMessage("Use the Edit tool to change the word one to two in a.txt. Then reply DONE."))
+        let item = try XCTUnwrap(chat.items.last?.id)
+        wait(for: [finished!], timeout: 120)
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "two\n", "the edit happened")
+        XCTAssertTrue(chat.canRewind(itemID: item), "the echo carried the message ID")
+
+        answered = expectation(description: "dry run")
+        process.send(try XCTUnwrap(chat.rewind(itemID: item, dryRun: true)))
+        wait(for: [answered!], timeout: 30)
+        let preview = try XCTUnwrap(chat.rewindPreview)
+        XCTAssertTrue(preview.canRewind, "\(preview)")
+        XCTAssertTrue(preview.files.contains { $0.hasSuffix("a.txt") }, "\(preview.files)")
+
+        answered = expectation(description: "rewind")
+        process.send(try XCTUnwrap(chat.rewind(itemID: item, dryRun: false)))
+        wait(for: [answered!], timeout: 30)
+        process.terminate()
+        XCTAssertEqual(try String(contentsOf: file, encoding: .utf8), "one\n", "the file is back")
+    }
 }

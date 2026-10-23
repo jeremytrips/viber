@@ -13,6 +13,33 @@ struct PaneView: View {
             ComposerView(pane: pane)
         }
         .background(Color(nsColor: .textBackgroundColor))
+        .alert(rewindTitle, isPresented: Binding(get: { pane.chat.rewindPreview != nil }, set: { if !$0 { pane.chat.rewindPreview = nil } }),
+               presenting: pane.chat.rewindPreview) { preview in
+            if preview.canRewind && !preview.files.isEmpty {
+                Button("Rewind files", role: .destructive) { pane.run { $0.rewind(itemID: preview.itemID, dryRun: false).map { [$0] } ?? [] } }
+                Button("Cancel", role: .cancel) {}
+            } else {
+                Button("OK", role: .cancel) {}
+            }
+        } message: { preview in
+            Text(rewindMessage(preview))
+        }
+    }
+
+    private var rewindTitle: String {
+        guard let preview = pane.chat.rewindPreview else { return "" }
+        if !preview.canRewind { return "Can't rewind files" }
+        return preview.files.isEmpty ? "Nothing to rewind" : "Rewind \(preview.files.count == 1 ? "1 file" : "\(preview.files.count) files")?"
+    }
+
+    private func rewindMessage(_ preview: RewindPreview) -> String {
+        if !preview.canRewind { return preview.error ?? "There is no checkpoint for that message." }
+        if preview.files.isEmpty { return "No files changed after that message." }
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let shown = preview.files.prefix(8).map { $0.replacingOccurrences(of: pane.cwd + "/", with: "").replacingOccurrences(of: home, with: "~") }
+        let more = preview.files.count > 8 ? "\n…and \(preview.files.count - 8) more" : ""
+        return "Files go back to how they were before that message (+\(preview.insertions) −\(preview.deletions) undone). "
+            + "The conversation stays as it is, so tell Claude if it should know.\n\n" + shown.joined(separator: "\n") + more
     }
 }
 
@@ -136,18 +163,42 @@ struct WorkingRow: View {
 }
 
 struct ChatItemView: View {
+    @Environment(AppModel.self) private var model
     let item: ChatItem
     let pane: Pane?
+    @State private var hovering = false
+
+    /// Not mid-turn: files are still changing then.
+    private var rewindable: Bool {
+        guard let pane, pane.state != .working, pane.state != .starting else { return false }
+        return pane.chat.canRewind(itemID: item.id)
+    }
+
+    /// A dry run first: the alert shows what would change.
+    private func rewind() {
+        guard let pane else { return }
+        model.control(pane) { $0.rewind(itemID: item.id, dryRun: true).map { [$0] } ?? [] }
+    }
 
     var body: some View {
         switch item.kind {
         case .user(let text):
-            HStack {
+            HStack(alignment: .center, spacing: 6) {
                 Spacer(minLength: 60)
+                if rewindable {
+                    Button(action: rewind) { Image(systemName: "arrow.uturn.backward.circle") }
+                        .buttonStyle(.plain).foregroundStyle(.secondary)
+                        .opacity(hovering ? 1 : 0)
+                        .help("Rewind files to before this message")
+                }
                 Text(text)
                     .textSelection(.enabled)
                     .padding(.horizontal, 13).padding(.vertical, 9)
                     .background(RoundedRectangle(cornerRadius: 14).fill(Color(nsColor: .quaternaryLabelColor).opacity(0.6)))
+            }
+            .onHover { hovering = $0 }
+            .contextMenu {
+                if rewindable { Button("Rewind Files to Before This Message…", action: rewind) }
             }
         case .attachments(let labels):
             HStack(spacing: 6) {
