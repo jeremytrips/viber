@@ -53,6 +53,18 @@ struct ViberApp: App {
                     .keyboardShortcut(",", modifiers: [.command, .option])
                     .disabled(model.selectedPane == nil)
                 Divider()
+                Button(model.selectedPane?.showPreview == true ? "Hide Browser Preview" : "Show Browser Preview") {
+                    model.selectedPane?.togglePreview()
+                }
+                .keyboardShortcut("b", modifiers: [.command, .shift])
+                .disabled(model.selectedPane == nil)
+                Button("Reload Preview") { model.selectedPane?.preview?.reload() }
+                    .keyboardShortcut("r")
+                    .disabled(model.selectedPane?.showPreview != true)
+                Button("Pick Element in Preview") { model.selectedPane?.preview?.togglePicking() }
+                    .keyboardShortcut("c", modifiers: [.command, .shift])
+                    .disabled(model.selectedPane?.showPreview != true || model.selectedPane?.preview?.pageURL == nil)
+                Divider()
                 ForEach(1..<10) { n in
                     Button("Session \(n)") { model.select(index: n - 1) }.keyboardShortcut(KeyEquivalent(Character("\(n)")))
                 }

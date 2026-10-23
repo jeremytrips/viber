@@ -42,6 +42,7 @@ struct ComposerView: View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 0) {
                 if Relay.isRelay(draft) { relayMenu } else if !fileSuggestions.isEmpty { fileMenu } else if !suggestions.isEmpty { slashMenu }
+                if !pane.pickedElements.isEmpty { pickedElementChips }
                 if !attachments.isEmpty { attachmentRow }
                 TextField(placeholder, text: $draft, axis: .vertical)
                     .textFieldStyle(.plain)
@@ -85,12 +86,36 @@ struct ComposerView: View {
             if let pasteMonitor { NSEvent.removeMonitor(pasteMonitor) }
             pasteMonitor = nil
         }
+        .onChange(of: pane.pickedElements.count) { old, new in if new > old { focused = true } }
+    }
+
+    /// Elements picked in the preview; they go out with the next message.
+    private var pickedElementChips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(pane.pickedElements) { reference in
+                    HStack(spacing: 5) {
+                        Image(systemName: "cursorarrow.rays").font(.caption)
+                        Text(reference.label).font(.caption).lineLimit(1)
+                        Button { pane.pickedElements.removeAll { $0.id == reference.id } } label: {
+                            Image(systemName: "xmark").font(.caption2.weight(.semibold))
+                        }
+                        .buttonStyle(.plain).foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 8).padding(.vertical, 4)
+                    .background(Capsule().fill(Color.accentColor.opacity(0.12)))
+                    .help(reference.selector)
+                }
+            }
+            .padding(.horizontal, 10).padding(.top, 9)
+        }
     }
 
     private var placeholder: String {
         switch pane.state {
         case .permission, .input, .plan: return "Answer the card above, or type to send a message"
         case .working: return "Claude is working. Messages you send now are queued."
+        case _ where !pane.pickedElements.isEmpty: return "Say what to do with the picked element"
         default: return "Message Claude. Type / for commands, @ for files, // to message another session"
         }
     }
@@ -277,7 +302,18 @@ struct ComposerView: View {
         guard !text.isEmpty || !attachments.isEmpty else { return }
         draft = ""
         menuDismissed = false
-        if model.submit(text, images: attachments, in: pane) { attachments = [] }
+        // Picked elements ride along with anything that reaches Claude, but not with commands like /model.
+        let carries: Bool
+        switch SlashRouter.route(text, commands: pane.chat.commands) {
+        case .send: carries = true
+        case .setMode(_, let then): carries = then != nil
+        default: carries = false
+        }
+        let message = carries ? ElementReference.compose(text, with: pane.pickedElements) : text
+        if model.submit(message, images: attachments, in: pane) {
+            attachments = []
+            if carries { pane.pickedElements = [] }
+        }
     }
 
     // MARK: Attachments

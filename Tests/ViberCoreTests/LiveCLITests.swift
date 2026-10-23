@@ -97,6 +97,58 @@ final class LiveCLITests: XCTestCase {
         XCTAssertTrue(reply.uppercased().contains("PINEAPPLE"), "reply was: \(reply)")
     }
 
+    /// The preview's tools, served over the control channel the way Pane does it, against a fake page.
+    @MainActor
+    func testPreviewToolsOverSdkMcp() async throws {
+        let env = ProcessInfo.processInfo.environment
+        try XCTSkipUnless(env["VIBER_LIVE_TEST"] == "1", "set VIBER_LIVE_TEST=1 to run")
+        let driver = FakeDriver()
+        driver.pageURL = URL(string: "http://localhost:5173/")
+        driver.console.add(.error, "TypeError: cannot read properties of undefined (reading 'kiwi-42')")
+
+        var chat = ChatTranscript()
+        let spec = LaunchSpec(profile: env["VIBER_LIVE_PROFILE"], cwd: FileManager.default.temporaryDirectory.path, model: "haiku")
+        let process = try ClaudeProcess(spec: spec, paneID: "live-preview", binDir: nil)
+        let finished = expectation(description: "turn finished")
+        var mcpMethods: [String] = []
+        var asked: [String] = []
+        process.onMessage = { message in
+            if let call = SdkMcp.Incoming(message) {
+                mcpMethods.append(call.message["method"]?.string ?? "?")
+                Task { @MainActor in
+                    let reply = await PreviewToolbox.server.handle(call.message) { name, args in
+                        await PreviewToolbox.call(name, args, driver: driver, lastEdit: nil)
+                    }
+                    process.send(SdkMcp.reply(requestID: call.requestID, response: reply))
+                }
+                return
+            }
+            if message["request"]?["subtype"]?.string == "can_use_tool", let tool = message["request"]?["tool_name"]?.string {
+                asked.append(tool)
+                XCTAssertTrue(PreviewPolicy.autoAllow(tool: tool, pageURL: driver.pageURL, actionsOnLocalPages: false), tool)
+                process.send(ChatTranscript.controlSuccess(message["request_id"]?.string ?? "",
+                                                           ["behavior": "allow", "updatedInput": message["request"]?["input"] ?? [:]]))
+                return
+            }
+            for reply in chat.apply(message) { process.send(reply) }
+            if message["type"]?.string == "result" { finished.fulfill() }
+        }
+        process.send(chat.request("initialize", SdkMcp.initializeFields([PreviewToolbox.serverName: ["disableAutoBackground": true, "timeout": 60000]])))
+        process.send(chat.userMessage("Use the mcp__viber__preview_console tool to read the page's console, then reply with only the word in quotes after 'reading'."))
+        await fulfillment(of: [finished], timeout: 120)
+        process.terminate()
+
+        XCTAssertTrue(mcpMethods.starts(with: ["initialize", "notifications/initialized", "tools/list"]), "\(mcpMethods)")
+        XCTAssertTrue(mcpMethods.contains("tools/call"))
+        XCTAssertEqual(asked, ["mcp__viber__preview_console"])
+        let server = chat.controls.mcp?.first { $0.name == PreviewToolbox.serverName }
+        XCTAssertEqual(server?.status, .connected)
+        XCTAssertEqual(server?.source, "sdk")
+        XCTAssertTrue(chat.items.contains { if case .tool(let c) = $0.kind { return c.name == "mcp__viber__preview_console" && c.result?.contains("kiwi-42") == true }; return false })
+        let reply = chat.items.compactMap { if case .assistant(let t) = $0.kind { return t }; return nil }.joined()
+        XCTAssertTrue(reply.contains("kiwi-42"), "reply was: \(reply)")
+    }
+
     /// An image block and an `@file` mention reach the model: the CLI resolves the mention itself in headless mode.
     func testImageAndFileMentionAgainstRealCLI() throws {
         let env = ProcessInfo.processInfo.environment

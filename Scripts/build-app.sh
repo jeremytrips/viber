@@ -35,6 +35,11 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
 <key>NSPrincipalClass</key><string>NSApplication</string>
 <key>NSHighResolutionCapable</key><true/>
+<key>NSAppTransportSecurity</key><dict>
+  <key>NSAllowsLocalNetworking</key><true/>
+  <key>NSAllowsArbitraryLoadsInWebContent</key><true/>
+</dict>
+<key>NSLocalNetworkUsageDescription</key><string>The browser preview opens dev servers on your local network.</string>
 </dict></plist>
 PLIST
 plutil -lint "$APP/Contents/Info.plist" >/dev/null

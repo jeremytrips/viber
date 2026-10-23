@@ -183,6 +183,8 @@ public struct ChatTranscript {
     public var turnStartedByUser = true
     /// MCP servers, context, rules and the like, for the settings sheet.
     public var controls = SessionControls()
+    /// When Claude last changed a file in this process's lifetime, so the preview can tell whether a hot update followed.
+    public private(set) var lastFileEditAt: Date?
     /// A rewind waiting for the user to confirm it.
     public var rewindPreview: RewindPreview?
     /// Claude's checklist for the work at hand, as its todo or task list tools last left it.
@@ -625,7 +627,7 @@ public struct ChatTranscript {
         switch message["type"]?.string {
         case "system": applySystem(message)
         case "assistant": applyAssistant(message, now: history ? (Dates.parse(message["timestamp"]?.any) ?? now) : now)
-        case "user": applyUser(message, history: history)
+        case "user": applyUser(message, history: history, now: now)
         case "stream_event": applyStreamEvent(message)
         case "result": applyResult(message)
         case "control_request": return applyControlRequest(message)
@@ -814,12 +816,12 @@ public struct ChatTranscript {
         cache = CacheEstimate(observedAt: now, ttl: ttl, basis: basis, generation: messageID)
     }
 
-    private mutating func applyUser(_ message: JSON, history: Bool) {
+    private mutating func applyUser(_ message: JSON, history: Bool, now: Date) {
         guard let body = message["message"] else { return }
         if message["parent_tool_use_id"]?.string != nil {
             // A subagent's tool results. Its prompt is already on the Agent call.
             for block in body["content"]?.array ?? [] where block["type"]?.string == "tool_result" {
-                if let id = block["tool_use_id"]?.string { applyToolResult(id, block: block, message: message) }
+                if let id = block["tool_use_id"]?.string { applyToolResult(id, block: block, message: message, history: history, now: now) }
             }
             return
         }
@@ -846,7 +848,7 @@ public struct ChatTranscript {
         for block in blocks {
             switch block["type"]?.string {
             case "tool_result":
-                if let id = block["tool_use_id"]?.string { applyToolResult(id, block: block, message: message) }
+                if let id = block["tool_use_id"]?.string { applyToolResult(id, block: block, message: message, history: history, now: now) }
             case "text":
                 if history, let text = block["text"]?.string { appendUserText(text) }
             default: break
@@ -854,7 +856,9 @@ public struct ChatTranscript {
         }
     }
 
-    private mutating func applyToolResult(_ id: String, block: JSON, message: JSON) {
+    static let editTools: Set<String> = ["Edit", "MultiEdit", "Write", "NotebookEdit"]
+
+    private mutating func applyToolResult(_ id: String, block: JSON, message: JSON, history: Bool, now: Date) {
         let meta = message["tool_use_result"] ?? message["toolUseResult"]
         var finished: ToolCall?
         updateTool(id) { call in
@@ -870,10 +874,12 @@ public struct ChatTranscript {
             }
             finished = call
         }
+        guard let call = finished, !call.isError else { return }
+        // A subagent's edits change files too, so the preview waits for them as well.
+        if !history, Self.editTools.contains(call.name) { lastFileEditAt = now }
         // Claude's checklist follows its own task list tools, not a subagent's.
-        if let call = finished, !call.isError, toolIndex[id] != nil { applyTaskListResult(call, result: meta) }
+        if toolIndex[id] != nil { applyTaskListResult(call, result: meta) }
     }
-
     /// Pairs an echoed message with the item it was sent as. Messages the CLI never echoes are skipped, not mismatched.
     private mutating func matchEcho(uuid: String, text: String) {
         guard let index = awaitingEcho.firstIndex(where: { $0.text == text }) else { return }

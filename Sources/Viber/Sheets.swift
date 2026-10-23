@@ -62,7 +62,7 @@ struct NewSessionSheet: View {
     @State private var useWorktree = false
     @State private var repoRoot: String?
     @State private var name = ""
-    @State private var permissionMode = "default"
+    @State private var permissionMode = "auto"
     @State private var firstMessage = ""
     @State private var didLoad = false
 
@@ -157,6 +157,7 @@ struct NewSessionSheet: View {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
+        panel.canCreateDirectories = true
         panel.allowsMultipleSelection = false
         panel.prompt = "Choose"
         if !folder.isEmpty { panel.directoryURL = URL(fileURLWithPath: folder) }

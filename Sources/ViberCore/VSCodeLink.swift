@@ -11,6 +11,9 @@ public enum VSCodeLink {
         components.host = "file"
         // The trailing slash explicitly identifies a folder, including names ending in :digits.
         components.path = projectPath.hasSuffix("/") ? projectPath : projectPath + "/"
+        // Without this VS Code swaps the folder into the last active window, closing what was there
+        // (e.g. the main checkout when opening a worktree). A folder that is already open is still just focused.
+        components.queryItems = [URLQueryItem(name: "windowId", value: "_blank")]
         return components.url
     }
 }

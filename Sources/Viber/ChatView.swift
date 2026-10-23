@@ -9,11 +9,22 @@ struct PaneView: View {
         VStack(spacing: 0) {
             PaneHeader(pane: pane)
             Divider()
-            ChatList(pane: pane, readOnly: false)
-            ChecklistPanel(pane: pane)
-            ComposerView(pane: pane)
+            HSplitView {
+                VStack(spacing: 0) {
+                    ChatList(pane: pane, readOnly: false)
+                    ChecklistPanel(pane: pane)
+                    ComposerView(pane: pane)
+                }
+                .frame(minWidth: 320, maxWidth: .infinity)
+                if pane.showPreview, let preview = pane.preview {
+                    PreviewView(pane: pane, preview: preview)
+                        .frame(minWidth: 300, idealWidth: 640, maxWidth: .infinity)
+                }
+            }
         }
         .background(Color(nsColor: .textBackgroundColor))
+        .onAppear { if pane.showPreview { _ = pane.ensurePreview() } }
+        .onChange(of: pane.showPreview) { if pane.showPreview { _ = pane.ensurePreview() } }
         .alert(rewindTitle, isPresented: Binding(get: { pane.chat.rewindPreview != nil }, set: { if !$0 { pane.chat.rewindPreview = nil } }),
                presenting: pane.chat.rewindPreview) { preview in
             if preview.canRewind && !preview.files.isEmpty {
@@ -74,6 +85,16 @@ struct PaneHeader: View {
                 .buttonStyle(.plain)
                 .help(mcp.attention ? "Some MCP servers need sign-in or failed. Click to see them." : "MCP servers connected")
             }
+            Button { pane.togglePreview() } label: {
+                Image(systemName: "safari")
+                    .foregroundStyle(pane.showPreview ? Color.accentColor : Color.primary)
+                    .overlay(alignment: .topTrailing) {
+                        if (pane.preview?.console.errorsThisPage ?? 0) > 0 {
+                            Circle().fill(Color.red).frame(width: 6, height: 6).offset(x: 3, y: -2)
+                        }
+                    }
+            }
+            .help(pane.showPreview ? "Hide the browser preview (⇧⌘B)" : "Show the browser preview (⇧⌘B)")
             Button { model.openSettings(.model, in: pane) } label: { Image(systemName: "slider.horizontal.3") }
                 .help("Session settings: MCP, context, permissions, hooks, model (⌥⌘,)")
             Button("Open in VS Code") { model.openInVSCode(pane.cwd) }
@@ -198,7 +219,7 @@ struct ChatItemView: View {
                         .opacity(hovering ? 1 : 0)
                         .help("Rewind files to before this message")
                 }
-                Text(text)
+                Text(ElementReference.displayText(text))
                     .textSelection(.enabled)
                     .padding(.horizontal, 13).padding(.vertical, 9)
                     .background(RoundedRectangle(cornerRadius: 14).fill(Color(nsColor: .quaternaryLabelColor).opacity(0.6)))
@@ -221,7 +242,7 @@ struct ChatItemView: View {
         case .thinking(let text):
             FoldedText(title: "Thinking", icon: "brain", text: text)
         case .tool(let call):
-            if let run = call.agent { AgentCard(call: call, run: run, pane: pane) } else { ToolRow(call: call) }
+            if let run = call.agent { AgentCard(call: call, run: run, pane: pane) } else { ToolRow(call: call, pane: pane) }
         case .permission(let prompt):
             PermissionCard(itemID: item.id, prompt: prompt, pane: pane)
         case .question(let prompt):
@@ -301,36 +322,55 @@ struct FoldedText: View {
 
 struct ToolRow: View {
     let call: ToolCall
+    var pane: Pane?
     @State private var open = false
+
+    /// A dev server's address in the output of a shell command, offered for the preview.
+    private var localURL: URL? {
+        guard pane != nil, call.name == "Bash" || call.name.hasSuffix("Output") || call.name == "Monitor",
+              let result = call.result else { return nil }
+        return PreviewURL.detect(in: String(result.prefix(4000))).first
+    }
 
     private var detail: Bool { !ToolSummary.diff(name: call.name, input: call.input).isEmpty || !(call.result ?? "").isEmpty || call.name == "Bash" }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Button { if detail { open.toggle() } } label: {
-                HStack(spacing: 8) {
-                    Circle().fill(call.isError ? Color.red : call.done ? Color.green : Color.blue).frame(width: 7, height: 7)
-                    Text(call.name).fontWeight(.semibold)
-                    Text(ToolSummary.summary(name: call.name, input: call.input))
-                        .font(.system(.callout, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-                    Spacer(minLength: 8)
-                    if call.blockedByAutoMode {
-                        Label("Blocked by auto mode", systemImage: "hand.raised").font(.caption).foregroundStyle(.orange)
-                    }
-                    if let counts = ToolSummary.counts(name: call.name, input: call.input) {
-                        Text(counts).font(.caption.monospaced()).foregroundStyle(.secondary)
-                    }
-                    if detail { Image(systemName: open ? "chevron.down" : "chevron.right").font(.caption2).foregroundStyle(.tertiary) }
+            HStack(spacing: 8) {
+                row
+                if let url = localURL, let pane {
+                    Button { pane.openPreview(url) } label: { Label("Open in preview", systemImage: "safari") }
+                        .buttonStyle(.borderless).font(.caption)
+                        .help("Open \(PreviewURL.short(url)) in the browser preview beside the chat")
                 }
-                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .font(.callout)
             if !call.done, let progress = call.progress, !progress.isEmpty {
                 Text(progress).font(.caption).foregroundStyle(.secondary).lineLimit(1).padding(.leading, 15)
             }
             if open { ToolDetail(call: call).padding(.leading, 15) }
         }
+    }
+
+    private var row: some View {
+        Button { if detail { open.toggle() } } label: {
+            HStack(spacing: 8) {
+                Circle().fill(call.isError ? Color.red : call.done ? Color.green : Color.blue).frame(width: 7, height: 7)
+                Text(ToolSummary.displayName(call.name)).fontWeight(.semibold)
+                Text(ToolSummary.summary(name: call.name, input: call.input))
+                    .font(.system(.callout, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 8)
+                if call.blockedByAutoMode {
+                    Label("Blocked by auto mode", systemImage: "hand.raised").font(.caption).foregroundStyle(.orange)
+                }
+                if let counts = ToolSummary.counts(name: call.name, input: call.input) {
+                    Text(counts).font(.caption.monospaced()).foregroundStyle(.secondary)
+                }
+                if detail { Image(systemName: open ? "chevron.down" : "chevron.right").font(.caption2).foregroundStyle(.tertiary) }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .font(.callout)
     }
 }
 
@@ -459,7 +499,7 @@ struct AgentStep: View {
         switch item.kind {
         case .tool(let call):
             // AnyView: a card inside a card would otherwise make the view type contain itself.
-            if let run = call.agent { AnyView(AgentCard(call: call, run: run, pane: pane)) } else { ToolRow(call: call) }
+            if let run = call.agent { AnyView(AgentCard(call: call, run: run, pane: pane)) } else { ToolRow(call: call, pane: pane) }
         case .assistant(let text):
             Text(text).font(.callout).foregroundStyle(.secondary).lineLimit(4).textSelection(.enabled)
         default:
