@@ -129,6 +129,23 @@ public struct TurnUsage: Equatable, Sendable {
     public var contextTokens: Int { input + cacheRead + cacheCreation }
 }
 
+/// One entry of Claude's checklist: from `TodoWrite`, or the task list tools (`TaskCreate`/`TaskUpdate`).
+public struct TodoItem: Equatable, Sendable, Identifiable {
+    public var id: String
+    public var content: String
+    /// Present-tense label shown while the item is in progress ("Running tests").
+    public var activeForm: String?
+    /// pending, in_progress or completed.
+    public var status: String
+
+    public init(id: String, content: String, activeForm: String? = nil, status: String = "pending") {
+        self.id = id; self.content = content; self.activeForm = activeForm; self.status = status
+    }
+
+    public var isDone: Bool { status == "completed" }
+    public var isActive: Bool { status == "in_progress" }
+}
+
 /// What rewinding files to before a message would change (`rewind_files` with `dry_run`).
 public struct RewindPreview: Equatable, Sendable {
     public var itemID: String
@@ -163,6 +180,8 @@ public struct ChatTranscript {
     public var controls = SessionControls()
     /// A rewind waiting for the user to confirm it.
     public var rewindPreview: RewindPreview?
+    /// Claude's checklist for the work at hand, as its todo or task list tools last left it.
+    public private(set) var todos: [TodoItem] = []
 
     private struct PendingRequest {
         var subtype: String
@@ -607,6 +626,7 @@ public struct ChatTranscript {
                     append(.tool(call), id: "tool:\(id)")
                     toolIndex[id] = items.count - 1
                 }
+                if call.name == "TodoWrite" { todos = Self.todoList(call.input) }
                 if !state.needsYou { state = .working }
             default: break
             }
@@ -665,6 +685,7 @@ public struct ChatTranscript {
                     call.done = true
                     call.blockedByAutoMode = Self.blockedByAutoMode(id, meta: message["tool_result_meta"])
                     items[index].kind = .tool(call)
+                    if !call.isError { applyTaskListResult(call, result: message["tool_use_result"] ?? message["toolUseResult"]) }
                 }
             case "text":
                 if history, let text = block["text"]?.string { appendUserText(text) }
@@ -683,6 +704,33 @@ public struct ChatTranscript {
     static func userText(_ content: JSON?) -> String {
         if let text = content?.string { return text }
         return (content?.array ?? []).compactMap { $0["type"]?.string == "text" ? $0["text"]?.string : nil }.joined(separator: "\n")
+    }
+
+    public static func todoList(_ input: JSON) -> [TodoItem] {
+        (input["todos"]?.array ?? []).enumerated().compactMap { index, t in
+            guard let content = t["content"]?.string else { return nil }
+            return TodoItem(id: t["id"]?.string ?? "\(index)", content: content, activeForm: t["activeForm"]?.string,
+                            status: t["status"]?.string ?? "pending")
+        }
+    }
+
+    /// The task list tools change the checklist once their call succeeds: TaskCreate learns its ID from the result.
+    private mutating func applyTaskListResult(_ call: ToolCall, result: JSON?) {
+        switch call.name {
+        case "TaskCreate":
+            let text = call.result ?? ""
+            guard let subject = call.input["subject"]?.string,
+                  let id = result?["task"]?["id"]?.string ?? Self.between(text, "Task #", " ") else { return }
+            todos.removeAll { $0.id == id }
+            todos.append(TodoItem(id: id, content: subject, activeForm: call.input["activeForm"]?.string))
+        case "TaskUpdate":
+            guard let id = call.input["taskId"]?.string, let index = todos.firstIndex(where: { $0.id == id }) else { return }
+            if call.input["status"]?.string == "deleted" { todos.remove(at: index); return }
+            if let v = call.input["status"]?.string { todos[index].status = v }
+            if let v = call.input["subject"]?.string { todos[index].content = v }
+            if let v = call.input["activeForm"]?.string { todos[index].activeForm = v }
+        default: break
+        }
     }
 
     private mutating func appendUserText(_ raw: String) {

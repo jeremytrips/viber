@@ -27,6 +27,7 @@ Launch Viber from /Applications and allow notifications when asked. Notification
 
 - **Sessions sidebar**: every open session with its state (working, waiting for you, finished, failed). Sessions started outside Viber show up too.
 - **Chat**: streamed replies, tool calls summarized inline, Claude's thinking folded into a row you can open, stop with ⌘.
+- **Checklist**: when Claude keeps a task list (`TaskCreate`/`TaskUpdate`, or `TodoWrite` on older setups), it stays pinned above the message box until everything on it is done. Claude Code only offers these tools to current models when `CLAUDE_CODE_ENABLE_TODO_TOOLS=1` is set (for example under `env` in `~/.claude/settings.json`).
 - **Rewind files**: hover a message you sent (or right-click it) and choose rewind to put files back the way they were before it, like Esc Esc → restore code in the terminal. Viber shows which files would change and asks first; the conversation itself is left as it is.
 - **Images and files**: paste (⌘V), drop or attach (paperclip) images to send them with a message; they are scaled to at most 2000 px. Other files and folders are mentioned as `@path`, and typing `@` offers the project's files (from `git ls-files`).
 - **Cards** for permission requests, questions from Claude (`AskUserQuestion`), plans to approve (`ExitPlanMode`), and MCP servers asking for input (a form built from the server's schema, or a page to open in the browser).

@@ -10,6 +10,7 @@ struct PaneView: View {
             PaneHeader(pane: pane)
             Divider()
             ChatList(pane: pane, readOnly: false)
+            ChecklistPanel(pane: pane)
             ComposerView(pane: pane)
         }
         .background(Color(nsColor: .textBackgroundColor))
@@ -353,7 +354,9 @@ struct ToolDetail: View {
             } else if let command = call.input["command"]?.string {
                 Text(command).font(.system(size: 11.5, design: .monospaced)).textSelection(.enabled).padding(10)
             }
-            if let result = call.result, !result.isEmpty {
+            if call.name == "TodoWrite" {
+                ChecklistRows(items: ChatTranscript.todoList(call.input)).padding(10)
+            } else if let result = call.result, !result.isEmpty {
                 Divider()
                 ScrollView {
                     Text(result.count > 6000 ? String(result.prefix(6000)) + "\n…" : result)
@@ -368,6 +371,62 @@ struct ToolDetail: View {
         }
         .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.separator))
+    }
+}
+
+/// Claude's checklist, pinned above the message box while something on it is still open.
+struct ChecklistPanel: View {
+    let pane: Pane
+    @State private var open = true
+
+    var body: some View {
+        let todos = pane.chat.todos
+        if todos.contains(where: { !$0.isDone }) {
+            VStack(alignment: .leading, spacing: 6) {
+                Button { withAnimation(.easeOut(duration: 0.12)) { open.toggle() } } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "checklist")
+                        Text("Checklist").fontWeight(.semibold)
+                        Text("\(todos.filter(\.isDone).count) of \(todos.count) done").foregroundStyle(.secondary)
+                        if !open, let active = todos.first(where: \.isActive) {
+                            Text("· \(active.activeForm ?? active.content)").foregroundStyle(.secondary).lineLimit(1)
+                        }
+                        Spacer()
+                        Image(systemName: open ? "chevron.down" : "chevron.up").font(.caption2).foregroundStyle(.tertiary)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                if open { ChecklistRows(items: todos) }
+            }
+            .font(.callout)
+            .padding(10)
+            .frame(maxWidth: 760, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .controlBackgroundColor)))
+            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.separator))
+            .padding(.horizontal, 24).padding(.top, 6)
+            .frame(maxWidth: .infinity)
+        }
+    }
+}
+
+struct ChecklistRows: View {
+    let items: [TodoItem]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(items) { item in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: item.isDone ? "checkmark.circle.fill" : item.isActive ? "circle.dotted.circle" : "circle")
+                        .foregroundStyle(item.isDone ? Color.green : item.isActive ? Color.accentColor : Color.secondary)
+                    Text(item.isActive ? (item.activeForm ?? item.content) : item.content)
+                        .strikethrough(item.isDone)
+                        .foregroundStyle(item.isDone ? Color.secondary : Color.primary)
+                        .fontWeight(item.isActive ? .medium : .regular)
+                }
+                .font(.callout)
+            }
+        }
     }
 }
 
