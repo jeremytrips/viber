@@ -39,27 +39,27 @@ struct SidebarView: View {
                     ProjectHeader(name: group.name, path: group.path)
                 }
             }
-            if !model.externals.isEmpty {
-                Section("Running elsewhere") {
-                    ForEach(model.externals) { session in
-                        ExternalRow(session: session).tag(Target.external(session.id))
-                    }
-                }
-            }
         }
         .listStyle(.sidebar)
         .safeAreaInset(edge: .bottom) {
-            HStack {
-                SettingsLink { Image(systemName: "gearshape") }
-                    .buttonStyle(.borderless)
-                    .help("Settings for all sessions (⌘,)")
-                let waiting = model.waitingCount
-                Text(waiting == 0 ? "Nothing waiting for you" : "\(waiting) waiting for you · ⌘J")
-                    .foregroundStyle(waiting == 0 ? .secondary : .primary)
-                Spacer()
+            VStack(spacing: 0) {
+                Divider()
+                if !model.externals.isEmpty {
+                    ExternalsPanel()
+                    Divider()
+                }
+                HStack {
+                    SettingsLink { Image(systemName: "gearshape") }
+                        .buttonStyle(.borderless)
+                        .help("Settings for all sessions (⌘,)")
+                    let waiting = model.waitingCount
+                    Text(waiting == 0 ? "Nothing waiting for you" : "\(waiting) waiting for you · ⌘J")
+                        .foregroundStyle(waiting == 0 ? .secondary : .primary)
+                    Spacer()
+                }
+                .font(.caption)
+                .padding(.horizontal, 12).padding(.vertical, 8)
             }
-            .font(.caption)
-            .padding(.horizontal, 12).padding(.vertical, 8)
             .background(.bar)
         }
         .toolbar {
@@ -185,6 +185,70 @@ struct PaneRow: View {
         }
         .padding(.vertical, 3)
         .help(pane.state.label)
+    }
+}
+
+/// Sessions running outside Viber, pinned above the sidebar footer. Collapses to its header.
+struct ExternalsPanel: View {
+    @Environment(AppModel.self) private var model
+    @AppStorage("sidebarExternalsExpanded") private var expanded = true
+
+    var body: some View {
+        let count = model.externals.count
+        let waiting = model.externals.filter { [.input, .plan, .permission].contains($0.state) }.count
+        VStack(spacing: 0) {
+            Button { withAnimation(.snappy) { expanded.toggle() } } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.right")
+                        .font(.caption2.weight(.bold))
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
+                    Text("Running elsewhere")
+                    Spacer(minLength: 4)
+                    if !expanded && waiting > 0 {
+                        Text("\(waiting) waiting").foregroundStyle(.orange)
+                    }
+                    Text("\(count)").monospacedDigit()
+                }
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 12).padding(.vertical, 6)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(expanded ? "Hide sessions running outside Viber" : "Show sessions running outside Viber")
+            .accessibilityLabel("Running elsewhere, \(count) sessions")
+            .accessibilityValue(expanded ? "expanded" : "collapsed")
+            if expanded {
+                ViewThatFits(in: .vertical) {
+                    rows
+                    ScrollView { rows }
+                }
+                .frame(maxHeight: 200)
+            }
+        }
+        .onChange(of: model.selection) { _, selection in
+            if case .external? = selection { expanded = true }
+        }
+    }
+
+    private var rows: some View {
+        VStack(spacing: 0) {
+            ForEach(model.externals) { session in
+                Button { model.select(.external(session.id)) } label: {
+                    ExternalRow(session: session)
+                        .padding(.horizontal, 8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .background {
+                            if model.selection == .external(session.id) {
+                                RoundedRectangle(cornerRadius: 5).fill(Color.accentColor.opacity(0.2))
+                            }
+                        }
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 6).padding(.bottom, 6)
     }
 }
 
