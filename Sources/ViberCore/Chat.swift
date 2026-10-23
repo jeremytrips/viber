@@ -141,6 +141,8 @@ public struct ChatTranscript {
     public var turnStartedByUser = true
     /// MCP servers, context, rules and the like, for the settings sheet.
     public var controls = SessionControls()
+    /// When Claude last changed a file in this process's lifetime, so the preview can tell whether a hot update followed.
+    public private(set) var lastFileEditAt: Date?
 
     private struct PendingRequest {
         var subtype: String
@@ -373,7 +375,7 @@ public struct ChatTranscript {
         switch message["type"]?.string {
         case "system": applySystem(message)
         case "assistant": applyAssistant(message, now: history ? (Dates.parse(message["timestamp"]?.any) ?? now) : now)
-        case "user": applyUser(message, history: history)
+        case "user": applyUser(message, history: history, now: now)
         case "stream_event": applyStreamEvent(message)
         case "result": applyResult(message)
         case "control_request": return applyControlRequest(message)
@@ -477,7 +479,7 @@ public struct ChatTranscript {
         cache = CacheEstimate(observedAt: now, ttl: ttl, basis: basis, generation: messageID)
     }
 
-    private mutating func applyUser(_ message: JSON, history: Bool) {
+    private mutating func applyUser(_ message: JSON, history: Bool, now: Date) {
         guard let body = message["message"] else { return }
         if message["parent_tool_use_id"]?.string != nil { return }
         if let text = body["content"]?.string {
@@ -494,6 +496,7 @@ public struct ChatTranscript {
                     call.done = true
                     call.blockedByAutoMode = Self.blockedByAutoMode(id, meta: message["tool_result_meta"])
                     items[index].kind = .tool(call)
+                    if !history, !call.isError, Self.editTools.contains(call.name) { lastFileEditAt = now }
                 }
             case "text":
                 if history, let text = block["text"]?.string { appendUserText(text) }
@@ -501,6 +504,8 @@ public struct ChatTranscript {
             }
         }
     }
+
+    static let editTools: Set<String> = ["Edit", "MultiEdit", "Write", "NotebookEdit"]
 
     private mutating func appendUserText(_ raw: String) {
         // Slash commands are stored with XML-ish wrappers; show them the way they were typed.

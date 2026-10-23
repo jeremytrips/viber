@@ -9,11 +9,15 @@ enum Prefs {
     static let newSessionMode = "newSessionMode"
     /// Empty: Claude Code's own default.
     static let newSessionModel = "newSessionModel"
+    /// Serve the browser preview's MCP tools to sessions started from now on.
+    static let previewTools = "previewTools"
+    /// Approve preview clicks, typing and scripts on local pages without a permission card.
+    static let previewLocalActions = "previewLocalActions"
 
     static func register() {
         UserDefaults.standard.register(defaults: [
             notifyFinished: true, notifyNeedsYou: true, notifyCache: true, cacheWarningMinutes: 2,
-            newSessionMode: "default", newSessionModel: ""
+            newSessionMode: "default", newSessionModel: "", previewTools: true, previewLocalActions: true
         ])
     }
 

@@ -25,6 +25,7 @@ struct ComposerView: View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 0) {
                 if Relay.isRelay(draft) { relayMenu } else if !suggestions.isEmpty { slashMenu }
+                if !pane.attachments.isEmpty { attachmentChips }
                 TextField(placeholder, text: $draft, axis: .vertical)
                     .textFieldStyle(.plain)
                     .font(.body)
@@ -52,12 +53,36 @@ struct ComposerView: View {
         .padding(.horizontal, 24).padding(.top, 8).padding(.bottom, 16)
         .frame(maxWidth: .infinity)
         .onAppear { focused = true }
+        .onChange(of: pane.attachments.count) { old, new in if new > old { focused = true } }
+    }
+
+    /// Elements picked in the preview; they go out with the next message.
+    private var attachmentChips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(pane.attachments) { reference in
+                    HStack(spacing: 5) {
+                        Image(systemName: "cursorarrow.rays").font(.caption)
+                        Text(reference.label).font(.caption).lineLimit(1)
+                        Button { pane.attachments.removeAll { $0.id == reference.id } } label: {
+                            Image(systemName: "xmark").font(.caption2.weight(.semibold))
+                        }
+                        .buttonStyle(.plain).foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 8).padding(.vertical, 4)
+                    .background(Capsule().fill(Color.accentColor.opacity(0.12)))
+                    .help(reference.selector)
+                }
+            }
+            .padding(.horizontal, 10).padding(.top, 9)
+        }
     }
 
     private var placeholder: String {
         switch pane.state {
         case .permission, .input, .plan: return "Answer the card above, or type to send a message"
         case .working: return "Claude is working. Messages you send now are queued."
+        case _ where !pane.attachments.isEmpty: return "Say what to do with the picked element"
         default: return "Message Claude. Type / for commands, // to message another session"
         }
     }
@@ -186,6 +211,8 @@ struct ComposerView: View {
         guard !text.isEmpty else { return }
         draft = ""
         menuDismissed = false
-        model.submit(text, in: pane)
+        let message = ElementReference.compose(text, with: pane.attachments)
+        pane.attachments = []
+        model.submit(message, in: pane)
     }
 }

@@ -53,6 +53,20 @@ Launch Viber from /Applications and allow notifications when asked. Notification
 - **Messages between sessions**: start a message with `//` to send it to another open session instead of this one. A menu ranks the other sessions by what you typed (their title, project, branch and recent conversation), so `//the firmware endpoint is ready` goes to the session working on firmware. Start with a session's name (`//backend: …`) to pick it directly, or use ↑↓ to choose. The receiving session shows who it came from. If it is busy, the message waits until its current reply ends. When it finishes answering, its reply is posted back into the sender's chat (marked "Reply from …") so the sender's Claude can carry on; replies never ask for an answer, so sessions don't ping-pong.
 - **Messages panel** (top of the sidebar, ⇧⌘M): every message between sessions, newest first, with who sent it to whom, whether it is queued, waiting for a reply or answered, and the reply itself. Filter by status, search, and click a session name to jump to it. Unread messages show a badge.
 - **Project notes**: click the note icon next to a project name in the sidebar to leave a note for the next sessions in that project. Viber adds it to the system prompt of every new conversation it starts there, including after `/clear`. Ongoing conversations keep the version they started with, even when resumed, because Claude Code records the system prompt once per conversation. Sessions can read and update it with `viber note`, and `/handoff` adds a short status section to it. Notes are stored by Viber, not in the repo.
+- **Browser preview** (the Safari button in the session header, ⇧⌘B): a browser beside the chat that you and Claude share, so Claude can check its own web work.
+  - **Viber serves the tools itself.** They come from an MCP server built into Viber, over the same stdio channel, so there's nothing to install. Every session gets them.
+  - **The tools:**
+    - `preview_open` loads a dev server URL.
+    - `preview_screenshot` captures the page. It first waits for the hot update after Claude's last edit (Vite, Next.js, webpack), then for the page to settle.
+    - `preview_snapshot` gives an outline of the page with element refs.
+    - `preview_console` returns console output, uncaught errors and failed requests.
+    - `preview_click`, `preview_type`, `preview_eval` and `preview_wait` act on the page.
+  - **Permissions:** looking never asks. Clicking, typing and scripts are approved automatically on local pages, and ask anywhere else. Both are configurable under Settings → General.
+  - **Pick an element (⇧⌘C).** Click something in the page and it is attached to your next message, with its selector, HTML and, for React, Vue and Svelte dev builds, the component and source file. So "make this bigger" edits the right code.
+  - **Handy extras:**
+    - When a command prints a local URL (a dev server starting), its row offers *Open in preview*.
+    - The console button shows errors since the last load.
+    - The page keeps running while you look at other sessions, and the URL is restored after a relaunch.
 - **Worktrees**: start a session in a new git worktree at `<repo>/.claude/worktrees/<slug>` on branch `viber/<slug>`. Closing can remove the worktree (refused if it has uncommitted changes) and delete the branch (`git branch -d` only, so unmerged branches are kept).
 - **Cache ring**: time left on the prompt cache per session; Viber can warn before it expires.
 - **Usage bar**: plan usage from `clauth` (start `clauth daemon` to keep it current).
@@ -72,6 +86,9 @@ Launch Viber from /Applications and allow notifications when asked. Notification
 | ⌘⇧W | Close session |
 | ⌘⇧R | Resume a past session |
 | ⌥⌘, | Session settings |
+| ⇧⌘B | Show or hide the browser preview |
+| ⌘R | Reload the preview |
+| ⇧⌘C | Pick an element in the preview |
 | ⌘, | Settings for all sessions |
 
 ## The `viber` CLI and skills

@@ -14,11 +14,25 @@ public enum ToolSummary {
             return "\(pattern)\(scope)"
         }
         if let url = input["url"]?.string { return url }
+        if let selector = input["selector"]?.string { return selector }
+        if let text = input["text"]?.string { return firstLine(text, limit: 120) }
+        if let ref = input["ref"]?.string { return ref }
+        if let expression = input["expression"]?.string { return firstLine(expression, limit: 120) }
         if let query = input["query"]?.string { return firstLine(query, limit: 120) }
         if let description = input["description"]?.string { return firstLine(description, limit: 120) }
         if let prompt = input["prompt"]?.string { return firstLine(prompt, limit: 120) }
         if name == "TodoWrite", let todos = input["todos"]?.array { return "\(todos.count) items" }
         return ""
+    }
+
+    /// How a tool is named in the chat: "Preview · click" for Viber's preview, "server · tool" for other MCP tools.
+    public static func displayName(_ name: String) -> String {
+        guard name.hasPrefix("mcp__") else { return name }
+        let parts = name.dropFirst(5).components(separatedBy: "__")
+        guard parts.count >= 2 else { return name }
+        let tool = parts.dropFirst().joined(separator: "__")
+        if parts[0] == "viber", tool.hasPrefix("preview_") { return "Preview · " + tool.dropFirst("preview_".count) }
+        return "\(parts[0]) · \(tool)"
     }
 
     /// Diff lines for Edit/MultiEdit/Write inputs: ("-"|"+"|" ", text).

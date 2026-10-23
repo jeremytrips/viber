@@ -31,6 +31,8 @@ private struct GeneralSettings: View {
     @AppStorage(Prefs.notifyCache) private var notifyCache = true
     @AppStorage(Prefs.cacheWarningMinutes) private var cacheWarningMinutes = 2
     @AppStorage(Prefs.newSessionMode) private var newSessionMode = "default"
+    @AppStorage(Prefs.previewTools) private var previewTools = true
+    @AppStorage(Prefs.previewLocalActions) private var previewLocalActions = true
 
     var body: some View {
         Form {
@@ -45,6 +47,16 @@ private struct GeneralSettings: View {
                 Picker("Permission mode", selection: $newSessionMode) {
                     ForEach(PermissionMode.offered, id: \.self) { Text($0.label).tag($0.rawValue) }
                 }
+            }
+            Section {
+                Toggle("Give Claude tools to see and use the preview", isOn: $previewTools)
+                Toggle("Let Claude click, type and run scripts on local pages without asking", isOn: $previewLocalActions)
+                    .disabled(!previewTools)
+            } header: {
+                Text("Browser preview")
+            } footer: {
+                Text("Screenshots, the console and page outlines never ask. The first setting applies to sessions started afterwards.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)

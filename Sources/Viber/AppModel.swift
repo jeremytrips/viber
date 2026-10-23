@@ -194,6 +194,7 @@ final class AppModel {
         pane.onTurnFinished = { [weak self] pane in self?.turnFinished(pane) }
         pane.onOpenURL = { NSWorkspace.shared.open($0) }
         pane.notePrompt = { [weak self] pane in self?.notePrompt(for: pane) }
+        pane.onPersist = { [weak self] in self?.save() }
     }
 
     /// Routes composer text: skills go to the CLI, terminal-only commands are handled here.
@@ -403,6 +404,7 @@ final class AppModel {
     func close(_ pane: Pane, removeWorktree: Bool = false, deleteBranch: Bool = false) {
         pane.onStateChange = nil
         pane.stop()
+        pane.closePreview()
         panes.removeAll { $0.id == pane.id }
         if selection == .pane(pane.id) { selection = panes.last.map { .pane($0.id) } }
         if settingsSheet?.paneID == pane.id { settingsSheet = nil }

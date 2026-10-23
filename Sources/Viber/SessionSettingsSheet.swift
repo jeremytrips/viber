@@ -142,7 +142,7 @@ private struct McpRow: View {
 
     static func sourceLabel(_ source: String) -> String {
         ["plugin": "plugin", "claudeai": "claude.ai", "user": "all projects", "project": "project .mcp.json",
-         "local": "this project", "dynamic": "added by the session"][source] ?? source
+         "local": "this project", "dynamic": "added by the session", "sdk": "built into Viber"][source] ?? source
     }
 
     var body: some View {
