@@ -58,7 +58,7 @@ Launch Viber from /Applications and allow notifications when asked. Notification
   Changes to these files apply to sessions started afterwards.
 - **Messages between sessions**: start a message with `//` to send it to another open session instead of this one. A menu ranks the other sessions by what you typed (their title, project, branch and recent conversation), so `//the firmware endpoint is ready` goes to the session working on firmware. Start with a session's name (`//backend: …`) to pick it directly, or use ↑↓ to choose. The receiving session shows who it came from. If it is busy, the message waits until its current reply ends. When it finishes answering, its reply is posted back into the sender's chat (marked "Reply from …") so the sender's Claude can carry on; replies never ask for an answer, so sessions don't ping-pong.
 - **Messages panel** (top of the sidebar, ⇧⌘M): every message between sessions, newest first, with who sent it to whom, whether it is queued, waiting for a reply or answered, and the reply itself. Filter by status, search, and click a session name to jump to it. Unread messages show a badge.
-- **Project notes**: click the note icon next to a project name in the sidebar to leave a note for the next sessions in that project. Viber adds it to the system prompt of every new conversation it starts there, including after `/clear`. Ongoing conversations keep the version they started with, even when resumed, because Claude Code records the system prompt once per conversation. Sessions can read and update it with `viber note`, and `/handoff` adds a short status section to it. Notes are stored by Viber, not in the repo.
+- **Ideas**: a list per project of things to do later that nobody has planned yet. Click the lightbulb next to a project name in the sidebar to jot one down or see that project's list (the number is how many are still to plan). The **Ideas** panel (top of the sidebar, ⇧⌘I) shows every project's ideas, filtered by *To plan*, *Started* or *Done*, with search. **Plan** starts a new session for an idea in plan mode, in a new worktree when the project is a git repo, with the idea as the first message. The idea is then marked started and links to that session. Tick an idea off when it's done, or right-click to edit, copy or delete it. Sessions can add ideas with `viber idea add` (the `/idea` skill), and each idea shows who added it. Ideas are stored by Viber, not in the repo. Project notes from earlier versions were turned into one idea each.
 - **Worktrees**: start a session in a new git worktree at `<repo>/.claude/worktrees/<slug>` on branch `viber/<slug>`. Closing can remove the worktree (refused if it has uncommitted changes) and delete the branch (`git branch -d` only, so unmerged branches are kept).
 - **Cache ring**: time left on the prompt cache per session; Viber can warn before it expires.
 - **Usage bar**: plan usage from `clauth` (start `clauth daemon` to keep it current).
@@ -71,6 +71,7 @@ Launch Viber from /Applications and allow notifications when asked. Notification
 | ⌘N | New session |
 | ⌘K | Jump to session |
 | ⇧⌘M | Show messages between sessions |
+| ⇧⌘I | Show ideas |
 | ⌘J | Next session waiting for you |
 | ⌘1–⌘9 | Select session 1–9 |
 | ⌘. | Stop Claude |
@@ -88,8 +89,8 @@ Viber puts a small `viber` command on the PATH of every session it starts (with 
 viber close [--remove-worktree] [--delete-branch]   # close this session after the current reply
 viber notify <text…>                                # post a notification
 viber rename <title…>                               # rename the session in the sidebar
-viber note                                          # print this project's note
-viber note set <text…> | set - | clear              # replace it (`-` reads stdin), or remove it
+viber idea [list]                                   # print this project's ideas that are not done
+viber idea add <text…> | add -                      # add an idea (`-` reads stdin); the first line is its title
 ```
 
 Outside a Viber session it exits with status 2.
@@ -99,7 +100,8 @@ Skills in `plugin/skills`:
 - `/cleanup`: checks that the branch is merged (including squash merges via `gh`), with no uncommitted changes, unpushed commits, or stashes, then asks Viber to remove the worktree and branch. It never deletes anything itself.
 - `/ship`: reviews the diff, commits, pushes, and opens a PR.
 - `/sync`: rebases onto the latest base branch and resolves conflicts carefully; never force-pushes without asking.
-- `/handoff`: writes a status note (goal, done, in progress, next steps, open questions, files touched), and in Viber saves a short version to the project note for the next session.
+- `/handoff`: writes a status note (goal, done, in progress, next steps, open questions, files touched).
+- `/idea`: saves an idea, follow-up or out-of-scope task to the project's idea list, written so a later session can plan it without this conversation. Claude also uses it on its own when it notices work outside the current task.
 
 ## Development
 

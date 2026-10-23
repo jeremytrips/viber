@@ -9,10 +9,13 @@ enum Target: Hashable {
     case external(String)
     /// The timeline of `//` messages between sessions.
     case messages
+    /// Every project's ideas that are not planned yet.
+    case ideas
 
     var key: String {
         switch self {
         case .messages: return "messages"
+        case .ideas: return "ideas"
         case .pane(let id): return "pane:\(id)"
         case .external(let id): return "ext:\(id)"
         }
@@ -20,6 +23,7 @@ enum Target: Hashable {
 
     init?(key: String) {
         if key == "messages" { self = .messages }
+        else if key == "ideas" { self = .ideas }
         else if key.hasPrefix("pane:") { self = .pane(String(key.dropFirst(5))) }
         else if key.hasPrefix("ext:") { self = .external(String(key.dropFirst(4))) }
         else { return nil }
@@ -40,6 +44,8 @@ struct NewSessionRequest {
     var name: String
     var permissionMode: String
     var firstMessage: String
+    /// The idea this session is started for, linked to it once it opens.
+    var ideaID: String?
 }
 
 @MainActor @Observable
@@ -59,7 +65,9 @@ final class AppModel {
     var settingsSheet: SettingsSheetRequest?
     var relayLog = RelayLog()
     var cacheWarning: TimeInterval { TimeInterval(max(Prefs.int(Prefs.cacheWarningMinutes), 1) * 60) }
-    var notes = ProjectNotes()
+    var ideas = IdeaList()
+    /// Ideas whose session is being created, so Plan can't start two.
+    var planningIdeas: Set<String> = []
 
     @ObservationIgnored let notifier = Notifier()
     @ObservationIgnored private let externalMonitor = ExternalMonitor()
@@ -151,15 +159,16 @@ final class AppModel {
                     switch result {
                     case .success(let info):
                         self.open(title: title, spec: LaunchSpec(profile: request.profile, cwd: info.path, permissionMode: mode, model: launchModel),
-                                  worktree: info, firstMessage: request.firstMessage)
+                                  worktree: info, firstMessage: request.firstMessage, ideaID: request.ideaID)
                     case .failure(let error):
+                        if let id = request.ideaID { self.planningIdeas.remove(id) }
                         self.errorMessage = error.localizedDescription
                     }
                 }
             }
         } else {
             open(title: title, spec: LaunchSpec(profile: request.profile, cwd: request.folder, permissionMode: mode, model: launchModel),
-                 worktree: nil, firstMessage: request.firstMessage)
+                 worktree: nil, firstMessage: request.firstMessage, ideaID: request.ideaID)
         }
     }
 
@@ -179,11 +188,16 @@ final class AppModel {
         open(title: title, spec: LaunchSpec(profile: defaultProfile, cwd: session.project, resume: session.id), worktree: nil, firstMessage: "")
     }
 
-    private func open(title: String, spec: LaunchSpec, worktree: WorktreeInfo?, firstMessage: String) {
+    private func open(title: String, spec: LaunchSpec, worktree: WorktreeInfo?, firstMessage: String, ideaID: String? = nil) {
         let pane = Pane(title: title, spec: spec, worktree: worktree)
         wire(pane)
         panes.append(pane)
         save()
+        if let ideaID {
+            planningIdeas.remove(ideaID)
+            ideas.start(ideaID, sessionID: pane.id, sessionTitle: title)
+            saveIdeas()
+        }
         select(.pane(pane.id))
         let text = firstMessage.trimmingCharacters(in: .whitespacesAndNewlines)
         if !text.isEmpty { submit(text, in: pane) }
@@ -193,7 +207,6 @@ final class AppModel {
         pane.onStateChange = { [weak self] pane, previous in self?.stateChanged(pane, from: previous) }
         pane.onTurnFinished = { [weak self] pane in self?.turnFinished(pane) }
         pane.onOpenURL = { NSWorkspace.shared.open($0) }
-        pane.notePrompt = { [weak self] pane in self?.notePrompt(for: pane) }
     }
 
     /// Routes composer text: skills go to the CLI, terminal-only commands are handled here.
@@ -405,16 +418,53 @@ final class AppModel {
         deliver(pane.inbox.removeFirst(), to: pane)
     }
 
-    // MARK: Project notes
+    // MARK: Ideas
 
-    /// Saves a project's note. Sessions pick it up the next time they start.
-    func setNote(_ text: String, for project: String, by author: String) {
-        notes.set(text, for: project, by: author)
-        saveNotes()
+    /// Projects an idea can be filed under: open sessions' projects in sidebar order, then others that have ideas.
+    var ideaProjects: [String] {
+        var seen = Set<String>()
+        let open = panes.map(\.projectPath).filter { seen.insert($0).inserted }
+        let others = ideas.ideas.map(\.project).filter { seen.insert($0).inserted }
+            .sorted { Self.projectName($0).localizedStandardCompare(Self.projectName($1)) == .orderedAscending }
+        return open + others
     }
 
-    private func notePrompt(for pane: Pane) -> String? {
-        notes.note(for: pane.projectPath).map { ProjectNotes.systemPrompt(projectName: pane.projectName, note: $0) }
+    static func projectName(_ path: String) -> String { URL(fileURLWithPath: path).lastPathComponent }
+
+    func addIdea(_ text: String, project: String, by author: String) {
+        guard ideas.add(text, project: project, by: author) != nil else { return }
+        saveIdeas()
+    }
+
+    func editIdea(_ id: String, text: String) {
+        ideas.edit(id, text: text)
+        saveIdeas()
+    }
+
+    func setIdeaStatus(_ id: String, _ status: Idea.Status) {
+        ideas.setStatus(id, status)
+        saveIdeas()
+    }
+
+    func removeIdea(_ id: String) {
+        ideas.remove(id)
+        saveIdeas()
+    }
+
+    /// Starts a plan-mode session for an idea, in a new worktree when the project is a git repo.
+    /// The idea is marked started, and linked to the session, once the session opens.
+    func plan(_ idea: Idea) {
+        guard !planningIdeas.contains(idea.id) else { return }
+        planningIdeas.insert(idea.id)
+        let project = idea.project
+        Task.detached {
+            let isRepo = Worktree.repoRoot(project) != nil
+            await MainActor.run {
+                self.createSession(NewSessionRequest(folder: project, profile: AccountPicker.usableDefault(self), useWorktree: isRepo,
+                                                     name: idea.title, permissionMode: PermissionMode.plan.rawValue,
+                                                     firstMessage: idea.text, ideaID: idea.id))
+            }
+        }
     }
 
     private func ensureRunning(_ pane: Pane) {
@@ -603,8 +653,8 @@ final class AppModel {
                 notifier.post(id: UUID().uuidString, title: pane.title, body: request.text ?? "", target: Target.pane(pane.id).key)
             case .rename:
                 if let text = request.text, !text.isEmpty { pane.title = text; save() }
-            case .note:
-                setNote(request.text ?? "", for: pane.projectPath, by: pane.title)
+            case .idea:
+                addIdea(request.text ?? "", project: pane.projectPath, by: pane.title)
             }
         }
     }
@@ -662,16 +712,16 @@ final class AppModel {
         }
     }
 
-    func saveNotes() {
+    func saveIdeas() {
         do {
-            try notes.save()
+            try ideas.save()
         } catch {
-            errorMessage = "Could not save project notes: \(error.localizedDescription)"
+            errorMessage = "Could not save ideas: \(error.localizedDescription)"
         }
     }
 
     private func restore() {
-        notes = ProjectNotes.load()
+        ideas = IdeaList.load()
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .secondsSince1970
         if let data = try? Data(contentsOf: ViberPaths.relays), let log = try? decoder.decode(RelayLog.self, from: data) {

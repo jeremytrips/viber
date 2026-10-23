@@ -50,8 +50,6 @@ final class Pane: Identifiable {
     @ObservationIgnored var onTurnFinished: ((Pane) -> Void)?
     /// Opens a sign-in page for an MCP server.
     @ObservationIgnored var onOpenURL: ((URL) -> Void)?
-    /// The project note for the system prompt, looked up each time the process starts.
-    @ObservationIgnored var notePrompt: ((Pane) -> String?)?
 
     init(id: String = UUID().uuidString, title: String, spec: LaunchSpec, worktree: WorktreeInfo? = nil) {
         self.id = id; self.title = title; self.spec = spec; self.worktree = worktree
@@ -70,7 +68,7 @@ final class Pane: Identifiable {
     var state: PaneState { chat.state }
     var profileLabel: String { spec.profile ?? "Default login" }
     var cwd: String { spec.cwd }
-    /// What project notes are keyed by: the repo root for worktree sessions, else the session's folder.
+    /// What ideas are filed under: the repo root for worktree sessions, else the session's folder.
     var projectPath: String { worktree?.repo ?? spec.cwd }
     var projectName: String { URL(fileURLWithPath: projectPath).lastPathComponent }
     var isRunning: Bool { process?.isRunning == true }
@@ -82,7 +80,6 @@ final class Pane: Identifiable {
         }
         started = true
         spec.pluginDir = pluginDir
-        spec.appendSystemPrompt = notePrompt?(self)
         let before = chat.state
         chat.state = .starting
         do {
