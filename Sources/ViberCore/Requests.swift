@@ -3,7 +3,7 @@ import Foundation
 /// A request from the `viber` command (run by skills inside a session) to the app.
 /// Delivered through the same atomic file-drop as HookInbox.
 public struct ViberRequest: Codable, Equatable {
-    public enum Command: String, Codable { case close, notify, rename, note }
+    public enum Command: String, Codable { case close, notify, rename, idea }
     public var paneID: String
     public var command: Command
     public var text: String?

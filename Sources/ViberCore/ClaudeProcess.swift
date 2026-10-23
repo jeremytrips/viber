@@ -25,7 +25,8 @@ public final class ClaudeProcess {
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = command.arguments
         process.currentDirectoryURL = URL(fileURLWithPath: spec.cwd)
-        var extra = ["VIBER_PANE_ID": paneID]
+        // Checkpoints let a session rewind files to before a message, as Esc Esc does in the terminal.
+        var extra = ["VIBER_PANE_ID": paneID, "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING": "1"]
         if let project { extra["VIBER_PROJECT"] = project }
         process.environment = Executables.environment(adding: binDir.map { [$0] } ?? [], extra: extra)
         process.standardInput = stdin

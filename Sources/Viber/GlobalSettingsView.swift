@@ -30,7 +30,7 @@ private struct GeneralSettings: View {
     @AppStorage(Prefs.notifyNeedsYou) private var notifyNeedsYou = true
     @AppStorage(Prefs.notifyCache) private var notifyCache = true
     @AppStorage(Prefs.cacheWarningMinutes) private var cacheWarningMinutes = 2
-    @AppStorage(Prefs.newSessionMode) private var newSessionMode = "default"
+    @AppStorage(Prefs.newSessionMode) private var newSessionMode = "auto"
     @AppStorage(Prefs.previewTools) private var previewTools = true
     @AppStorage(Prefs.previewLocalActions) private var previewLocalActions = true
 

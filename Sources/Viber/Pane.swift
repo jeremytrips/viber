@@ -10,6 +10,8 @@ struct PaneRecord: Codable {
     var worktree: WorktreeInfo?
     /// Permission rules added for this session only, re-applied whenever its process starts.
     var sessionRules: [RuleEdit]?
+    /// Folders added with /add-dir, re-applied the same way.
+    var extraDirs: [String]?
     var preview: PreviewRecord?
 }
 
@@ -51,7 +53,11 @@ final class Pane: Identifiable {
     /// Created the first time the preview is shown or Claude uses a preview tool.
     private(set) var preview: PreviewController?
     /// Elements picked in the preview, attached to the next message.
-    var attachments: [ElementReference] = []
+    var pickedElements: [ElementReference] = []
+    var extraDirs: [String] = []
+    /// The project's files for `@` mentions, loaded when first asked for.
+    var files: [String]?
+    @ObservationIgnored private var filesLoadedAt: Date?
     private(set) var started = false
     @ObservationIgnored private var process: ClaudeProcess?
     /// Preview tool calls in flight, by control request ID.
@@ -62,8 +68,6 @@ final class Pane: Identifiable {
     @ObservationIgnored var onTurnFinished: ((Pane) -> Void)?
     /// Opens a sign-in page for an MCP server.
     @ObservationIgnored var onOpenURL: ((URL) -> Void)?
-    /// The project note for the system prompt, looked up each time the process starts.
-    @ObservationIgnored var notePrompt: ((Pane) -> String?)?
 
     init(id: String = UUID().uuidString, title: String, spec: LaunchSpec, worktree: WorktreeInfo? = nil) {
         self.id = id; self.title = title; self.spec = spec; self.worktree = worktree
@@ -72,6 +76,7 @@ final class Pane: Identifiable {
     convenience init(record: PaneRecord) {
         self.init(id: record.id, title: record.title, spec: record.spec, worktree: record.worktree)
         sessionRules = record.sessionRules ?? []
+        extraDirs = record.extraDirs ?? []
         previewURL = record.preview?.url.flatMap(URL.init(string:))
         showPreview = record.preview?.open ?? false
     }
@@ -79,12 +84,12 @@ final class Pane: Identifiable {
     var record: PaneRecord {
         let preview = previewURL != nil || showPreview ? PreviewRecord(url: previewURL?.absoluteString, open: showPreview) : nil
         return PaneRecord(id: id, title: title, spec: spec, worktree: worktree, sessionRules: sessionRules.isEmpty ? nil : sessionRules,
-                          preview: preview)
+                          extraDirs: extraDirs.isEmpty ? nil : extraDirs, preview: preview)
     }
     var state: PaneState { chat.state }
     var profileLabel: String { spec.profile ?? "Default login" }
     var cwd: String { spec.cwd }
-    /// What project notes are keyed by: the repo root for worktree sessions, else the session's folder.
+    /// What ideas are filed under: the repo root for worktree sessions, else the session's folder.
     var projectPath: String { worktree?.repo ?? spec.cwd }
     var projectName: String { URL(fileURLWithPath: projectPath).lastPathComponent }
     var isRunning: Bool { process?.isRunning == true }
@@ -96,7 +101,6 @@ final class Pane: Identifiable {
         }
         started = true
         spec.pluginDir = pluginDir
-        spec.appendSystemPrompt = notePrompt?(self)
         let before = chat.state
         chat.state = .starting
         do {
@@ -108,7 +112,7 @@ final class Pane: Identifiable {
             let mcp = Prefs.bool(Prefs.previewTools)
                 ? SdkMcp.initializeFields([PreviewToolbox.serverName: ["disableAutoBackground": true, "timeout": 60000]]) : [:]
             p.send(chat.request("initialize", mcp))
-            if !sessionRules.isEmpty { p.send(chat.setSessionRules(sessionRules)) }
+            if !sessionRules.isEmpty || !extraDirs.isEmpty { p.send(chat.setSessionPermissions(rules: sessionRules, directories: extraDirs)) }
         } catch {
             chat.note(error.localizedDescription, isError: true)
             chat.state = .failed
@@ -156,10 +160,10 @@ final class Pane: Identifiable {
     func send(_ message: JSON) { process?.send(message) }
 
     /// Sends a user message, starting the process first if needed.
-    func sendUser(_ text: String, binDir: String?, pluginDir: String?) {
+    func sendUser(_ text: String, images: [ImageAttachment] = [], binDir: String?, pluginDir: String?) {
         if !isRunning { start(binDir: binDir, pluginDir: pluginDir) }
         let before = chat.state
-        process?.send(chat.userMessage(text))
+        process?.send(chat.userMessage(text, images: images))
         lastActivity = Date()
         notifyIfChanged(from: before)
     }
@@ -223,7 +227,7 @@ final class Pane: Identifiable {
         }
         controller.onPick = { [weak self] payload in
             guard let self, let reference = ElementReference(payload: payload, cwd: self.cwd) else { return }
-            self.attachments.append(reference)
+            self.pickedElements.append(reference)
         }
         preview = controller
         return controller
@@ -291,6 +295,17 @@ final class Pane: Identifiable {
     private func cancelToolCalls() {
         for task in mcpTasks.values { task.cancel() }
         mcpTasks = [:]
+    }
+
+    /// Loads the file list for `@` mentions in the background, at most every 30 seconds.
+    func loadFiles() {
+        if let at = filesLoadedAt, Date().timeIntervalSince(at) < 30 { return }
+        filesLoadedAt = Date()
+        let cwd = spec.cwd
+        Task.detached {
+            let list = FileIndex.list(cwd: cwd)
+            await MainActor.run { self.files = list }
+        }
     }
 
     static func transcriptData(sessionID: String, cwd: String) -> Data? {

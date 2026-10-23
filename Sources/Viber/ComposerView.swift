@@ -1,13 +1,20 @@
+import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 import ViberCore
 
-/// The message box: multi-line input, a "/" menu of skills and commands, and mode/model menus.
+/// The message box: multi-line input, a "/" menu of skills and commands, an "@" menu of files,
+/// images (pasted, dropped or picked), and mode/model menus.
 struct ComposerView: View {
     @Environment(AppModel.self) private var model
     let pane: Pane
     @State private var draft = ""
+    @State private var attachments: [ImageAttachment] = []
     @State private var highlighted = 0
     @State private var menuDismissed = false
+    @State private var fileMenuDismissed = false
+    @State private var dropTargeted = false
+    @State private var pasteMonitor: Any?
     @FocusState private var focused: Bool
 
     private var suggestions: [SlashCommand] {
@@ -19,13 +26,24 @@ struct ComposerView: View {
         Relay.isRelay(draft) ? Array(Relay.rank(draft, candidates: model.relayCandidates(excluding: pane)).prefix(6)) : []
     }
 
-    private var menuCount: Int { Relay.isRelay(draft) ? relayTargets.count : suggestions.count }
+    /// For `@path`: the project's files, best match first.
+    private var fileSuggestions: [String] {
+        guard !fileMenuDismissed, !Relay.isRelay(draft), let query = FileIndex.mentionQuery(in: draft), let files = pane.files else { return [] }
+        return FileIndex.suggestions(query, in: files)
+    }
+
+    private var menuCount: Int {
+        Relay.isRelay(draft) ? relayTargets.count : !fileSuggestions.isEmpty ? fileSuggestions.count : suggestions.count
+    }
+
+    private var canSend: Bool { !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty }
 
     var body: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 0) {
-                if Relay.isRelay(draft) { relayMenu } else if !suggestions.isEmpty { slashMenu }
-                if !pane.attachments.isEmpty { attachmentChips }
+                if Relay.isRelay(draft) { relayMenu } else if !fileSuggestions.isEmpty { fileMenu } else if !suggestions.isEmpty { slashMenu }
+                if !pane.pickedElements.isEmpty { pickedElementChips }
+                if !attachments.isEmpty { attachmentRow }
                 TextField(placeholder, text: $draft, axis: .vertical)
                     .textFieldStyle(.plain)
                     .font(.body)
@@ -38,33 +56,48 @@ struct ComposerView: View {
                     .onKeyPress(.tab) { complete() }
                     .onKeyPress(.escape) {
                         if Relay.isRelay(draft) { draft = ""; return .handled }
+                        if !fileSuggestions.isEmpty { fileMenuDismissed = true; return .handled }
                         if !suggestions.isEmpty { menuDismissed = true; return .handled }
                         if pane.state == .working { pane.interrupt(); return .handled }
                         return .ignored
                     }
-                    .onChange(of: draft) { highlighted = 0; if !draft.hasPrefix("/") { menuDismissed = false } }
+                    .onChange(of: draft) {
+                        highlighted = 0
+                        if !draft.hasPrefix("/") { menuDismissed = false }
+                        if FileIndex.mentionQuery(in: draft) == nil { fileMenuDismissed = false } else { pane.loadFiles() }
+                    }
                 bottomBar
             }
             .background(RoundedRectangle(cornerRadius: 12).fill(Color(nsColor: .textBackgroundColor)))
-            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(focused ? Color.accentColor.opacity(0.7) : Color(nsColor: .separatorColor)))
+            .overlay(RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(dropTargeted ? Color.accentColor : focused ? Color.accentColor.opacity(0.7) : Color(nsColor: .separatorColor),
+                              lineWidth: dropTargeted ? 2 : 1))
             .shadow(color: .black.opacity(0.05), radius: 2, y: 1)
             .frame(maxWidth: 760)
+            .onDrop(of: [.fileURL, .image], isTargeted: $dropTargeted, perform: drop)
         }
         .padding(.horizontal, 24).padding(.top, 8).padding(.bottom, 16)
         .frame(maxWidth: .infinity)
-        .onAppear { focused = true }
-        .onChange(of: pane.attachments.count) { old, new in if new > old { focused = true } }
+        .onAppear {
+            focused = true
+            installPasteMonitor()
+        }
+        .onDisappear {
+            if let pasteMonitor { NSEvent.removeMonitor(pasteMonitor) }
+            pasteMonitor = nil
+        }
+        .onChange(of: pane.pickedElements.count) { old, new in if new > old { focused = true } }
     }
 
     /// Elements picked in the preview; they go out with the next message.
-    private var attachmentChips: some View {
+    private var pickedElementChips: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
-                ForEach(pane.attachments) { reference in
+                ForEach(pane.pickedElements) { reference in
                     HStack(spacing: 5) {
                         Image(systemName: "cursorarrow.rays").font(.caption)
                         Text(reference.label).font(.caption).lineLimit(1)
-                        Button { pane.attachments.removeAll { $0.id == reference.id } } label: {
+                        Button { pane.pickedElements.removeAll { $0.id == reference.id } } label: {
                             Image(systemName: "xmark").font(.caption2.weight(.semibold))
                         }
                         .buttonStyle(.plain).foregroundStyle(.secondary)
@@ -82,8 +115,8 @@ struct ComposerView: View {
         switch pane.state {
         case .permission, .input, .plan: return "Answer the card above, or type to send a message"
         case .working: return "Claude is working. Messages you send now are queued."
-        case _ where !pane.attachments.isEmpty: return "Say what to do with the picked element"
-        default: return "Message Claude. Type / for commands, // to message another session"
+        case _ where !pane.pickedElements.isEmpty: return "Say what to do with the picked element"
+        default: return "Message Claude. Type / for commands, @ for files, // to message another session"
         }
     }
 
@@ -102,6 +135,33 @@ struct ComposerView: View {
                     .foregroundStyle(index == highlighted ? Color.white : Color.primary)
                     .padding(.horizontal, 10).padding(.vertical, 5)
                     .background(RoundedRectangle(cornerRadius: 6).fill(index == highlighted ? Color.accentColor : Color.clear))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 4)
+            }
+            Divider().padding(.top, 4)
+        }
+    }
+
+    private var fileMenu: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Files · Tab or Return to mention").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+                .padding(.horizontal, 12).padding(.top, 8).padding(.bottom, 4)
+            ForEach(Array(fileSuggestions.enumerated()), id: \.element) { index, path in
+                let selected = index == highlighted
+                Button { highlighted = index; _ = complete() } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "doc")
+                        Text((path as NSString).lastPathComponent).fontWeight(.medium).lineLimit(1)
+                        Text((path as NSString).deletingLastPathComponent).lineLimit(1).truncationMode(.head)
+                            .foregroundStyle(selected ? Color.white.opacity(0.85) : Color.secondary)
+                        Spacer()
+                    }
+                    .font(.callout)
+                    .foregroundStyle(selected ? Color.white : Color.primary)
+                    .padding(.horizontal, 10).padding(.vertical, 5)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(selected ? Color.accentColor : Color.clear))
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -141,8 +201,31 @@ struct ComposerView: View {
         }
     }
 
+    private var attachmentRow: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(attachments) { image in
+                    HStack(spacing: 6) {
+                        if let thumb = NSImage(data: image.data) {
+                            Image(nsImage: thumb).resizable().scaledToFill().frame(width: 28, height: 28).clipShape(RoundedRectangle(cornerRadius: 4))
+                        }
+                        Text(image.label).font(.caption).lineLimit(1).frame(maxWidth: 140)
+                        Button { attachments.removeAll { $0.id == image.id } } label: { Image(systemName: "xmark.circle.fill") }
+                            .buttonStyle(.plain).foregroundStyle(.secondary).help("Remove")
+                    }
+                    .padding(4).padding(.trailing, 2)
+                    .background(RoundedRectangle(cornerRadius: 7).fill(Color(nsColor: .controlBackgroundColor)))
+                }
+            }
+            .padding(.horizontal, 12).padding(.top, 10)
+        }
+    }
+
     private var bottomBar: some View {
         HStack(spacing: 8) {
+            Button(action: pickFiles) { Image(systemName: "paperclip") }
+                .buttonStyle(.plain).foregroundStyle(.secondary)
+                .help("Attach images, or mention files (you can also paste or drop them)")
             Menu {
                 ForEach(PermissionMode.offered, id: \.self) { mode in
                     Button(mode.label) { model.setMode(mode.rawValue, in: pane) }
@@ -166,8 +249,8 @@ struct ComposerView: View {
             }
             Button { submitOrComplete() } label: { Image(systemName: "arrow.up.circle.fill").font(.title2) }
                 .buttonStyle(.plain)
-                .foregroundStyle(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Color.secondary : Color.accentColor)
-                .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .foregroundStyle(canSend ? Color.accentColor : Color.secondary)
+                .disabled(!canSend)
                 .help("Send (Return)")
         }
         .font(.caption)
@@ -187,6 +270,12 @@ struct ComposerView: View {
 
     private func complete() -> KeyPress.Result {
         if Relay.isRelay(draft) { return move(1) }
+        let files = fileSuggestions
+        if !files.isEmpty {
+            guard files.indices.contains(highlighted) else { return .ignored }
+            draft = FileIndex.complete(draft, with: files[highlighted])
+            return .handled
+        }
         guard suggestions.indices.contains(highlighted) else { return .ignored }
         draft = "/\(suggestions[highlighted].name) "
         menuDismissed = true
@@ -203,16 +292,90 @@ struct ComposerView: View {
             model.relay(target.message, from: pane, to: target.candidate.id)
             return
         }
+        // Return while choosing a file mentions it instead of sending.
+        if !fileSuggestions.isEmpty { _ = complete(); return }
         // Return on a partially typed command picks the highlighted one first.
         if !suggestions.isEmpty, suggestions.indices.contains(highlighted), text != "/\(suggestions[highlighted].name)" {
             _ = complete()
             return
         }
-        guard !text.isEmpty else { return }
+        guard !text.isEmpty || !attachments.isEmpty else { return }
         draft = ""
         menuDismissed = false
-        let message = ElementReference.compose(text, with: pane.attachments)
-        pane.attachments = []
-        model.submit(message, in: pane)
+        // Picked elements ride along with anything that reaches Claude, but not with commands like /model.
+        let carries: Bool
+        switch SlashRouter.route(text, commands: pane.chat.commands) {
+        case .send: carries = true
+        case .setMode(_, let then): carries = then != nil
+        default: carries = false
+        }
+        let message = carries ? ElementReference.compose(text, with: pane.pickedElements) : text
+        if model.submit(message, images: attachments, in: pane) {
+            attachments = []
+            if carries { pane.pickedElements = [] }
+        }
+    }
+
+    // MARK: Attachments
+
+    /// Images become attachments; other files and folders are mentioned by path, which the CLI reads itself.
+    private func add(_ urls: [URL]) {
+        var mentions: [String] = []
+        for url in urls {
+            if let image = ImageAttachment(fileURL: url) { attachments.append(image); continue }
+            let path = url.path.hasPrefix(pane.cwd + "/") ? String(url.path.dropFirst(pane.cwd.count + 1)) : url.path
+            mentions.append(path.contains(" ") ? "@\"\(path)\"" : "@\(path)")
+        }
+        guard !mentions.isEmpty else { return }
+        let separator = draft.isEmpty || draft.last?.isWhitespace == true ? "" : " "
+        draft += separator + mentions.joined(separator: " ") + " "
+        fileMenuDismissed = true
+    }
+
+    private func pickFiles() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = true
+        panel.directoryURL = URL(fileURLWithPath: pane.cwd)
+        panel.prompt = "Attach"
+        if panel.runModal() == .OK { add(panel.urls) }
+        focused = true
+    }
+
+    private func drop(_ providers: [NSItemProvider]) -> Bool {
+        for provider in providers {
+            if provider.canLoadObject(ofClass: URL.self) {
+                _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                    guard let url, url.isFileURL else { return }
+                    Task { @MainActor in add([url]) }
+                }
+            } else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
+                provider.loadDataRepresentation(forTypeIdentifier: UTType.image.identifier) { data, _ in
+                    guard let data, let image = ImageAttachment(data: data, label: "Dropped image") else { return }
+                    Task { @MainActor in attachments.append(image) }
+                }
+            }
+        }
+        return !providers.isEmpty
+    }
+
+    /// ⌘V with files or an image on the pasteboard attaches them; text pastes as usual.
+    private func installPasteMonitor() {
+        guard pasteMonitor == nil else { return }
+        pasteMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard focused, event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+                  event.charactersIgnoringModifiers == "v" else { return event }
+            let board = NSPasteboard.general
+            if let urls = board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty {
+                add(urls)
+                return nil
+            }
+            if board.string(forType: .string) == nil, let data = board.data(forType: .png) ?? board.data(forType: .tiff),
+               let image = ImageAttachment(data: data, label: "Pasted image") {
+                attachments.append(image)
+                return nil
+            }
+            return event
+        }
     }
 }

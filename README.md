@@ -26,22 +26,28 @@ Launch Viber from /Applications and allow notifications when asked. Notification
 ## Features
 
 - **Sessions sidebar**: every open session with its state (working, waiting for you, finished, failed). Sessions started outside Viber show up too.
-- **Chat**: streamed replies, tool calls summarized inline, stop with ⌘.
-- **Cards** for permission requests, questions from Claude (`AskUserQuestion`), and plans to approve (`ExitPlanMode`).
+- **Chat**: streamed replies, tool calls summarized inline, Claude's thinking folded into a row you can open, stop with ⌘.
+- **Checklist**: when Claude keeps a task list (`TaskCreate`/`TaskUpdate`, or `TodoWrite` on older setups), it stays pinned above the message box until everything on it is done. Claude Code only offers these tools to current models when `CLAUDE_CODE_ENABLE_TODO_TOOLS=1` is set (for example under `env` in `~/.claude/settings.json`).
+- **Rewind files**: hover a message you sent (or right-click it) and choose rewind to put files back the way they were before it, like Esc Esc → restore code in the terminal. Viber shows which files would change and asks first; the conversation itself is left as it is.
+- **Images and files**: paste (⌘V), drop or attach (paperclip) images to send them with a message; they are scaled to at most 2000 px. Other files and folders are mentioned as `@path`, and typing `@` offers the project's files (from `git ls-files`).
+- **Cards** for permission requests, questions from Claude (`AskUserQuestion`), plans to approve (`ExitPlanMode`), and MCP servers asking for input (a form built from the server's schema, or a page to open in the browser).
 - **Slash commands**: type `/` for a menu. Commands that only exist in Claude Code's terminal UI are handled by Viber:
   - `/plan [prompt]` switches to plan mode (and sends the prompt, if any)
   - `/model [name]` switches model, or opens a picker
   - `/clear` starts a fresh conversation in the same session
   - `/resume` opens the resume picker
   - `/cost` shows tokens and cost for the session
+  - `/tasks` (or `/bashes`) opens the session's background tasks
+  - `/add-dir <path>` lets Claude work in another folder for this session (bare `/add-dir` opens Permissions)
   - `/mcp`, `/context` (or `/usage`), `/permissions`, `/hooks` and `/settings` (or bare `/config`, `/effort`, `/output-style`) open the session's settings on that tab. With arguments, `/mcp reconnect all`, `/effort high` and `/config key=value` still go to the CLI, which handles them itself.
 
   Everything else (skills, custom commands) is sent to the CLI as text. Viber's own skills work as `/cleanup` as well as `/viber:cleanup`.
 - **Session settings** (the sliders button in the session header, ⌥⌘, or the commands above) are the terminal panels for one conversation, drawn from the CLI's control requests:
   - **MCP**: every server with its status, tools and errors. Sign in (opens the browser; the row turns connected when you finish), retry, reconnect, sign out, and turn a server off or on. Like `/mcp` in the terminal, on/off is saved for the project. The header shows "MCP 5/7", orange when a server needs sign-in or failed.
   - **Context**: where the context window goes, by category, plus the session's cost. Compact now, with optional instructions.
-  - **Permissions**: the rules in effect and where each comes from. Add or remove a rule for *this session* (kept across relaunches, gone when the session closes), *this project, just me* (`.claude/settings.local.json`, which Viber keeps out of git) or *this project, shared* (`.claude/settings.json`). Claude Code picks file changes up right away.
+  - **Permissions**: the rules in effect and where each comes from. Add or remove a folder Claude can work in for this session (like `/add-dir`), and add or remove a rule for *this session* (kept across relaunches, gone when the session closes), *this project, just me* (`.claude/settings.local.json`, which Viber keeps out of git) or *this project, shared* (`.claude/settings.json`). Claude Code picks file changes up right away.
   - **Hooks**: every hook that runs, from settings files and plugins. Read-only; buttons open the settings files.
+  - **Tasks**: shell commands Claude runs in the background, subagents and monitors, running and recently finished. Read a shell's output (kept current while open) or stop a task. The header shows "Tasks 2 running" while any run, and a running subagent's tool row shows what it is doing.
   - **Model**: model, effort and permission mode for this session; output style, saved for the project.
 - **Settings** (⌘, or the gear at the bottom left of the sidebar) hold everything that is not about one conversation:
   - **General**: which notifications to post, how early to warn about cache expiry, and the permission mode new sessions start in.
@@ -52,7 +58,7 @@ Launch Viber from /Applications and allow notifications when asked. Notification
   Changes to these files apply to sessions started afterwards.
 - **Messages between sessions**: start a message with `//` to send it to another open session instead of this one. A menu ranks the other sessions by what you typed (their title, project, branch and recent conversation), so `//the firmware endpoint is ready` goes to the session working on firmware. Start with a session's name (`//backend: …`) to pick it directly, or use ↑↓ to choose. The receiving session shows who it came from. If it is busy, the message waits until its current reply ends. When it finishes answering, its reply is posted back into the sender's chat (marked "Reply from …") so the sender's Claude can carry on; replies never ask for an answer, so sessions don't ping-pong.
 - **Messages panel** (top of the sidebar, ⇧⌘M): every message between sessions, newest first, with who sent it to whom, whether it is queued, waiting for a reply or answered, and the reply itself. Filter by status, search, and click a session name to jump to it. Unread messages show a badge.
-- **Project notes**: click the note icon next to a project name in the sidebar to leave a note for the next sessions in that project. Viber adds it to the system prompt of every new conversation it starts there, including after `/clear`. Ongoing conversations keep the version they started with, even when resumed, because Claude Code records the system prompt once per conversation. Sessions can read and update it with `viber note`, and `/handoff` adds a short status section to it. Notes are stored by Viber, not in the repo.
+- **Ideas**: a list per project of things to do later that nobody has planned yet. Click the lightbulb next to a project name in the sidebar to jot one down or see that project's list (the number is how many are still to plan). The **Ideas** panel (top of the sidebar, ⇧⌘I) shows every project's ideas, filtered by *To plan*, *Started* or *Done*, with search. **Plan** starts a new session for an idea in plan mode, in a new worktree when the project is a git repo, with the idea as the first message. The idea is then marked started and links to that session. Tick an idea off when it's done, or right-click to edit, copy or delete it. Sessions can add ideas with `viber idea add` (the `/idea` skill), and each idea shows who added it. Ideas are stored by Viber, not in the repo. Project notes from earlier versions were turned into one idea each.
 - **Browser preview** (the Safari button in the session header, ⇧⌘B): a browser beside the chat that you and Claude share, so Claude can check its own web work.
   - **Viber serves the tools itself.** They come from an MCP server built into Viber, over the same stdio channel, so there's nothing to install. Every session gets them.
   - **The tools:**
@@ -79,6 +85,7 @@ Launch Viber from /Applications and allow notifications when asked. Notification
 | ⌘N | New session |
 | ⌘K | Jump to session |
 | ⇧⌘M | Show messages between sessions |
+| ⇧⌘I | Show ideas |
 | ⌘J | Next session waiting for you |
 | ⌘1–⌘9 | Select session 1–9 |
 | ⌘. | Stop Claude |
@@ -99,8 +106,8 @@ Viber puts a small `viber` command on the PATH of every session it starts (with 
 viber close [--remove-worktree] [--delete-branch]   # close this session after the current reply
 viber notify <text…>                                # post a notification
 viber rename <title…>                               # rename the session in the sidebar
-viber note                                          # print this project's note
-viber note set <text…> | set - | clear              # replace it (`-` reads stdin), or remove it
+viber idea [list]                                   # print this project's ideas that are not done
+viber idea add <text…> | add -                      # add an idea (`-` reads stdin); the first line is its title
 ```
 
 Outside a Viber session it exits with status 2.
@@ -110,7 +117,8 @@ Skills in `plugin/skills`:
 - `/cleanup`: checks that the branch is merged (including squash merges via `gh`), with no uncommitted changes, unpushed commits, or stashes, then asks Viber to remove the worktree and branch. It never deletes anything itself.
 - `/ship`: reviews the diff, commits, pushes, and opens a PR.
 - `/sync`: rebases onto the latest base branch and resolves conflicts carefully; never force-pushes without asking.
-- `/handoff`: writes a status note (goal, done, in progress, next steps, open questions, files touched), and in Viber saves a short version to the project note for the next session.
+- `/handoff`: writes a status note (goal, done, in progress, next steps, open questions, files touched).
+- `/idea`: saves an idea, follow-up or out-of-scope task to the project's idea list, written so a later session can plan it without this conversation. Claude also uses it on its own when it notices work outside the current task.
 
 ## Development
 

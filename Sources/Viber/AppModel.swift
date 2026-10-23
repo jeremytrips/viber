@@ -9,10 +9,13 @@ enum Target: Hashable {
     case external(String)
     /// The timeline of `//` messages between sessions.
     case messages
+    /// Every project's ideas that are not planned yet.
+    case ideas
 
     var key: String {
         switch self {
         case .messages: return "messages"
+        case .ideas: return "ideas"
         case .pane(let id): return "pane:\(id)"
         case .external(let id): return "ext:\(id)"
         }
@@ -20,6 +23,7 @@ enum Target: Hashable {
 
     init?(key: String) {
         if key == "messages" { self = .messages }
+        else if key == "ideas" { self = .ideas }
         else if key.hasPrefix("pane:") { self = .pane(String(key.dropFirst(5))) }
         else if key.hasPrefix("ext:") { self = .external(String(key.dropFirst(4))) }
         else { return nil }
@@ -40,6 +44,8 @@ struct NewSessionRequest {
     var name: String
     var permissionMode: String
     var firstMessage: String
+    /// The idea this session is started for, linked to it once it opens.
+    var ideaID: String?
 }
 
 @MainActor @Observable
@@ -59,7 +65,9 @@ final class AppModel {
     var settingsSheet: SettingsSheetRequest?
     var relayLog = RelayLog()
     var cacheWarning: TimeInterval { TimeInterval(max(Prefs.int(Prefs.cacheWarningMinutes), 1) * 60) }
-    var notes = ProjectNotes()
+    var ideas = IdeaList()
+    /// Ideas whose session is being created, so Plan can't start two.
+    var planningIdeas: Set<String> = []
 
     @ObservationIgnored let notifier = Notifier()
     @ObservationIgnored private let externalMonitor = ExternalMonitor()
@@ -151,15 +159,16 @@ final class AppModel {
                     switch result {
                     case .success(let info):
                         self.open(title: title, spec: LaunchSpec(profile: request.profile, cwd: info.path, permissionMode: mode, model: launchModel),
-                                  worktree: info, firstMessage: request.firstMessage)
+                                  worktree: info, firstMessage: request.firstMessage, ideaID: request.ideaID)
                     case .failure(let error):
+                        if let id = request.ideaID { self.planningIdeas.remove(id) }
                         self.errorMessage = error.localizedDescription
                     }
                 }
             }
         } else {
             open(title: title, spec: LaunchSpec(profile: request.profile, cwd: request.folder, permissionMode: mode, model: launchModel),
-                 worktree: nil, firstMessage: request.firstMessage)
+                 worktree: nil, firstMessage: request.firstMessage, ideaID: request.ideaID)
         }
     }
 
@@ -179,11 +188,16 @@ final class AppModel {
         open(title: title, spec: LaunchSpec(profile: defaultProfile, cwd: session.project, resume: session.id), worktree: nil, firstMessage: "")
     }
 
-    private func open(title: String, spec: LaunchSpec, worktree: WorktreeInfo?, firstMessage: String) {
+    private func open(title: String, spec: LaunchSpec, worktree: WorktreeInfo?, firstMessage: String, ideaID: String? = nil) {
         let pane = Pane(title: title, spec: spec, worktree: worktree)
         wire(pane)
         panes.append(pane)
         save()
+        if let ideaID {
+            planningIdeas.remove(ideaID)
+            ideas.start(ideaID, sessionID: pane.id, sessionTitle: title)
+            saveIdeas()
+        }
         select(.pane(pane.id))
         let text = firstMessage.trimmingCharacters(in: .whitespacesAndNewlines)
         if !text.isEmpty { submit(text, in: pane) }
@@ -193,27 +207,29 @@ final class AppModel {
         pane.onStateChange = { [weak self] pane, previous in self?.stateChanged(pane, from: previous) }
         pane.onTurnFinished = { [weak self] pane in self?.turnFinished(pane) }
         pane.onOpenURL = { NSWorkspace.shared.open($0) }
-        pane.notePrompt = { [weak self] pane in self?.notePrompt(for: pane) }
         pane.onPersist = { [weak self] in self?.save() }
     }
 
     /// Routes composer text: skills go to the CLI, terminal-only commands are handled here.
-    func submit(_ text: String, in pane: Pane) {
+    /// Images go with a message to Claude; returns false when the text was not one, so the composer keeps them.
+    @discardableResult
+    func submit(_ text: String, images: [ImageAttachment] = [], in pane: Pane) -> Bool {
         if Relay.isRelay(text) {
             // Without a choice from the menu, use the best match.
             guard let best = Relay.rank(text, candidates: relayCandidates(excluding: pane)).first else {
-                pane.chat.note("There is no other session to send this to.", isError: true); return
+                    pane.chat.note("There is no other session to send this to.", isError: true); return images.isEmpty
             }
             relay(best.message, from: pane, to: best.candidate.id)
-            return
+            return images.isEmpty
         }
         switch SlashRouter.route(text, commands: pane.chat.commands) {
         case .send(let message):
-            guard !message.isEmpty else { return }
-            pane.sendUser(message, binDir: binDir, pluginDir: pluginDir)
+            guard !message.isEmpty || !images.isEmpty else { return true }
+            pane.sendUser(message, images: images, binDir: binDir, pluginDir: pluginDir)
+            return true
         case .setMode(let mode, let then):
             setMode(mode, in: pane)
-            if let then { pane.sendUser(then, binDir: binDir, pluginDir: pluginDir) }
+            if let then { pane.sendUser(then, images: images, binDir: binDir, pluginDir: pluginDir); return true }
         case .setModel(let model):
             ensureRunning(pane)
             pane.run { [$0.setModel(model)] }
@@ -233,7 +249,10 @@ final class AppModel {
                                   usage.map { Self.compact($0.contextTokens) } ?? "unknown"))
         case .openSettings(let tab):
             openSettings(tab, in: pane)
+        case .addDirectory(let path):
+            addDirectory(path, in: pane)
         }
+        return images.isEmpty
     }
 
     // MARK: Session settings (what /mcp, /context, /permissions … show in the terminal)
@@ -254,9 +273,7 @@ final class AppModel {
         if scope == .session {
             guard !pane.sessionRules.contains(edit) else { return }
             pane.sessionRules.append(edit)
-            save()
-            let rules = pane.sessionRules
-            control(pane) { [$0.setSessionRules(rules)] }
+            applySessionPermissions(pane)
             return
         }
         editSettings(scope, cwd: pane.cwd, then: pane) { try SettingsFile.addRule(edit, to: $0) }
@@ -267,12 +284,36 @@ final class AppModel {
         guard let scope = rule.scope else { return }
         if scope == .session {
             pane.sessionRules.removeAll { $0 == edit }
-            save()
-            let rules = pane.sessionRules
-            control(pane) { [$0.setSessionRules(rules)] }
+            applySessionPermissions(pane)
             return
         }
         editSettings(scope, cwd: pane.cwd, then: pane) { try SettingsFile.removeRule(edit, from: $0) }
+    }
+
+    /// `/add-dir`: lets Claude work in another folder for this session. `~` and paths relative to the session's folder work.
+    func addDirectory(_ raw: String, in pane: Pane) {
+        let expanded = (raw.trimmingCharacters(in: CharacterSet(charactersIn: "\"' ")) as NSString).expandingTildeInPath
+        let path = URL(fileURLWithPath: expanded, relativeTo: URL(fileURLWithPath: pane.cwd, isDirectory: true)).standardizedFileURL.path
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            pane.chat.note("\(path) is not a folder.", isError: true); return
+        }
+        guard !pane.extraDirs.contains(path), path != pane.cwd else { return }
+        pane.extraDirs.append(path)
+        applySessionPermissions(pane)
+        pane.chat.note("Claude can now work in \(path) too, for this session.")
+    }
+
+    func removeDirectory(_ path: String, in pane: Pane) {
+        pane.extraDirs.removeAll { $0 == path }
+        applySessionPermissions(pane)
+    }
+
+    /// Saves the session's own rules and folders and sends them to the CLI; the reply re-reads the rule list.
+    private func applySessionPermissions(_ pane: Pane) {
+        save()
+        let rules = pane.sessionRules, dirs = pane.extraDirs
+        control(pane) { [$0.setSessionPermissions(rules: rules, directories: dirs)] }
     }
 
     /// Writes a settings file off the main thread. The CLI watches its settings files and applies the change itself;
@@ -378,16 +419,53 @@ final class AppModel {
         deliver(pane.inbox.removeFirst(), to: pane)
     }
 
-    // MARK: Project notes
+    // MARK: Ideas
 
-    /// Saves a project's note. Sessions pick it up the next time they start.
-    func setNote(_ text: String, for project: String, by author: String) {
-        notes.set(text, for: project, by: author)
-        saveNotes()
+    /// Projects an idea can be filed under: open sessions' projects in sidebar order, then others that have ideas.
+    var ideaProjects: [String] {
+        var seen = Set<String>()
+        let open = panes.map(\.projectPath).filter { seen.insert($0).inserted }
+        let others = ideas.ideas.map(\.project).filter { seen.insert($0).inserted }
+            .sorted { Self.projectName($0).localizedStandardCompare(Self.projectName($1)) == .orderedAscending }
+        return open + others
     }
 
-    private func notePrompt(for pane: Pane) -> String? {
-        notes.note(for: pane.projectPath).map { ProjectNotes.systemPrompt(projectName: pane.projectName, note: $0) }
+    static func projectName(_ path: String) -> String { URL(fileURLWithPath: path).lastPathComponent }
+
+    func addIdea(_ text: String, project: String, by author: String) {
+        guard ideas.add(text, project: project, by: author) != nil else { return }
+        saveIdeas()
+    }
+
+    func editIdea(_ id: String, text: String) {
+        ideas.edit(id, text: text)
+        saveIdeas()
+    }
+
+    func setIdeaStatus(_ id: String, _ status: Idea.Status) {
+        ideas.setStatus(id, status)
+        saveIdeas()
+    }
+
+    func removeIdea(_ id: String) {
+        ideas.remove(id)
+        saveIdeas()
+    }
+
+    /// Starts a plan-mode session for an idea, in a new worktree when the project is a git repo.
+    /// The idea is marked started, and linked to the session, once the session opens.
+    func plan(_ idea: Idea) {
+        guard !planningIdeas.contains(idea.id) else { return }
+        planningIdeas.insert(idea.id)
+        let project = idea.project
+        Task.detached {
+            let isRepo = Worktree.repoRoot(project) != nil
+            await MainActor.run {
+                self.createSession(NewSessionRequest(folder: project, profile: AccountPicker.usableDefault(self), useWorktree: isRepo,
+                                                     name: idea.title, permissionMode: PermissionMode.plan.rawValue,
+                                                     firstMessage: idea.text, ideaID: idea.id))
+            }
+        }
     }
 
     private func ensureRunning(_ pane: Pane) {
@@ -464,7 +542,11 @@ final class AppModel {
                 if case .permission(let p) = item.kind, p.decision == nil { return p }; return nil
             }.first
             body = prompt.map { "Allow Claude to use \($0.toolName)? \(ToolSummary.summary(name: $0.toolName, input: $0.input))" } ?? "Claude needs your permission."
-        case .input: body = "Claude has a question for you."
+        case .input:
+            let asking = pane.chat.items.reversed().compactMap { item -> ElicitationPrompt? in
+                if case .elicitation(let e) = item.kind, e.decision == nil { return e }; return nil
+            }.first
+            body = asking.map { "\($0.server) needs your input." } ?? "Claude has a question for you."
         case .plan: body = "A plan is ready for review."
         case .finished:
             guard previous == .working, pane.chat.turnStartedByUser else { return }
@@ -573,8 +655,8 @@ final class AppModel {
                 notifier.post(id: UUID().uuidString, title: pane.title, body: request.text ?? "", target: Target.pane(pane.id).key)
             case .rename:
                 if let text = request.text, !text.isEmpty { pane.title = text; save() }
-            case .note:
-                setNote(request.text ?? "", for: pane.projectPath, by: pane.title)
+            case .idea:
+                addIdea(request.text ?? "", project: pane.projectPath, by: pane.title)
             }
         }
     }
@@ -632,16 +714,16 @@ final class AppModel {
         }
     }
 
-    func saveNotes() {
+    func saveIdeas() {
         do {
-            try notes.save()
+            try ideas.save()
         } catch {
-            errorMessage = "Could not save project notes: \(error.localizedDescription)"
+            errorMessage = "Could not save ideas: \(error.localizedDescription)"
         }
     }
 
     private func restore() {
-        notes = ProjectNotes.load()
+        ideas = IdeaList.load()
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .secondsSince1970
         if let data = try? Data(contentsOf: ViberPaths.relays), let log = try? decoder.decode(RelayLog.self, from: data) {

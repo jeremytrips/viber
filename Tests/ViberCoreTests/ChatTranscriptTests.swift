@@ -311,9 +311,11 @@ final class ChatTranscriptTests: XCTestCase {
 
     func testSessionRulesGoToTheFlagLayerAndRefreshTheList() {
         var chat = ChatTranscript()
-        let apply = chat.setSessionRules([RuleEdit(behavior: "allow", rule: "Bash(echo:*)")])
+        let apply = chat.setSessionPermissions(rules: [RuleEdit(behavior: "allow", rule: "Bash(echo:*)")], directories: ["/work/shared"])
         XCTAssertEqual(apply["request"]?["settings"]?["permissions"]?["allow"], ["Bash(echo:*)"])
         XCTAssertEqual(apply["request"]?["settings"]?["permissions"]?["deny"], [], "every list is sent so removals clear")
+        XCTAssertEqual(apply["request"]?["settings"]?["permissions"]?["additionalDirectories"], ["/work/shared"], "folders ride along so neither drops the other")
+        XCTAssertEqual(chat.setSessionPermissions(rules: [])["request"]?["settings"]?["permissions"]?["additionalDirectories"], [])
         let out = chat.apply(reply(to: apply))
         XCTAssertEqual(out.first?["request"]?["subtype"]?.string, "list_permission_rules")
     }
@@ -324,5 +326,33 @@ final class ChatTranscriptTests: XCTestCase {
         chat.apply(["type": "result", "subtype": "success", "is_error": true, "result": "Failed to authenticate"])
         XCTAssertEqual(chat.state, .failed)
         XCTAssertEqual(chat.items.last?.kind, .notice("Failed to authenticate", isError: true))
+    }
+
+    func testThinkingBlocksBecomeFoldedRows() {
+        var chat = ChatTranscript()
+        _ = chat.userMessage("solve it")
+        chat.apply(["type": "stream_event", "event": ["type": "content_block_start", "index": 0, "content_block": ["type": "thinking", "thinking": ""]]])
+        XCTAssertTrue(chat.isThinking)
+        chat.apply(["type": "stream_event", "event": ["type": "content_block_delta", "index": 0, "delta": ["type": "thinking_delta", "thinking": "Hmm"]]])
+        XCTAssertTrue(chat.isThinking)
+        chat.apply(assistant("m1", [["type": "thinking", "thinking": "  The fundamental solution is (8,3).  ", "signature": "x"]]))
+        XCTAssertFalse(chat.isThinking)
+        chat.apply(["type": "stream_event", "event": ["type": "content_block_start", "index": 1, "content_block": ["type": "text", "text": ""]]])
+        XCTAssertFalse(chat.isThinking)
+        chat.apply(assistant("m1", [["type": "text", "text": "(8,3) and (127,48)"]]))
+        XCTAssertEqual(chat.items.dropFirst().map(\.kind), [.thinking("The fundamental solution is (8,3)."), .assistant("(8,3) and (127,48)")])
+        XCTAssertEqual(chat.assistantText(after: chat.items[0].id), "(8,3) and (127,48)", "thinking stays out of // replies")
+    }
+
+    func testEmptyAndRedactedThinkingAreSkipped() {
+        var chat = ChatTranscript()
+        chat.apply(assistant("m1", [["type": "thinking", "thinking": "", "signature": "x"], ["type": "redacted_thinking", "data": "abc"],
+                                    ["type": "text", "text": "hi"]]))
+        XCTAssertEqual(chat.items.map(\.kind), [.assistant("hi")])
+    }
+
+    func testThinkingDisplayIsRequestedAtLaunch() {
+        let args = LaunchSpec(profile: nil, cwd: "/tmp").claudeArguments
+        XCTAssertEqual(args.split(separator: "--thinking-display").last?.first, "summarized", "without it print mode sends empty thinking")
     }
 }

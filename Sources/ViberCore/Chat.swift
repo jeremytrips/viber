@@ -29,6 +29,8 @@ public struct ToolCall: Equatable, Sendable {
     public var done = false
     /// Auto mode's classifier refused the call; `result` holds what Claude was told.
     public var blockedByAutoMode = false
+    /// What a running subagent is doing, from `task_progress`.
+    public var progress: String?
 
     public init(id: String, name: String, input: JSON, result: String? = nil, isError: Bool = false, done: Bool = false) {
         self.id = id; self.name = name; self.input = input; self.result = result; self.isError = isError; self.done = done
@@ -36,7 +38,7 @@ public struct ToolCall: Equatable, Sendable {
 }
 
 public enum PromptDecision: Equatable, Sendable {
-    case allowed, alwaysAllowed, denied, answered, keepPlanning, cancelled
+    case allowed, alwaysAllowed, denied, answered, declined, keepPlanning, cancelled
     /// A plan approved, continuing in this mode.
     case approved(PermissionMode)
 }
@@ -81,11 +83,17 @@ public struct PlanPrompt: Equatable, Sendable {
 public struct ChatItem: Identifiable, Equatable, Sendable {
     public enum Kind: Equatable, Sendable {
         case user(String)
+        /// Images sent with the next user message, by label.
+        case attachments([String])
         case assistant(String)
+        /// Claude's (summarized) thinking before it answered.
+        case thinking(String)
         case tool(ToolCall)
         case permission(PermissionPrompt)
         case question(QuestionPrompt)
         case plan(PlanPrompt)
+        /// An MCP server asking for input: a form, or a page to open.
+        case elicitation(ElicitationPrompt)
         case notice(String, isError: Bool)
         /// A `//` message another session sent here.
         case received(from: String, text: String)
@@ -121,6 +129,33 @@ public struct TurnUsage: Equatable, Sendable {
     public var contextTokens: Int { input + cacheRead + cacheCreation }
 }
 
+/// One entry of Claude's checklist: from `TodoWrite`, or the task list tools (`TaskCreate`/`TaskUpdate`).
+public struct TodoItem: Equatable, Sendable, Identifiable {
+    public var id: String
+    public var content: String
+    /// Present-tense label shown while the item is in progress ("Running tests").
+    public var activeForm: String?
+    /// pending, in_progress or completed.
+    public var status: String
+
+    public init(id: String, content: String, activeForm: String? = nil, status: String = "pending") {
+        self.id = id; self.content = content; self.activeForm = activeForm; self.status = status
+    }
+
+    public var isDone: Bool { status == "completed" }
+    public var isActive: Bool { status == "in_progress" }
+}
+
+/// What rewinding files to before a message would change (`rewind_files` with `dry_run`).
+public struct RewindPreview: Equatable, Sendable {
+    public var itemID: String
+    public var canRewind: Bool
+    public var error: String?
+    public var files: [String]
+    public var insertions: Int
+    public var deletions: Int
+}
+
 /// Folds the CLI's stream-json output (and transcript rows when restoring history) into a chat.
 /// The protocol is the one the Agent SDK speaks; unknown messages are ignored.
 public struct ChatTranscript {
@@ -132,6 +167,8 @@ public struct ChatTranscript {
     /// As reported by the CLI.
     public var permissionMode: String?
     public var streamingText = ""
+    /// Claude is thinking right now (thinking deltas are streaming).
+    public var isThinking = false
     public var cache: CacheEstimate?
     public var lastUsage: TurnUsage?
     public var costUSD: Double = 0
@@ -143,6 +180,10 @@ public struct ChatTranscript {
     public var controls = SessionControls()
     /// When Claude last changed a file in this process's lifetime, so the preview can tell whether a hot update followed.
     public private(set) var lastFileEditAt: Date?
+    /// A rewind waiting for the user to confirm it.
+    public var rewindPreview: RewindPreview?
+    /// Claude's checklist for the work at hand, as its todo or task list tools last left it.
+    public private(set) var todos: [TodoItem] = []
 
     private struct PendingRequest {
         var subtype: String
@@ -156,6 +197,12 @@ public struct ChatTranscript {
     private var blockCounts: [String: Int] = [:]
     private var seenRows: Set<String> = []
     private var nextID = 0
+    /// Messages sent but not yet echoed back with their ID: the chat item and the text that went out.
+    private var awaitingEcho: [(itemID: String, text: String)] = []
+    /// The CLI's ID for each user message item, which rewinding needs.
+    private var userMessageIDs: [String: String] = [:]
+    /// Rewind requests in flight, by request ID, and the item they rewind to.
+    private var rewinds: [String: String] = [:]
 
     public init() {}
 
@@ -165,6 +212,7 @@ public struct ChatTranscript {
             case .permission(let p) where p.decision == nil: return count + 1
             case .question(let q) where q.decision == nil && q.requestID != nil: return count + 1
             case .plan(let p) where p.decision == nil && p.requestID != nil: return count + 1
+            case .elicitation(let e) where e.decision == nil: return count + 1
             default: return count
             }
         }
@@ -172,11 +220,16 @@ public struct ChatTranscript {
 
     // MARK: Outgoing
 
-    public mutating func userMessage(_ text: String) -> JSON {
-        append(.user(text))
+    /// A message typed by the user. Images go first, as the API recommends, then the text.
+    public mutating func userMessage(_ text: String, images: [ImageAttachment] = []) -> JSON {
+        if !images.isEmpty { append(.attachments(images.map(\.label))) }
+        if !text.isEmpty || images.isEmpty { append(.user(text)) }
+        awaitingEcho.append((items[items.count - 1].id, text))
         state = .working
         turnStartedByUser = true
-        return ["type": "user", "message": ["role": "user", "content": .string(text)]]
+        let content: JSON = images.isEmpty ? .string(text)
+            : .array(images.map(\.block) + (text.isEmpty ? [] : [["type": "text", "text": .string(text)]]))
+        return ["type": "user", "message": ["role": "user", "content": content]]
     }
 
     public mutating func request(_ subtype: String, _ extra: [String: JSON] = [:], key: String? = nil) -> JSON {
@@ -246,6 +299,18 @@ public struct ChatTranscript {
         }
     }
 
+    /// Answer an MCP server's request: "accept" with the form's values (or consent to open the page), "decline" or "cancel".
+    public mutating func answerElicitation(itemID: String, action: String, content: [String: JSON] = [:]) -> JSON? {
+        guard let index = items.firstIndex(where: { $0.id == itemID }),
+              case .elicitation(var prompt) = items[index].kind, prompt.decision == nil else { return nil }
+        prompt.decision = action == "accept" ? .answered : action == "decline" ? .declined : .cancelled
+        items[index].kind = .elicitation(prompt)
+        resumeAfterPrompt()
+        var response: [String: JSON] = ["action": .string(action)]
+        if action == "accept", !prompt.isURL { response["content"] = .object(content) }
+        return Self.controlSuccess(prompt.requestID, .object(response))
+    }
+
     /// `permissionMode` changes once the CLI confirms; it refuses auto mode on some models.
     public mutating func setPermissionMode(_ mode: String) -> JSON {
         request("set_permission_mode", ["mode": .string(mode)])
@@ -265,6 +330,8 @@ public struct ChatTranscript {
         case .context: return [request("get_context_usage", ["detail": "full"], key: "context"), request("get_session_cost", key: "cost")]
         case .permissions: return [request("list_permission_rules", key: "permissions")]
         case .hooks: return [request("get_hooks_listing", key: "hooks")]
+        // Tasks arrive as events; refreshing re-reads the output of running shells.
+        case .tasks: return controls.runningTasks.filter(\.hasOutput).map { taskOutput($0.id) }
         case .model: return [request("get_settings", key: "settings")]
         }
     }
@@ -299,19 +366,109 @@ public struct ChatTranscript {
         return request("update_settings", ["source": "localSettings", "settings": ["outputStyle": .string(style)]], key: "outputStyle")
     }
 
-    /// Replaces this session's own permission rules (the CLI's flag settings layer).
-    public mutating func setSessionRules(_ edits: [RuleEdit]) -> JSON {
-        request("apply_flag_settings", ["settings": ["permissions": SettingsFile.permissionsJSON(edits)]], key: "sessionRules")
+    /// Replaces this session's own permission rules and extra folders (the CLI's flag settings layer).
+    /// Both go in one `permissions` object so neither update drops the other.
+    public mutating func setSessionPermissions(rules: [RuleEdit], directories: [String] = []) -> JSON {
+        let permissions = SettingsFile.permissionsJSON(rules).setting("additionalDirectories", .array(directories.map(JSON.string)))
+        return request("apply_flag_settings", ["settings": ["permissions": permissions]], key: "sessionRules")
     }
 
     public mutating func note(_ text: String, isError: Bool = false) { append(.notice(text, isError: isError)) }
+
+    // MARK: Tasks
+
+    /// Stops a background shell or subagent. The CLI reports the end with `task_notification`.
+    public mutating func stopTask(_ id: String) -> JSON {
+        request("stop_task", ["task_id": .string(id)], key: "task:\(id)")
+    }
+
+    /// The last 8 KiB a shell task wrote.
+    public mutating func taskOutput(_ id: String) -> JSON {
+        request("get_task_output", ["task_id": .string(id)], key: "output:\(id)")
+    }
+
+    private mutating func applyTask(_ message: JSON) {
+        let subtype = message["subtype"]?.string
+        if subtype == "background_tasks_changed" {
+            // The full set of live background tasks; ended ones get their own task_notification.
+            for t in message["tasks"]?.array ?? [] {
+                guard let id = t["task_id"]?.string else { continue }
+                updateTask(id, type: t["task_type"]?.string, description: t["description"]?.string) { task in
+                    task.backgrounded = true
+                    if let v = t["subagent_type"]?.string { task.subagentType = v }
+                }
+            }
+            return
+        }
+        guard let id = message["task_id"]?.string else { return }
+        let task = updateTask(id, type: message["task_type"]?.string, description: message["description"]?.string) { task in
+            if let v = message["tool_use_id"]?.string { task.toolUseID = v }
+            if let v = message["subagent_type"]?.string { task.subagentType = v }
+            if let v = message["is_backgrounded"]?.bool { task.backgrounded = v }
+            if let v = message["summary"]?.string, !v.isEmpty { task.summary = v }
+            if let v = message["last_tool_name"]?.string { task.lastTool = v }
+            if let usage = message["usage"] { task.tokens = usage["total_tokens"]?.int; task.toolUses = usage["tool_uses"]?.int }
+            switch subtype {
+            case "task_updated":
+                if let v = message["patch"]?["status"]?.string { task.status = v }
+                if let v = message["patch"]?["is_backgrounded"]?.bool { task.backgrounded = v }
+                if let v = message["patch"]?["description"]?.string { task.description = v }
+            case "task_notification":
+                task.status = message["status"]?.string ?? "completed"
+            default: break
+            }
+        }
+        // A foreground subagent shows what it is doing on its own tool row.
+        if subtype == "task_progress", let toolUseID = task.toolUseID, let index = toolIndex[toolUseID],
+           case .tool(var call) = items[index].kind {
+            call.progress = [task.lastTool, task.summary].compactMap { $0 }.joined(separator: " · ")
+            items[index].kind = .tool(call)
+        }
+    }
+
+    @discardableResult
+    private mutating func updateTask(_ id: String, type: String?, description: String?, _ change: (inout SessionTask) -> Void) -> SessionTask {
+        var tasks = controls.tasks
+        let index = tasks.firstIndex { $0.id == id } ?? {
+            tasks.append(SessionTask(id: id, type: type ?? "task", description: description ?? ""))
+            return tasks.count - 1
+        }()
+        if let type { tasks[index].type = type }
+        if let description, !description.isEmpty { tasks[index].description = description }
+        change(&tasks[index])
+        let task = tasks[index]
+        // Keep every running task and the last 20 that ended.
+        let ended = tasks.filter { !$0.isRunning }
+        if ended.count > 20 {
+            let drop = Set(ended.prefix(ended.count - 20).map(\.id))
+            tasks.removeAll { drop.contains($0.id) }
+        }
+        controls.tasks = tasks
+        return task
+    }
+
+    // MARK: Rewind
+
+    /// Whether files can be rewound to before this item: the CLI has told us the message's ID.
+    public func canRewind(itemID: String) -> Bool { userMessageIDs[itemID] != nil }
+
+    /// Restores files to how they were before a message. A dry run fills `rewindPreview` for confirmation.
+    public mutating func rewind(itemID: String, dryRun: Bool) -> JSON? {
+        guard let id = userMessageIDs[itemID] else { return nil }
+        if !dryRun { rewindPreview = nil }
+        let message = request("rewind_files", ["user_message_id": .string(id), "dry_run": .bool(dryRun)])
+        if let requestID = message["request_id"]?.string { rewinds[requestID] = itemID }
+        return message
+    }
 
     /// Delivers a `//` message from another session as a user turn, keeping who sent it.
     public mutating func receiveRelay(from source: String, text: String) -> JSON {
         append(.received(from: source, text: text))
         state = .working
         turnStartedByUser = true
-        return ["type": "user", "message": ["role": "user", "content": .string(Relay.envelope(from: source, text: text))]]
+        let wire = Relay.envelope(from: source, text: text)
+        awaitingEcho.append((items[items.count - 1].id, wire))
+        return ["type": "user", "message": ["role": "user", "content": .string(wire)]]
     }
 
     /// Posts the answer to an earlier `//` message back into the sender's conversation.
@@ -319,7 +476,9 @@ public struct ChatTranscript {
         append(.reply(from: source, text: text))
         state = .working
         turnStartedByUser = true
-        return ["type": "user", "message": ["role": "user", "content": .string(Relay.replyEnvelope(from: source, text: text))]]
+        let wire = Relay.replyEnvelope(from: source, text: text)
+        awaitingEcho.append((items[items.count - 1].id, wire))
+        return ["type": "user", "message": ["role": "user", "content": .string(wire)]]
     }
 
     public var lastItemID: String? { items.last?.id }
@@ -352,11 +511,13 @@ public struct ChatTranscript {
 
     public mutating func processExited(status: Int32) {
         streamingText = ""
+        isThinking = false
         for index in items.indices {
             switch items[index].kind {
             case .permission(var p) where p.decision == nil: p.decision = .cancelled; items[index].kind = .permission(p)
             case .question(var q) where q.decision == nil && q.requestID != nil: q.decision = .cancelled; items[index].kind = .question(q)
             case .plan(var p) where p.decision == nil && p.requestID != nil: p.decision = .cancelled; items[index].kind = .plan(p)
+            case .elicitation(var e) where e.decision == nil: e.decision = .cancelled; items[index].kind = .elicitation(e)
             default: break
             }
         }
@@ -418,6 +579,17 @@ public struct ChatTranscript {
             if let list = message["commands"] { commands = Self.commands(list) }
         case "compact_boundary":
             append(.notice("Conversation compacted", isError: false))
+        case "task_started", "task_progress", "task_updated", "task_notification", "background_tasks_changed":
+            applyTask(message)
+        case "elicitation_complete":
+            // A URL-mode elicitation the user accepted: the server says the page flow finished.
+            guard let id = message["elicitation_id"]?.string else { break }
+            for index in items.indices {
+                if case .elicitation(var e) = items[index].kind, e.elicitationID == id {
+                    e.completed = true
+                    items[index].kind = .elicitation(e)
+                }
+            }
         default: break
         }
     }
@@ -430,9 +602,15 @@ public struct ChatTranscript {
             let n = blockCounts[messageID, default: 0]
             blockCounts[messageID] = n + 1
             switch block["type"]?.string {
+            case "thinking":
+                // Empty when the display is "omitted"; redacted thinking has a different type and is skipped.
+                let text = (block["thinking"]?.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                isThinking = false
+                if !text.isEmpty { append(.thinking(text), id: "th:\(messageID):\(n)") }
             case "text":
                 let text = block["text"]?.string ?? ""
                 streamingText = ""
+                isThinking = false
                 if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     append(.assistant(text), id: "a:\(messageID):\(n)")
                 }
@@ -452,6 +630,7 @@ public struct ChatTranscript {
                     append(.tool(call), id: "tool:\(id)")
                     toolIndex[id] = items.count - 1
                 }
+                if call.name == "TodoWrite" { todos = Self.todoList(call.input) }
                 if !state.needsYou { state = .working }
             default: break
             }
@@ -482,11 +661,25 @@ public struct ChatTranscript {
     private mutating func applyUser(_ message: JSON, history: Bool, now: Date) {
         guard let body = message["message"] else { return }
         if message["parent_tool_use_id"]?.string != nil { return }
+        if message["isReplay"]?.bool == true {
+            if let uuid = message["uuid"]?.string { matchEcho(uuid: uuid, text: Self.userText(body["content"])) }
+            return
+        }
+        let before = items.count
+        defer {
+            // In history, the row's ID belongs to the item it produced.
+            if history, items.count > before, let uuid = message["uuid"]?.string { userMessageIDs[items[items.count - 1].id] = uuid }
+        }
         if let text = body["content"]?.string {
             if history { appendUserText(text) }
             return
         }
-        for block in body["content"]?.array ?? [] {
+        let blocks = body["content"]?.array ?? []
+        if history {
+            let images = blocks.filter { $0["type"]?.string == "image" }.count
+            if images > 0 { append(.attachments(Array(repeating: "Image", count: images))) }
+        }
+        for block in blocks {
             switch block["type"]?.string {
             case "tool_result":
                 guard let id = block["tool_use_id"]?.string, let index = toolIndex[id] else { continue }
@@ -497,6 +690,7 @@ public struct ChatTranscript {
                     call.blockedByAutoMode = Self.blockedByAutoMode(id, meta: message["tool_result_meta"])
                     items[index].kind = .tool(call)
                     if !history, !call.isError, Self.editTools.contains(call.name) { lastFileEditAt = now }
+                    if !call.isError { applyTaskListResult(call, result: message["tool_use_result"] ?? message["toolUseResult"]) }
                 }
             case "text":
                 if history, let text = block["text"]?.string { appendUserText(text) }
@@ -506,6 +700,44 @@ public struct ChatTranscript {
     }
 
     static let editTools: Set<String> = ["Edit", "MultiEdit", "Write", "NotebookEdit"]
+    /// Pairs an echoed message with the item it was sent as. Messages the CLI never echoes are skipped, not mismatched.
+    private mutating func matchEcho(uuid: String, text: String) {
+        guard let index = awaitingEcho.firstIndex(where: { $0.text == text }) else { return }
+        userMessageIDs[awaitingEcho[index].itemID] = uuid
+        awaitingEcho.removeFirst(index + 1)
+    }
+
+    static func userText(_ content: JSON?) -> String {
+        if let text = content?.string { return text }
+        return (content?.array ?? []).compactMap { $0["type"]?.string == "text" ? $0["text"]?.string : nil }.joined(separator: "\n")
+    }
+
+    public static func todoList(_ input: JSON) -> [TodoItem] {
+        (input["todos"]?.array ?? []).enumerated().compactMap { index, t in
+            guard let content = t["content"]?.string else { return nil }
+            return TodoItem(id: t["id"]?.string ?? "\(index)", content: content, activeForm: t["activeForm"]?.string,
+                            status: t["status"]?.string ?? "pending")
+        }
+    }
+
+    /// The task list tools change the checklist once their call succeeds: TaskCreate learns its ID from the result.
+    private mutating func applyTaskListResult(_ call: ToolCall, result: JSON?) {
+        switch call.name {
+        case "TaskCreate":
+            let text = call.result ?? ""
+            guard let subject = call.input["subject"]?.string,
+                  let id = result?["task"]?["id"]?.string ?? Self.between(text, "Task #", " ") else { return }
+            todos.removeAll { $0.id == id }
+            todos.append(TodoItem(id: id, content: subject, activeForm: call.input["activeForm"]?.string))
+        case "TaskUpdate":
+            guard let id = call.input["taskId"]?.string, let index = todos.firstIndex(where: { $0.id == id }) else { return }
+            if call.input["status"]?.string == "deleted" { todos.remove(at: index); return }
+            if let v = call.input["status"]?.string { todos[index].status = v }
+            if let v = call.input["subject"]?.string { todos[index].content = v }
+            if let v = call.input["activeForm"]?.string { todos[index].activeForm = v }
+        default: break
+        }
+    }
 
     private mutating func appendUserText(_ raw: String) {
         // Slash commands are stored with XML-ish wrappers; show them the way they were typed.
@@ -531,14 +763,20 @@ public struct ChatTranscript {
         guard message["parent_tool_use_id"]?.string == nil, let event = message["event"] else { return }
         switch event["type"]?.string {
         case "message_start": streamingText = ""
+        case "content_block_start": isThinking = event["content_block"]?["type"]?.string == "thinking"
         case "content_block_delta":
-            if event["delta"]?["type"]?.string == "text_delta" { streamingText += event["delta"]?["text"]?.string ?? "" }
+            switch event["delta"]?["type"]?.string {
+            case "text_delta": streamingText += event["delta"]?["text"]?.string ?? ""; isThinking = false
+            case "thinking_delta": isThinking = true
+            default: break
+            }
         default: break
         }
     }
 
     private mutating func applyResult(_ message: JSON) {
         streamingText = ""
+        isThinking = false
         if let cost = message["total_cost_usd"]?.double { costUSD = cost }
         if let ms = message["duration_ms"]?.double { lastTurnSeconds = ms / 1000 }
         let isError = message["is_error"]?.bool ?? false
@@ -553,8 +791,14 @@ public struct ChatTranscript {
 
     private mutating func applyControlRequest(_ message: JSON) -> [JSON] {
         let requestID = message["request_id"]?.string ?? ""
-        guard let request = message["request"], request["subtype"]?.string == "can_use_tool" else {
+        guard let request = message["request"], ["can_use_tool", "elicitation"].contains(request["subtype"]?.string) else {
             return [Self.controlError(requestID, "Viber does not handle \(message["request"]?["subtype"]?.string ?? "this request").")]
+        }
+        if request["subtype"]?.string == "elicitation" {
+            streamingText = ""
+            append(.elicitation(ElicitationPrompt.parse(requestID: requestID, request)), id: "e:\(requestID)")
+            state = .input
+            return []
         }
         let toolName = request["tool_name"]?.string ?? "Tool"
         let input = request["input"] ?? .null
@@ -589,6 +833,8 @@ public struct ChatTranscript {
                 q.decision = .cancelled; items[index].kind = .question(q)
             case .plan(var p) where p.requestID == requestID && p.decision == nil:
                 p.decision = .cancelled; items[index].kind = .plan(p)
+            case .elicitation(var e) where e.requestID == requestID && e.decision == nil:
+                e.decision = .cancelled; items[index].kind = .elicitation(e)
             default: continue
             }
         }
@@ -603,6 +849,11 @@ public struct ChatTranscript {
         if let key = pending.key { controls.busy.remove(key) }
         if response["subtype"]?.string == "error" {
             let error = response["error"]?.string ?? "unknown error"
+            if subtype == "rewind_files" {
+                rewinds[id] = nil
+                append(.notice("Could not rewind files: \(error)", isError: true))
+                return []
+            }
             // Settings-sheet errors show in the sheet, next to what failed.
             if let key = pending.key { controls.errors[key] = error } else { append(.notice("\(subtype) failed: \(error)", isError: true)) }
             if let server { controls.signingIn[server] = nil }
@@ -650,10 +901,27 @@ public struct ChatTranscript {
             (controls.rules, controls.directories) = PermissionRule.parse(body)
         case "get_hooks_listing":
             controls.hooks = HookEntry.parseListing(body)
+        case "get_task_output":
+            guard let task = pending.body["task_id"]?.string else { break }
+            controls.taskOutput[task] = TaskOutput(text: body?["output"]?.string ?? "", totalBytes: body?["total_bytes"]?.int ?? 0,
+                                                   truncated: body?["truncated"]?.bool ?? false)
         case "get_settings":
             controls.appliedModel = body?["applied"]?["model"]?.string ?? controls.appliedModel
             controls.effort = body?["applied"]?["effort"]?.string ?? controls.effort
             controls.outputStyle = body?["effective"]?["outputStyle"]?.string ?? controls.outputStyle
+        case "rewind_files":
+            guard let itemID = rewinds.removeValue(forKey: id) else { return [] }
+            let files = (body?["filesChanged"]?.array ?? []).compactMap(\.string)
+            let insertions = body?["insertions"]?.int ?? 0, deletions = body?["deletions"]?.int ?? 0
+            if pending.body["dry_run"]?.bool == true {
+                rewindPreview = RewindPreview(itemID: itemID, canRewind: body?["canRewind"]?.bool ?? false,
+                                              error: body?["error"]?.string, files: files, insertions: insertions, deletions: deletions)
+            } else if body?["canRewind"]?.bool == false {
+                append(.notice("Could not rewind files: \(body?["error"]?.string ?? "no checkpoint for that message")", isError: true))
+            } else {
+                let count = files.count == 1 ? "1 file" : "\(files.count) files"
+                append(.notice("Rewound \(count) (+\(insertions) −\(deletions)) to before that message. The conversation is unchanged.", isError: false))
+            }
         case "apply_flag_settings" where pending.key == "sessionRules":
             return [request("list_permission_rules", key: "permissions")]
         default: break

@@ -18,6 +18,11 @@ final class SlashRouterTests: XCTestCase {
         XCTAssertEqual(SlashRouter.route("/unknown", commands: commands), .send("/unknown"))
     }
 
+    func testAddDirRouting() {
+        XCTAssertEqual(SlashRouter.route("/add-dir ../shared", commands: []), .addDirectory("../shared"))
+        XCTAssertEqual(SlashRouter.route("/add-dir", commands: []), .openSettings(.permissions))
+    }
+
     func testTerminalPanelsOpenTheSettingsSheet() {
         XCTAssertEqual(SlashRouter.route("/mcp", commands: commands), .openSettings(.mcp))
         XCTAssertEqual(SlashRouter.route("/mcp reconnect all", commands: commands), .send("/mcp reconnect all"))
@@ -49,18 +54,17 @@ final class LaunchTests: XCTestCase {
         XCTAssertEqual(LaunchSpec(profile: nil, cwd: "/tmp").command.tool, "claude")
     }
 
-    func testAppendSystemPrompt() throws {
-        XCTAssertFalse(LaunchSpec(profile: nil, cwd: "/tmp").claudeArguments.contains("--append-system-prompt"))
-        let args = LaunchSpec(profile: nil, cwd: "/tmp", appendSystemPrompt: "Use pnpm").claudeArguments
-        XCTAssertEqual(args.split(separator: "--append-system-prompt").last?.first, "Use pnpm")
-        // Records saved before the field existed still load.
-        let old = try JSONDecoder().decode(LaunchSpec.self, from: Data(#"{"cwd":"/tmp","profile":"Private"}"#.utf8))
-        XCTAssertNil(old.appendSystemPrompt)
-    }
-
     func testTranscriptPathMatchesCLINaming() {
         let url = ViberPaths.transcript(sessionID: "s1", cwd: "/Users/jt.sidis/dev/viber")
         XCTAssertEqual(url.deletingLastPathComponent().lastPathComponent, "-Users-jt-sidis-dev-viber")
+    }
+}
+
+final class VSCodeLinkTests: XCTestCase {
+    func testFolderOpensInItsOwnWindow() {
+        XCTAssertEqual(VSCodeLink.url(for: "/Users/me/repo/.claude/worktrees/x")?.absoluteString,
+                       "vscode://file/Users/me/repo/.claude/worktrees/x/?windowId=_blank")
+        XCTAssertNil(VSCodeLink.url(for: "relative/path"))
     }
 }
 
@@ -138,49 +142,115 @@ final class RequestTests: XCTestCase {
         XCTAssertTrue(ViberRequest.drain(dir).isEmpty)
     }
 
-    func testNoteRequest() throws {
+    func testIdeaRequest() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("viber-req-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: dir) }
-        try ViberRequest(paneID: "p1", command: .note, text: "line one\nline two").write(to: dir)
+        try ViberRequest(paneID: "p1", command: .idea, text: "line one\nline two").write(to: dir)
         let drained = ViberRequest.drain(dir)
-        XCTAssertEqual(drained.first?.command, .note)
+        XCTAssertEqual(drained.first?.command, .idea)
         XCTAssertEqual(drained.first?.text, "line one\nline two")
     }
 }
 
-final class ProjectNotesTests: XCTestCase {
-    func testSetClearAndPersist() throws {
-        var notes = ProjectNotes()
-        let at = Date(timeIntervalSince1970: 1_790_000_000)
-        notes.set("  Run swift test first.\n", for: "/repo", by: "you", at: at)
-        XCTAssertEqual(notes.note(for: "/repo"), ProjectNote(text: "Run swift test first.", updatedAt: at, updatedBy: "you"))
-        XCTAssertNil(notes.note(for: "/other"))
+final class IdeaListTests: XCTestCase {
+    let at = Date(timeIntervalSince1970: 1_790_000_000)
 
-        let file = FileManager.default.temporaryDirectory.appendingPathComponent("viber-notes-\(UUID().uuidString)/notes.json")
+    func testAddEditAndPersist() throws {
+        var list = IdeaList()
+        let idea = try XCTUnwrap(list.add("  Retry failed MCP servers\nWith backoff.\n", project: "/repo", by: "you", at: at))
+        XCTAssertEqual(idea.text, "Retry failed MCP servers\nWith backoff.")
+        XCTAssertEqual(idea.title, "Retry failed MCP servers")
+        XCTAssertEqual(idea.status, .open)
+        XCTAssertNil(list.add(" \n", project: "/repo", by: "you"), "empty text adds nothing")
+
+        list.edit(idea.id, text: "Retry MCP servers", at: at)
+        XCTAssertEqual(list.idea(idea.id)?.text, "Retry MCP servers")
+        list.edit(idea.id, text: "  ")
+        XCTAssertEqual(list.idea(idea.id)?.text, "Retry MCP servers", "empty edits are ignored")
+
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("viber-ideas-\(UUID().uuidString)/ideas.json")
         defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
-        try notes.save(to: file)
-        XCTAssertEqual(ProjectNotes.load(from: file), notes)
+        try list.save(to: file)
+        XCTAssertEqual(IdeaList.load(from: file, legacyNotes: file.appendingPathExtension("missing")), list)
+        XCTAssertEqual(IdeaList.load(from: file.appendingPathExtension("missing"), legacyNotes: file.appendingPathExtension("missing")),
+                       IdeaList())
 
-        notes.set(" \n", for: "/repo", by: "Backend")
-        XCTAssertNil(notes.note(for: "/repo"), "empty text removes the note")
-        XCTAssertEqual(ProjectNotes.load(from: file.appendingPathExtension("missing")), ProjectNotes())
+        list.remove(idea.id)
+        XCTAssertTrue(list.ideas.isEmpty)
     }
 
-    func testLongNotesAreCut() {
-        var notes = ProjectNotes()
-        notes.set(String(repeating: "x", count: ProjectNotes.maxLength + 10), for: "/repo", by: "you")
-        XCTAssertEqual(notes.note(for: "/repo")?.text.count, ProjectNotes.maxLength)
+    func testLongIdeasAreCut() {
+        var list = IdeaList()
+        list.add(String(repeating: "x", count: IdeaList.maxLength + 10), project: "/repo", by: "you")
+        XCTAssertEqual(list.ideas.first?.text.count, IdeaList.maxLength)
     }
 
-    func testSystemPrompt() {
-        let note = ProjectNote(text: "Don't touch the firmware API.", updatedAt: Date(timeIntervalSince1970: 1_790_000_000),
-                               updatedBy: "Login screen")
-        let prompt = ProjectNotes.systemPrompt(projectName: "viber", note: note)
-        XCTAssertTrue(prompt.contains("every session in viber"))
-        XCTAssertTrue(prompt.contains("Don't touch the firmware API."))
-        XCTAssertTrue(prompt.contains("the session “Login screen”"))
-        XCTAssertTrue(prompt.contains("viber note"))
-        XCTAssertTrue(ProjectNotes.systemPrompt(projectName: "viber", note: ProjectNote(text: "x", updatedAt: Date(), updatedBy: "you"))
-            .contains("by the user"))
+    func testTitleSkipsMarkdownAndStaysShort() {
+        XCTAssertEqual(Idea(project: "/r", text: "\n## Add search\nto messages", createdAt: at, createdBy: "you").title, "Add search")
+        XCTAssertEqual(Idea(project: "/r", text: String(repeating: "a", count: 80), createdAt: at, createdBy: "you").title.count, 50)
+    }
+
+    func testStartedIdeasLinkTheirSessionUntilReopened() throws {
+        var list = IdeaList()
+        let idea = try XCTUnwrap(list.add("Login screen", project: "/repo", by: "you", at: at))
+        list.start(idea.id, sessionID: "pane-1", sessionTitle: "Login screen")
+        XCTAssertEqual(list.idea(idea.id)?.status, .started)
+        XCTAssertEqual(list.idea(idea.id)?.sessionID, "pane-1")
+
+        list.setStatus(idea.id, .done)
+        XCTAssertEqual(list.idea(idea.id)?.sessionID, "pane-1", "done keeps where it was worked on")
+        list.setStatus(idea.id, .open)
+        XCTAssertNil(list.idea(idea.id)?.sessionID, "back to open forgets the session")
+        XCTAssertNil(list.idea(idea.id)?.sessionTitle)
+    }
+
+    func testPendingListsOpenIdeasNewestFirstThenStarted() throws {
+        var list = IdeaList()
+        let first = try XCTUnwrap(list.add("first", project: "/repo", by: "you", at: at))
+        list.add("second", project: "/repo", by: "you", at: at.addingTimeInterval(1))
+        list.add("third", project: "/repo", by: "Backend", at: at.addingTimeInterval(2))
+        let done = try XCTUnwrap(list.add("done", project: "/repo", by: "you", at: at.addingTimeInterval(3)))
+        list.add("elsewhere", project: "/other", by: "you")
+        list.start(first.id, sessionID: "p1", sessionTitle: "First")
+        list.setStatus(done.id, .done)
+
+        XCTAssertEqual(list.pending(in: "/repo").map(\.text), ["third", "second", "first"])
+        XCTAssertEqual(list.toPlanCount(in: "/repo"), 2)
+        XCTAssertEqual(list.toPlanCount(in: "/other"), 1)
+        XCTAssertEqual(list.pending(in: "/nowhere"), [])
+    }
+
+    func testOldProjectNotesBecomeIdeas() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("viber-ideas-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let notes = dir.appendingPathComponent("notes.json")
+        try Data(#"{"notes":{"/repo":{"text":"Don't touch the firmware API.","updatedAt":1790000000,"updatedBy":"Login screen"}}}"#.utf8)
+            .write(to: notes)
+
+        let list = IdeaList.load(from: dir.appendingPathComponent("ideas.json"), legacyNotes: notes)
+        XCTAssertEqual(list.ideas.count, 1)
+        XCTAssertEqual(list.ideas.first?.project, "/repo")
+        XCTAssertEqual(list.ideas.first?.text, "Don't touch the firmware API.")
+        XCTAssertEqual(list.ideas.first?.createdBy, "Login screen")
+        XCTAssertEqual(list.ideas.first?.createdAt, at)
+        XCTAssertEqual(list.ideas.first?.status, .open)
+
+        try IdeaList().save(to: dir.appendingPathComponent("ideas.json"))
+        XCTAssertTrue(IdeaList.load(from: dir.appendingPathComponent("ideas.json"), legacyNotes: notes).ideas.isEmpty,
+                      "once ideas are saved, old notes are not read again")
+    }
+
+    func testListingForTheCLI() throws {
+        var list = IdeaList()
+        list.add("Add search\nTo the Messages panel.", project: "/repo", by: "you", at: at)
+        let started = try XCTUnwrap(list.add("Retry MCP", project: "/repo", by: "Backend", at: at))
+        list.start(started.id, sessionID: "p1", sessionTitle: "MCP retry")
+        let text = IdeaList.listing(list.pending(in: "/repo"), projectName: "viber")
+        XCTAssertTrue(text.hasPrefix("Ideas for viber"))
+        XCTAssertTrue(text.contains("- Add search\n  To the Messages panel.\n  (added by the user, 2026-09-21)"))
+        XCTAssertTrue(text.contains("added by session “Backend”"))
+        XCTAssertTrue(text.contains("started in session “MCP retry”"))
+        XCTAssertEqual(IdeaList.listing([], projectName: "viber"), "No ideas for viber yet.")
     }
 }

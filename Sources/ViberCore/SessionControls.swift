@@ -2,7 +2,7 @@ import Foundation
 
 /// The tabs of a session's settings sheet. Terminal-only commands (`/mcp`, `/context`, …) open these.
 public enum SettingsTab: String, CaseIterable, Identifiable, Sendable {
-    case mcp, context, permissions, hooks, model
+    case mcp, context, permissions, hooks, tasks, model
 
     public var id: String { rawValue }
     public var title: String {
@@ -11,6 +11,7 @@ public enum SettingsTab: String, CaseIterable, Identifiable, Sendable {
         case .context: return "Context"
         case .permissions: return "Permissions"
         case .hooks: return "Hooks"
+        case .tasks: return "Tasks"
         case .model: return "Model"
         }
     }
@@ -172,6 +173,46 @@ public struct HookEntry: Equatable, Sendable, Identifiable {
     }
 }
 
+/// A shell command, subagent or monitor the CLI runs alongside the conversation (`task_*` system messages).
+public struct SessionTask: Equatable, Sendable, Identifiable {
+    public var id: String
+    /// local_bash, local_agent, monitor, …
+    public var type: String
+    public var description: String
+    /// running, completed, failed or stopped.
+    public var status = "running"
+    public var summary: String?
+    public var lastTool: String?
+    public var toolUseID: String?
+    public var subagentType: String?
+    public var backgrounded = false
+    public var tokens: Int?
+    public var toolUses: Int?
+
+    public init(id: String, type: String, description: String) {
+        self.id = id; self.type = type; self.description = description
+    }
+
+    public var isRunning: Bool { status == "running" || status == "pending" }
+    /// Shells and monitors write output the CLI can show (`get_task_output`).
+    public var hasOutput: Bool { type == "local_bash" || type == "monitor" }
+    public var kindLabel: String {
+        switch type {
+        case "local_bash": return "Shell"
+        case "local_agent": return subagentType.map { "Agent · \($0)" } ?? "Agent"
+        case "monitor": return "Monitor"
+        default: return type.replacingOccurrences(of: "_", with: " ").capitalized
+        }
+    }
+}
+
+/// The end of a shell task's output (`get_task_output`).
+public struct TaskOutput: Equatable, Sendable {
+    public var text: String
+    public var totalBytes: Int
+    public var truncated: Bool
+}
+
 /// What the settings sheet shows for one session. Filled by control-request replies.
 public struct SessionControls: Equatable, Sendable {
     public var mcp: [McpServer]?
@@ -180,6 +221,9 @@ public struct SessionControls: Equatable, Sendable {
     public var rules: [PermissionRule]?
     public var directories: [String] = []
     public var hooks: [HookEntry]?
+    /// Every task seen this session, in start order; finished ones are trimmed to the last few.
+    public var tasks: [SessionTask] = []
+    public var taskOutput: [String: TaskOutput] = [:]
     /// Model and effort in effect, as `get_settings` reports them.
     public var appliedModel: String?
     public var effort: String?
@@ -202,6 +246,8 @@ public struct SessionControls: Equatable, Sendable {
         defer { reconnectOnReturn.removeAll() }
         return reconnectOnReturn.sorted()
     }
+
+    public var runningTasks: [SessionTask] { tasks.filter(\.isRunning) }
 
     public var mcpSummary: (connected: Int, total: Int, attention: Bool)? {
         guard let mcp, !mcp.isEmpty else { return nil }

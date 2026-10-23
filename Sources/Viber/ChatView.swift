@@ -12,6 +12,7 @@ struct PaneView: View {
             HSplitView {
                 VStack(spacing: 0) {
                     ChatList(pane: pane, readOnly: false)
+                    ChecklistPanel(pane: pane)
                     ComposerView(pane: pane)
                 }
                 .frame(minWidth: 320, maxWidth: .infinity)
@@ -24,6 +25,33 @@ struct PaneView: View {
         .background(Color(nsColor: .textBackgroundColor))
         .onAppear { if pane.showPreview { _ = pane.ensurePreview() } }
         .onChange(of: pane.showPreview) { if pane.showPreview { _ = pane.ensurePreview() } }
+        .alert(rewindTitle, isPresented: Binding(get: { pane.chat.rewindPreview != nil }, set: { if !$0 { pane.chat.rewindPreview = nil } }),
+               presenting: pane.chat.rewindPreview) { preview in
+            if preview.canRewind && !preview.files.isEmpty {
+                Button("Rewind files", role: .destructive) { pane.run { $0.rewind(itemID: preview.itemID, dryRun: false).map { [$0] } ?? [] } }
+                Button("Cancel", role: .cancel) {}
+            } else {
+                Button("OK", role: .cancel) {}
+            }
+        } message: { preview in
+            Text(rewindMessage(preview))
+        }
+    }
+
+    private var rewindTitle: String {
+        guard let preview = pane.chat.rewindPreview else { return "" }
+        if !preview.canRewind { return "Can't rewind files" }
+        return preview.files.isEmpty ? "Nothing to rewind" : "Rewind \(preview.files.count == 1 ? "1 file" : "\(preview.files.count) files")?"
+    }
+
+    private func rewindMessage(_ preview: RewindPreview) -> String {
+        if !preview.canRewind { return preview.error ?? "There is no checkpoint for that message." }
+        if preview.files.isEmpty { return "No files changed after that message." }
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let shown = preview.files.prefix(8).map { $0.replacingOccurrences(of: pane.cwd + "/", with: "").replacingOccurrences(of: home, with: "~") }
+        let more = preview.files.count > 8 ? "\n…and \(preview.files.count - 8) more" : ""
+        return "Files go back to how they were before that message (+\(preview.insertions) −\(preview.deletions) undone). "
+            + "The conversation stays as it is, so tell Claude if it should know.\n\n" + shown.joined(separator: "\n") + more
     }
 }
 
@@ -44,6 +72,12 @@ struct PaneHeader: View {
                 Stat(label: "Context", value: "\(AppModel.compact(usage.contextTokens)) · \(AppModel.compact(usage.cacheRead)) cached")
             }
             if pane.chat.costUSD > 0 { Stat(label: "Cost", value: String(format: "$%.2f", pane.chat.costUSD)) }
+            let running = pane.chat.controls.runningTasks.count
+            if running > 0 {
+                Button { model.openSettings(.tasks, in: pane) } label: { Stat(label: "Tasks", value: "\(running) running") }
+                    .buttonStyle(.plain)
+                    .help("Background shells and agents. Click to see their output or stop them.")
+            }
             if let mcp = pane.chat.controls.mcpSummary {
                 Button { model.openSettings(.mcp, in: pane) } label: {
                     Stat(label: "MCP", value: "\(mcp.connected)/\(mcp.total)", warn: mcp.attention)
@@ -146,7 +180,7 @@ struct WorkingRow: View {
     var body: some View {
         HStack(spacing: 8) {
             ProgressView().controlSize(.small)
-            Text(starting ? "Starting Claude…" : "Working…").foregroundStyle(.secondary)
+            Text(starting ? "Starting Claude…" : pane?.chat.isThinking == true ? "Thinking…" : "Working…").foregroundStyle(.secondary)
             Spacer()
             if !starting, let pane {
                 Button("Stop") { pane.interrupt() }.help("Interrupt Claude (⌘.)")
@@ -157,21 +191,56 @@ struct WorkingRow: View {
 }
 
 struct ChatItemView: View {
+    @Environment(AppModel.self) private var model
     let item: ChatItem
     let pane: Pane?
+    @State private var hovering = false
+
+    /// Not mid-turn: files are still changing then.
+    private var rewindable: Bool {
+        guard let pane, pane.state != .working, pane.state != .starting else { return false }
+        return pane.chat.canRewind(itemID: item.id)
+    }
+
+    /// A dry run first: the alert shows what would change.
+    private func rewind() {
+        guard let pane else { return }
+        model.control(pane) { $0.rewind(itemID: item.id, dryRun: true).map { [$0] } ?? [] }
+    }
 
     var body: some View {
         switch item.kind {
         case .user(let text):
-            HStack {
+            HStack(alignment: .center, spacing: 6) {
                 Spacer(minLength: 60)
+                if rewindable {
+                    Button(action: rewind) { Image(systemName: "arrow.uturn.backward.circle") }
+                        .buttonStyle(.plain).foregroundStyle(.secondary)
+                        .opacity(hovering ? 1 : 0)
+                        .help("Rewind files to before this message")
+                }
                 Text(ElementReference.displayText(text))
                     .textSelection(.enabled)
                     .padding(.horizontal, 13).padding(.vertical, 9)
                     .background(RoundedRectangle(cornerRadius: 14).fill(Color(nsColor: .quaternaryLabelColor).opacity(0.6)))
             }
+            .onHover { hovering = $0 }
+            .contextMenu {
+                if rewindable { Button("Rewind Files to Before This Message…", action: rewind) }
+            }
+        case .attachments(let labels):
+            HStack(spacing: 6) {
+                Spacer(minLength: 60)
+                ForEach(Array(labels.enumerated()), id: \.offset) { _, label in
+                    Label(label, systemImage: "photo").font(.caption).lineLimit(1)
+                        .padding(.horizontal, 8).padding(.vertical, 4)
+                        .background(Capsule().fill(Color(nsColor: .quaternaryLabelColor).opacity(0.6)))
+                }
+            }
         case .assistant(let text):
             MarkdownText(text: text)
+        case .thinking(let text):
+            ThinkingRow(text: text)
         case .tool(let call):
             ToolRow(call: call, pane: pane)
         case .permission(let prompt):
@@ -180,6 +249,8 @@ struct ChatItemView: View {
             QuestionCard(itemID: item.id, prompt: prompt, pane: pane)
         case .plan(let prompt):
             PlanCard(itemID: item.id, prompt: prompt, pane: pane)
+        case .elicitation(let prompt):
+            ElicitationCard(itemID: item.id, prompt: prompt, pane: pane)
         case .received(let from, let text):
             VStack(alignment: .trailing, spacing: 4) {
                 Label("From \(from)", systemImage: "arrow.down.left").font(.caption).foregroundStyle(.secondary)
@@ -218,6 +289,35 @@ struct ChatItemView: View {
     }
 }
 
+/// Claude's thinking, folded away until opened.
+struct ThinkingRow: View {
+    let text: String
+    @State private var open = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button { withAnimation(.easeOut(duration: 0.12)) { open.toggle() } } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "brain").font(.caption)
+                    Text("Thinking").font(.callout)
+                    if !open { Text(text.replacingOccurrences(of: "\n", with: " ")).font(.callout).lineLimit(1).foregroundStyle(.tertiary) }
+                    Image(systemName: open ? "chevron.down" : "chevron.right").font(.caption2).foregroundStyle(.tertiary)
+                    Spacer(minLength: 0)
+                }
+                .foregroundStyle(.secondary)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if open {
+                MarkdownText(text: text)
+                    .foregroundStyle(.secondary)
+                    .padding(.leading, 10)
+                    .overlay(alignment: .leading) { Rectangle().fill(Color(nsColor: .separatorColor)).frame(width: 2) }
+            }
+        }
+    }
+}
+
 struct ToolRow: View {
     let call: ToolCall
     var pane: Pane?
@@ -241,6 +341,9 @@ struct ToolRow: View {
                         .buttonStyle(.borderless).font(.caption)
                         .help("Open \(PreviewURL.short(url)) in the browser preview beside the chat")
                 }
+            }
+            if !call.done, let progress = call.progress, !progress.isEmpty {
+                Text(progress).font(.caption).foregroundStyle(.secondary).lineLimit(1).padding(.leading, 15)
             }
             if open { ToolDetail(call: call).padding(.leading, 15) }
         }
@@ -291,7 +394,9 @@ struct ToolDetail: View {
             } else if let command = call.input["command"]?.string {
                 Text(command).font(.system(size: 11.5, design: .monospaced)).textSelection(.enabled).padding(10)
             }
-            if let result = call.result, !result.isEmpty {
+            if call.name == "TodoWrite" {
+                ChecklistRows(items: ChatTranscript.todoList(call.input)).padding(10)
+            } else if let result = call.result, !result.isEmpty {
                 Divider()
                 ScrollView {
                     Text(result.count > 6000 ? String(result.prefix(6000)) + "\n…" : result)
@@ -306,6 +411,62 @@ struct ToolDetail: View {
         }
         .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.separator))
+    }
+}
+
+/// Claude's checklist, pinned above the message box while something on it is still open.
+struct ChecklistPanel: View {
+    let pane: Pane
+    @State private var open = true
+
+    var body: some View {
+        let todos = pane.chat.todos
+        if todos.contains(where: { !$0.isDone }) {
+            VStack(alignment: .leading, spacing: 6) {
+                Button { withAnimation(.easeOut(duration: 0.12)) { open.toggle() } } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "checklist")
+                        Text("Checklist").fontWeight(.semibold)
+                        Text("\(todos.filter(\.isDone).count) of \(todos.count) done").foregroundStyle(.secondary)
+                        if !open, let active = todos.first(where: \.isActive) {
+                            Text("· \(active.activeForm ?? active.content)").foregroundStyle(.secondary).lineLimit(1)
+                        }
+                        Spacer()
+                        Image(systemName: open ? "chevron.down" : "chevron.up").font(.caption2).foregroundStyle(.tertiary)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                if open { ChecklistRows(items: todos) }
+            }
+            .font(.callout)
+            .padding(10)
+            .frame(maxWidth: 760, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .controlBackgroundColor)))
+            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.separator))
+            .padding(.horizontal, 24).padding(.top, 6)
+            .frame(maxWidth: .infinity)
+        }
+    }
+}
+
+struct ChecklistRows: View {
+    let items: [TodoItem]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(items) { item in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: item.isDone ? "checkmark.circle.fill" : item.isActive ? "circle.dotted.circle" : "circle")
+                        .foregroundStyle(item.isDone ? Color.green : item.isActive ? Color.accentColor : Color.secondary)
+                    Text(item.isActive ? (item.activeForm ?? item.content) : item.content)
+                        .strikethrough(item.isDone)
+                        .foregroundStyle(item.isDone ? Color.secondary : Color.primary)
+                        .fontWeight(item.isActive ? .medium : .regular)
+                }
+                .font(.callout)
+            }
+        }
     }
 }
 
@@ -339,6 +500,7 @@ struct DecisionLabel: View {
             case .alwaysAllowed: return ("Allowed for this session", "checkmark.circle", .green)
             case .denied: return ("Denied", "xmark.circle", .red)
             case .answered: return ("Answered", "checkmark.circle", .green)
+            case .declined: return ("Declined", "xmark.circle", .secondary)
             case .approved(let mode): return ("Approved · \(mode.label.lowercased())", "checkmark.circle", .green)
             case .keepPlanning: return ("Kept planning", "arrow.uturn.backward.circle", .secondary)
             case .cancelled: return ("No longer needed", "minus.circle", .secondary)
@@ -512,6 +674,107 @@ struct PlanCard: View {
                 }
             }
         }
+    }
+}
+
+/// An MCP server asking for input: a small form built from its schema, or a page to open in the browser.
+struct ElicitationCard: View {
+    let itemID: String
+    let prompt: ElicitationPrompt
+    let pane: Pane?
+    @State private var text: [String: String] = [:]
+    @State private var picks: [String: Set<String>] = [:]
+    @State private var toggles: [String: Bool] = [:]
+
+    var body: some View {
+        if let decision = prompt.decision {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("\(prompt.heading): \(prompt.message)").font(.callout).foregroundStyle(.secondary).lineLimit(2)
+                if prompt.isURL, decision == .answered {
+                    Label(prompt.completed ? "Completed" : "Opened in your browser. Waiting for \(prompt.server)…",
+                          systemImage: prompt.completed ? "checkmark.circle" : "globe")
+                        .font(.callout).foregroundStyle(prompt.completed ? Color.green : Color.secondary)
+                } else {
+                    DecisionLabel(decision: decision)
+                }
+            }
+        } else {
+            Card(title: prompt.heading, color: .purple) {
+                if !prompt.message.isEmpty { MarkdownText(text: prompt.message) }
+                if prompt.isURL {
+                    if let url = prompt.url {
+                        Text(url.absoluteString).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(2).textSelection(.enabled)
+                    }
+                } else {
+                    ForEach(prompt.fields) { field($0) }
+                }
+                if let pane { buttons(pane) }
+            }
+        }
+    }
+
+    @ViewBuilder private func field(_ f: ElicitationField) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 3) {
+                Text(f.title).fontWeight(.medium)
+                if f.required { Text("*").foregroundStyle(.red) }
+            }
+            if !f.description.isEmpty { Text(f.description).font(.caption).foregroundStyle(.secondary) }
+            switch f.kind {
+            case .boolean:
+                Toggle(f.title, isOn: Binding(get: { toggles[f.name] ?? (f.defaultValue?.bool ?? false) }, set: { toggles[f.name] = $0 }))
+                    .labelsHidden()
+            case .choice(let options), .multiChoice(let options):
+                let multi = { if case .multiChoice = f.kind { return true }; return false }()
+                ForEach(options, id: \.value) { option in
+                    OptionRow(label: option.label, description: "", multi: multi, selected: picks[f.name, default: []].contains(option.value)) {
+                        var set = picks[f.name, default: []]
+                        if multi { if set.contains(option.value) { set.remove(option.value) } else { set.insert(option.value) } } else { set = [option.value] }
+                        picks[f.name] = set
+                    }
+                }
+            case .text, .number, .integer:
+                TextField(f.format ?? (f.kind == .text ? "" : "Number"),
+                          text: Binding(get: { text[f.name] ?? f.defaultText }, set: { text[f.name] = $0 }))
+                    .textFieldStyle(.roundedBorder)
+            }
+        }
+    }
+
+    @ViewBuilder private func buttons(_ pane: Pane) -> some View {
+        HStack {
+            if prompt.isURL {
+                Button("Open page") {
+                    pane.run { $0.answerElicitation(itemID: itemID, action: "accept").map { [$0] } ?? [] }
+                    if let url = prompt.url { pane.onOpenURL?(url) }
+                }
+                .keyboardShortcut(.defaultAction)
+            } else {
+                Button("Submit") { pane.run { $0.answerElicitation(itemID: itemID, action: "accept", content: values).map { [$0] } ?? [] } }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!prompt.missing(values).isEmpty)
+            }
+            Button("Decline") { pane.run { $0.answerElicitation(itemID: itemID, action: "decline").map { [$0] } ?? [] } }
+        }
+    }
+
+    /// What the form holds, typed per the schema. Untouched fields fall back to their defaults.
+    private var values: [String: JSON] {
+        var out: [String: JSON] = [:]
+        for f in prompt.fields {
+            switch f.kind {
+            case .boolean:
+                out[f.name] = .bool(toggles[f.name] ?? (f.defaultValue?.bool ?? false))
+            case .choice:
+                if let pick = picks[f.name]?.first { out[f.name] = .string(pick) } else if let d = f.defaultValue { out[f.name] = d }
+            case .multiChoice(let options):
+                let chosen = options.map(\.value).filter { picks[f.name, default: []].contains($0) }
+                if !chosen.isEmpty { out[f.name] = .array(chosen.map(JSON.string)) } else if let d = f.defaultValue { out[f.name] = d }
+            case .text, .number, .integer:
+                if let v = f.value(from: text[f.name] ?? f.defaultText) { out[f.name] = v }
+            }
+        }
+        return out
     }
 }
 

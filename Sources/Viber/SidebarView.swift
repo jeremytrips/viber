@@ -22,6 +22,7 @@ struct SidebarView: View {
         List(selection: selection) {
             Section {
                 MessagesRow().tag(Target.messages)
+                IdeasRow().tag(Target.ideas)
             }
             ForEach(groups, id: \.path) { group in
                 Section {
@@ -39,27 +40,27 @@ struct SidebarView: View {
                     ProjectHeader(name: group.name, path: group.path)
                 }
             }
-            if !model.externals.isEmpty {
-                Section("Running elsewhere") {
-                    ForEach(model.externals) { session in
-                        ExternalRow(session: session).tag(Target.external(session.id))
-                    }
-                }
-            }
         }
         .listStyle(.sidebar)
         .safeAreaInset(edge: .bottom) {
-            HStack {
-                SettingsLink { Image(systemName: "gearshape") }
-                    .buttonStyle(.borderless)
-                    .help("Settings for all sessions (⌘,)")
-                let waiting = model.waitingCount
-                Text(waiting == 0 ? "Nothing waiting for you" : "\(waiting) waiting for you · ⌘J")
-                    .foregroundStyle(waiting == 0 ? .secondary : .primary)
-                Spacer()
+            VStack(spacing: 0) {
+                Divider()
+                if !model.externals.isEmpty {
+                    ExternalsPanel()
+                    Divider()
+                }
+                HStack {
+                    SettingsLink { Image(systemName: "gearshape") }
+                        .buttonStyle(.borderless)
+                        .help("Settings for all sessions (⌘,)")
+                    let waiting = model.waitingCount
+                    Text(waiting == 0 ? "Nothing waiting for you" : "\(waiting) waiting for you · ⌘J")
+                        .foregroundStyle(waiting == 0 ? .secondary : .primary)
+                    Spacer()
+                }
+                .font(.caption)
+                .padding(.horizontal, 12).padding(.vertical, 8)
             }
-            .font(.caption)
-            .padding(.horizontal, 12).padding(.vertical, 8)
             .background(.bar)
         }
         .toolbar {
@@ -96,66 +97,48 @@ struct MessagesRow: View {
     }
 }
 
-/// A project's section title, with the note Viber gives the next sessions there.
-struct ProjectHeader: View {
+/// Entry point to the Ideas panel, with how many ideas are waiting to be planned.
+struct IdeasRow: View {
     @Environment(AppModel.self) private var model
-    let name: String
-    let path: String
-    @State private var editing = false
 
     var body: some View {
-        let note = model.notes.note(for: path)
-        HStack(spacing: 4) {
-            Text(name).help(path)
+        let count = model.ideas.ideas.filter { $0.status == .open }.count
+        HStack(spacing: 6) {
+            Label("Ideas", systemImage: "lightbulb")
             Spacer(minLength: 4)
-            Button { editing = true } label: {
-                Image(systemName: note == nil ? "note.text.badge.plus" : "note.text")
-                    .foregroundStyle(note == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.accentColor))
-            }
-            .buttonStyle(.borderless)
-            .help(note?.text ?? "Add a note for the next sessions in this project")
-            .accessibilityLabel(note == nil ? "Add project note" : "Edit project note")
-            .popover(isPresented: $editing, arrowEdge: .trailing) {
-                ProjectNoteEditor(name: name, path: path)
+            if count > 0 {
+                Text("\(count) to plan").font(.caption).foregroundStyle(.secondary)
             }
         }
     }
 }
 
-/// Edits a project's note. Saves when the popover closes.
-struct ProjectNoteEditor: View {
+/// A project's section title, with its ideas for later.
+struct ProjectHeader: View {
     @Environment(AppModel.self) private var model
     let name: String
     let path: String
-    @State private var draft = ""
-    @State private var original = ""
+    @State private var showingIdeas = false
 
     var body: some View {
-        let note = model.notes.note(for: path)
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Note for \(name)").font(.headline)
-            TextEditor(text: $draft)
-                .font(.body)
-                .frame(width: 340, height: 160)
-                .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(.separator))
-            Text("Given to new conversations in this project. Ongoing ones keep the version they started with, and can read the latest with `viber note`.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            HStack {
-                if let note {
-                    Text("Updated \(note.updatedAt, format: .relative(presentation: .named)) by \(note.updatedBy)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+        let count = model.ideas.toPlanCount(in: path)
+        HStack(spacing: 4) {
+            Text(name).help(path)
+            Spacer(minLength: 4)
+            Button { showingIdeas = true } label: {
+                HStack(spacing: 2) {
+                    Image(systemName: count == 0 ? "lightbulb" : "lightbulb.fill")
+                    if count > 0 { Text("\(count)").monospacedDigit() }
                 }
-                Spacer()
-                Button("Clear") { draft = "" }.disabled(draft.isEmpty)
+                .foregroundStyle(count == 0 ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.accentColor))
+            }
+            .buttonStyle(.borderless)
+            .help(count == 0 ? "Ideas for later in \(name)" : "\(count) idea\(count == 1 ? "" : "s") to plan in \(name)")
+            .accessibilityLabel(count == 0 ? "Project ideas" : "Project ideas, \(count) to plan")
+            .popover(isPresented: $showingIdeas, arrowEdge: .trailing) {
+                ProjectIdeasPopover(name: name, path: path) { showingIdeas = false }
             }
         }
-        .padding(14)
-        .frame(width: 368)
-        .onAppear { draft = note?.text ?? ""; original = draft }
-        .onDisappear { if draft != original { model.setNote(draft, for: path, by: "you") } }
     }
 }
 
@@ -185,6 +168,70 @@ struct PaneRow: View {
         }
         .padding(.vertical, 3)
         .help(pane.state.label)
+    }
+}
+
+/// Sessions running outside Viber, pinned above the sidebar footer. Collapses to its header.
+struct ExternalsPanel: View {
+    @Environment(AppModel.self) private var model
+    @AppStorage("sidebarExternalsExpanded") private var expanded = true
+
+    var body: some View {
+        let count = model.externals.count
+        let waiting = model.externals.filter { [.input, .plan, .permission].contains($0.state) }.count
+        VStack(spacing: 0) {
+            Button { withAnimation(.snappy) { expanded.toggle() } } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.right")
+                        .font(.caption2.weight(.bold))
+                        .rotationEffect(.degrees(expanded ? 90 : 0))
+                    Text("Running elsewhere")
+                    Spacer(minLength: 4)
+                    if !expanded && waiting > 0 {
+                        Text("\(waiting) waiting").foregroundStyle(.orange)
+                    }
+                    Text("\(count)").monospacedDigit()
+                }
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 12).padding(.vertical, 6)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(expanded ? "Hide sessions running outside Viber" : "Show sessions running outside Viber")
+            .accessibilityLabel("Running elsewhere, \(count) sessions")
+            .accessibilityValue(expanded ? "expanded" : "collapsed")
+            if expanded {
+                ViewThatFits(in: .vertical) {
+                    rows
+                    ScrollView { rows }
+                }
+                .frame(maxHeight: 200)
+            }
+        }
+        .onChange(of: model.selection) { _, selection in
+            if case .external? = selection { expanded = true }
+        }
+    }
+
+    private var rows: some View {
+        VStack(spacing: 0) {
+            ForEach(model.externals) { session in
+                Button { model.select(.external(session.id)) } label: {
+                    ExternalRow(session: session)
+                        .padding(.horizontal, 8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .background {
+                            if model.selection == .external(session.id) {
+                                RoundedRectangle(cornerRadius: 5).fill(Color.accentColor.opacity(0.2))
+                            }
+                        }
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 6).padding(.bottom, 6)
     }
 }
 

@@ -7,6 +7,15 @@ public enum ToolSummary {
             let parts = path.split(separator: "/")
             return parts.suffix(2).joined(separator: "/")
         }
+        switch name {
+        case "TaskCreate": if let subject = input["subject"]?.string { return firstLine(subject, limit: 120) }
+        case "TaskUpdate":
+            if let id = input["taskId"]?.string {
+                return "#\(id)" + (input["status"]?.string.map { " → \($0.replacingOccurrences(of: "_", with: " "))" } ?? "")
+            }
+        case "TodoWrite": if let todos = input["todos"]?.array { return "\(todos.count) items" }
+        default: break
+        }
         if let path = input["file_path"]?.string ?? input["notebook_path"]?.string { return short(path) }
         if let command = input["command"]?.string { return firstLine(command, limit: 120) }
         if let pattern = input["pattern"]?.string {
@@ -21,7 +30,6 @@ public enum ToolSummary {
         if let query = input["query"]?.string { return firstLine(query, limit: 120) }
         if let description = input["description"]?.string { return firstLine(description, limit: 120) }
         if let prompt = input["prompt"]?.string { return firstLine(prompt, limit: 120) }
-        if name == "TodoWrite", let todos = input["todos"]?.array { return "\(todos.count) items" }
         return ""
     }
 

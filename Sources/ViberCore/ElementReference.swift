@@ -79,7 +79,7 @@ public struct ElementReference: Equatable, Identifiable, Sendable {
     /// The message to send: the user's words, then the blocks for the elements they picked.
     public static func compose(_ text: String, with references: [ElementReference]) -> String {
         guard !references.isEmpty else { return text }
-        return ([text] + references.map(\.block)).joined(separator: "\n\n")
+        return ((text.isEmpty ? [] : [text]) + references.map(\.block)).joined(separator: "\n\n")
     }
 
     /// A sent message as the chat shows it: each element block shrinks to one line.
