@@ -13,7 +13,7 @@ enum Prefs {
     static func register() {
         UserDefaults.standard.register(defaults: [
             notifyFinished: true, notifyNeedsYou: true, notifyCache: true, cacheWarningMinutes: 2,
-            newSessionMode: "default", newSessionModel: ""
+            newSessionMode: "auto", newSessionModel: ""
         ])
     }
 
