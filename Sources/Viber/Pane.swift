@@ -192,6 +192,7 @@ final class Pane: Identifiable {
 
     /// Sends a `//` message or reply right away. A busy Claude gets it after its running tool call, as Claude Code does.
     func deliver(_ relay: IncomingRelay, binDir: String?, pluginDir: String?) {
+        if authFailed { restart(binDir: binDir, pluginDir: pluginDir) }
         if !isRunning { start(binDir: binDir, pluginDir: pluginDir) }
         let before = chat.state
         if relay.isReply {
@@ -222,6 +223,7 @@ final class Pane: Identifiable {
         process = nil
         authFailed = false
         chat.processExited(status: 0)
+        reportRelayUpdates()
         start(binDir: binDir, pluginDir: pluginDir)
     }
 
