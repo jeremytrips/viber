@@ -203,6 +203,9 @@ struct ToolRow: View {
                     Text(ToolSummary.summary(name: call.name, input: call.input))
                         .font(.system(.callout, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                     Spacer(minLength: 8)
+                    if call.blockedByAutoMode {
+                        Label("Blocked by auto mode", systemImage: "hand.raised").font(.caption).foregroundStyle(.orange)
+                    }
                     if let counts = ToolSummary.counts(name: call.name, input: call.input) {
                         Text(counts).font(.caption.monospaced()).foregroundStyle(.secondary)
                     }
@@ -287,8 +290,7 @@ struct DecisionLabel: View {
             case .alwaysAllowed: return ("Allowed for this session", "checkmark.circle", .green)
             case .denied: return ("Denied", "xmark.circle", .red)
             case .answered: return ("Answered", "checkmark.circle", .green)
-            case .approvedAuto: return ("Approved · editing automatically", "checkmark.circle", .green)
-            case .approvedAsk: return ("Approved · asking before edits", "checkmark.circle", .green)
+            case .approved(let mode): return ("Approved · \(mode.label.lowercased())", "checkmark.circle", .green)
             case .keepPlanning: return ("Kept planning", "arrow.uturn.backward.circle", .secondary)
             case .cancelled: return ("No longer needed", "minus.circle", .secondary)
             }
@@ -452,9 +454,11 @@ struct PlanCard: View {
                 TextField("Optional: tell Claude what to change", text: $feedback, axis: .vertical)
                     .textFieldStyle(.roundedBorder).lineLimit(1...4)
                 HStack {
-                    Button("Approve, edit automatically") { pane.run { $0.decidePlan(itemID: itemID, decision: .approvedAuto) } }
-                        .keyboardShortcut(.defaultAction)
-                    Button("Approve, ask before edits") { pane.run { $0.decidePlan(itemID: itemID, decision: .approvedAsk) } }
+                    ForEach([PermissionMode.acceptEdits, .auto, .default], id: \.self) { mode in
+                        Button("Approve, \(mode.label.lowercased())") { pane.run { $0.decidePlan(itemID: itemID, decision: .approved(mode)) } }
+                            .keyboardShortcut(mode == .acceptEdits ? .defaultAction : nil)
+                            .help(mode.summary ?? "")
+                    }
                     Button("Keep planning") { pane.run { $0.decidePlan(itemID: itemID, decision: .keepPlanning, feedback: feedback) } }
                 }
             }

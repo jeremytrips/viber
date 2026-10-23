@@ -8,6 +8,8 @@ final class SlashRouterTests: XCTestCase {
         XCTAssertEqual(SlashRouter.route("hello", commands: commands), .send("hello"))
         XCTAssertEqual(SlashRouter.route("/plan", commands: commands), .setMode("plan", then: nil))
         XCTAssertEqual(SlashRouter.route("/plan add OTA", commands: commands), .setMode("plan", then: "add OTA"))
+        XCTAssertEqual(SlashRouter.route("/auto", commands: commands), .setMode("auto", then: nil))
+        XCTAssertEqual(SlashRouter.route("/auto fix the build", commands: commands), .setMode("auto", then: "fix the build"))
         XCTAssertEqual(SlashRouter.route("/model opus", commands: commands), .setModel("opus"))
         XCTAssertEqual(SlashRouter.route("/model", commands: commands), .pickModel)
         XCTAssertEqual(SlashRouter.route("/compact", commands: commands), .send("/compact"))

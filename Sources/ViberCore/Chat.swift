@@ -27,14 +27,18 @@ public struct ToolCall: Equatable, Sendable {
     public var result: String?
     public var isError = false
     public var done = false
+    /// Auto mode's classifier refused the call; `result` holds what Claude was told.
+    public var blockedByAutoMode = false
 
     public init(id: String, name: String, input: JSON, result: String? = nil, isError: Bool = false, done: Bool = false) {
         self.id = id; self.name = name; self.input = input; self.result = result; self.isError = isError; self.done = done
     }
 }
 
-public enum PromptDecision: String, Equatable, Sendable {
-    case allowed, alwaysAllowed, denied, answered, approvedAuto, approvedAsk, keepPlanning, cancelled
+public enum PromptDecision: Equatable, Sendable {
+    case allowed, alwaysAllowed, denied, answered, keepPlanning, cancelled
+    /// A plan approved, continuing in this mode.
+    case approved(PermissionMode)
 }
 
 public struct PermissionPrompt: Equatable, Sendable {
@@ -124,6 +128,7 @@ public struct ChatTranscript {
     public var sessionID: String?
     public var cwd: String?
     public var model: String?
+    /// As reported by the CLI.
     public var permissionMode: String?
     public var streamingText = ""
     public var cache: CacheEstimate?
@@ -218,11 +223,8 @@ public struct ChatTranscript {
         items[index].kind = .plan(prompt)
         resumeAfterPrompt()
         switch decision {
-        case .approvedAuto, .approvedAsk:
-            let mode = decision == .approvedAuto ? "acceptEdits" : "default"
-            permissionMode = mode
-            return [Self.controlSuccess(requestID, ["behavior": "allow", "updatedInput": prompt.input]),
-                    request("set_permission_mode", ["mode": .string(mode)])]
+        case .approved(let mode):
+            return [Self.controlSuccess(requestID, ["behavior": "allow", "updatedInput": prompt.input]), setPermissionMode(mode.rawValue)]
         default:
             let note = feedback.trimmingCharacters(in: .whitespacesAndNewlines)
             let message = note.isEmpty ? "The user wants to keep planning. Ask what to change." : "The user wants to keep planning: \(note)"
@@ -231,9 +233,9 @@ public struct ChatTranscript {
         }
     }
 
+    /// `permissionMode` changes once the CLI confirms; it refuses auto mode on some models.
     public mutating func setPermissionMode(_ mode: String) -> JSON {
-        permissionMode = mode
-        return request("set_permission_mode", ["mode": .string(mode)])
+        request("set_permission_mode", ["mode": .string(mode)])
     }
 
     public mutating func setModel(_ value: String?) -> JSON {
@@ -343,8 +345,12 @@ public struct ChatTranscript {
             sessionID = message["session_id"]?.string ?? sessionID
             cwd = message["cwd"]?.string ?? cwd
             model = message["model"]?.string ?? model
-            permissionMode = message["permissionMode"]?.string ?? permissionMode
+            applyMode(message["permissionMode"]?.string)
             if state == .starting { state = .idle }
+        case "status":
+            // The CLI announces every mode change here, including ones it makes itself,
+            // like leaving auto mode when the model switches to one without it.
+            applyMode(message["permissionMode"]?.string)
         case "compact_boundary":
             append(.notice("Conversation compacted", isError: false))
         default: break
@@ -423,6 +429,7 @@ public struct ChatTranscript {
                     call.result = Self.resultText(block["content"])
                     call.isError = block["is_error"]?.bool ?? false
                     call.done = true
+                    call.blockedByAutoMode = Self.blockedByAutoMode(id, meta: message["tool_result_meta"])
                     items[index].kind = .tool(call)
                 }
             case "text":
@@ -527,6 +534,7 @@ public struct ChatTranscript {
             append(.notice("\(subtype) failed: \(response["error"]?.string ?? "unknown error")", isError: true))
             return
         }
+        if subtype == "set_permission_mode" { applyMode(response["response"]?["mode"]?.string) }
         guard subtype == "initialize", let body = response["response"] else { return }
         commands = (body["commands"]?.array ?? []).compactMap { c in
             guard let name = c["name"]?.string else { return nil }
@@ -536,8 +544,23 @@ public struct ChatTranscript {
             guard let value = m["value"]?.string else { return nil }
             return ModelOption(value: value, displayName: m["displayName"]?.string ?? value)
         }
-        permissionMode = body["current_permission_mode"]?.string ?? permissionMode
+        applyMode(body["current_permission_mode"]?.string)
         if state == .starting { state = .idle }
+    }
+
+    /// A mode the CLI reported as in effect. Every change after the first report gets a notice.
+    private mutating func applyMode(_ mode: String?) {
+        guard let mode, mode != permissionMode else { return }
+        if permissionMode != nil { append(.notice(PermissionMode(rawValue: mode)?.notice ?? "Mode: \(mode)", isError: false)) }
+        permissionMode = mode
+    }
+
+    /// `tool_result_meta` says who decided each call; a refusal by auto mode's classifier is a block.
+    static func blockedByAutoMode(_ toolUseID: String, meta: JSON?) -> Bool {
+        guard let entry = meta?.array?.first(where: { $0["id"]?.string == toolUseID }),
+              let decision = entry["permission_decision"], decision["reason_type"]?.string == "classifier",
+              let verdict = decision["decision"]?.string else { return false }
+        return verdict != "accept" && verdict != "allow"
     }
 
     private mutating func resumeAfterPrompt() {

@@ -119,10 +119,10 @@ struct ComposerView: View {
     private var bottomBar: some View {
         HStack(spacing: 8) {
             Menu {
-                ForEach(["default", "acceptEdits", "plan"], id: \.self) { mode in
-                    Button(AppModel.modeLabel(mode)) { model.submit(mode == "plan" ? "/plan" : "", in: pane, mode: mode) }
+                ForEach(PermissionMode.offered, id: \.self) { mode in
+                    Button(mode.label) { model.setMode(mode.rawValue, in: pane) }
                 }
-            } label: { Text(AppModel.modeLabel(pane.chat.permissionMode ?? pane.spec.permissionMode)) }
+            } label: { Text(PermissionMode.label(for: pane.chat.permissionMode ?? pane.spec.permissionMode)) }
                 .menuStyle(.borderlessButton).fixedSize()
             Menu {
                 if pane.chat.models.isEmpty { Text("Start the session to load models") }
@@ -187,14 +187,5 @@ struct ComposerView: View {
         draft = ""
         menuDismissed = false
         model.submit(text, in: pane)
-    }
-}
-
-extension AppModel {
-    /// Mode menu: switch mode without sending a message.
-    func submit(_ text: String, in pane: Pane, mode: String) {
-        if !pane.isRunning { pane.start(binDir: binDir, pluginDir: pluginDir) }
-        pane.run { [$0.setPermissionMode(mode)] }
-        pane.chat.note(mode == "plan" ? "Plan mode is on. Claude plans first and edits only after you approve." : "Mode: \(Self.modeLabel(mode))")
     }
 }
