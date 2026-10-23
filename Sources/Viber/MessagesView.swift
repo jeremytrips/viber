@@ -175,8 +175,6 @@ struct RelayRow: View {
 
                     let long = Self.isLong(reply)
                     MarkdownText(text: reply)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
                         .frame(maxHeight: long && !showFullReply ? 120 : nil, alignment: .top)
                         .clipped()
                     if long {
@@ -217,7 +215,7 @@ struct RelayRow: View {
     }
 }
 
-private struct ExpandButton: View {
+struct ExpandButton: View {
     @Binding var expanded: Bool
 
     var body: some View {

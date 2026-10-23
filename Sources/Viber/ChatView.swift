@@ -90,7 +90,7 @@ struct ChatList: View {
                             .id(item.id)
                     }
                     if !chat.streamingText.isEmpty {
-                        MarkdownText(text: chat.streamingText).id("streaming")
+                        MarkdownText(text: chat.streamingText, streaming: true).id("streaming")
                     }
                     if !readOnly, chat.state == .working || chat.state == .starting {
                         WorkingRow(pane: pane, starting: chat.state == .starting).id("working")
@@ -185,64 +185,6 @@ struct ChatItemView: View {
                 .foregroundStyle(isError ? Color.red : Color.secondary)
                 .textSelection(.enabled)
         }
-    }
-}
-
-/// Markdown with fenced code blocks as boxes and headings in bold; inline markdown otherwise.
-struct MarkdownText: View {
-    let text: String
-
-    private enum Block: Hashable { case prose(String), code(String) }
-
-    private var blocks: [Block] {
-        var result: [Block] = []
-        var prose: [Substring] = [], code: [Substring] = []
-        var inCode = false
-        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
-            if line.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
-                if inCode { result.append(.code(code.joined(separator: "\n"))); code = [] }
-                else if !prose.isEmpty { result.append(.prose(prose.joined(separator: "\n"))); prose = [] }
-                inCode.toggle()
-            } else if inCode { code.append(line) } else { prose.append(line) }
-        }
-        if inCode, !code.isEmpty { result.append(.code(code.joined(separator: "\n"))) }
-        if !prose.isEmpty { result.append(.prose(prose.joined(separator: "\n"))) }
-        return result
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                switch block {
-                case .prose(let s):
-                    VStack(alignment: .leading, spacing: 4) {
-                        ForEach(Array(paragraphs(s).enumerated()), id: \.offset) { _, line in line }
-                    }
-                case .code(let s):
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        Text(s).font(.system(.callout, design: .monospaced)).textSelection(.enabled).padding(10)
-                    }
-                    .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
-                    .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.separator))
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func paragraphs(_ s: String) -> [Text] {
-        s.trimmingCharacters(in: .newlines).split(separator: "\n", omittingEmptySubsequences: false).map { raw in
-            let line = String(raw)
-            if line.hasPrefix("#") {
-                let title = line.drop(while: { $0 == "#" }).trimmingCharacters(in: .whitespaces)
-                return Text(inline(title)).font(.headline)
-            }
-            return Text(inline(line.isEmpty ? " " : line)).font(.body)
-        }
-    }
-
-    private func inline(_ s: String) -> AttributedString {
-        (try? AttributedString(markdown: s, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(s)
     }
 }
 
@@ -491,14 +433,19 @@ struct PlanCard: View {
     let prompt: PlanPrompt
     let pane: Pane?
     @State private var feedback = ""
+    @State private var expanded = false
+    @State private var planHeight: CGFloat = 360
 
     var body: some View {
         Card(title: prompt.decision == nil && prompt.requestID != nil ? "Plan ready for review" : "Plan", color: .orange) {
-            ScrollView {
-                MarkdownText(text: prompt.plan).padding(12)
+            let plan = MarkdownText(text: prompt.plan).padding(12)
+                .onGeometryChange(for: CGFloat.self, of: \.size.height) { planHeight = $0 }
+            Group {
+                // Inside the chat's own ScrollView an unbounded one would swallow its scrolling, so the expanded plan drops it.
+                if expanded { plan } else { ScrollView { plan }.frame(height: min(planHeight, 360)) }
             }
-            .frame(maxHeight: 360)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .textBackgroundColor)))
+            if planHeight > 360 { ExpandButton(expanded: $expanded) }
             if let decision = prompt.decision {
                 DecisionLabel(decision: decision)
             } else if let pane, prompt.requestID != nil {
