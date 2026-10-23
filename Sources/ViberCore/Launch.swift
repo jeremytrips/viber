@@ -109,6 +109,7 @@ public enum ViberPaths {
     }
     public static var requests: URL { support.appendingPathComponent("requests") }
     public static var panes: URL { support.appendingPathComponent("panes.json") }
+    public static var relays: URL { support.appendingPathComponent("messages.json") }
     public static var clauthStatus: URL {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".clauth/status.json")
     }

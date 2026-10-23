@@ -10,11 +10,14 @@ struct PaneRecord: Codable {
     var worktree: WorktreeInfo?
 }
 
+/// A `//` message, or the reply to one, waiting to be delivered to a session.
 struct IncomingRelay {
+    var recordID: String
     var sourcePaneID: String
     var sourceTitle: String
-    var sentItemID: String
+    var sentItemID: String?
     var text: String
+    var isReply = false
 }
 
 /// One Claude Code session shown in Viber.
@@ -30,6 +33,8 @@ final class Pane: Identifiable {
     var pendingClose: ViberRequest?
     /// `//` messages waiting for this session's current turn to end.
     var inbox: [IncomingRelay] = []
+    /// The `//` message this session is answering right now, and the chat item it arrived as.
+    var answering: (recordID: String, itemID: String)?
     private(set) var started = false
     @ObservationIgnored private var process: ClaudeProcess?
     @ObservationIgnored var onStateChange: ((Pane, PaneState) -> Void)?
@@ -122,7 +127,12 @@ final class Pane: Identifiable {
     func deliver(_ relay: IncomingRelay, binDir: String?, pluginDir: String?) {
         if !isRunning { start(binDir: binDir, pluginDir: pluginDir) }
         let before = chat.state
-        process?.send(chat.receiveRelay(from: relay.sourceTitle, text: relay.text))
+        if relay.isReply {
+            process?.send(chat.receiveReply(from: relay.sourceTitle, text: relay.text))
+        } else {
+            process?.send(chat.receiveRelay(from: relay.sourceTitle, text: relay.text))
+            if let item = chat.lastItemID { answering = (relay.recordID, item) }
+        }
         lastActivity = Date()
         notifyIfChanged(from: before)
     }

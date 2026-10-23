@@ -74,3 +74,47 @@ final class RelayChatTests: XCTestCase {
         XCTAssertEqual(chat.items.map(\.kind), [.received(from: "UX", text: "use the new tokens")])
     }
 }
+
+final class RelayLogTests: XCTestCase {
+    func testLifecycleAndUnread() {
+        var log = RelayLog()
+        let t0 = Date(timeIntervalSince1970: 1000)
+        let id = log.add(source: ("a", "OTA"), target: ("b", "Backend"), text: "which endpoint?", queued: true, at: t0)
+        XCTAssertEqual(log.record(id)?.status, .queued)
+        XCTAssertEqual(log.unreadCount, 1)
+        log.lastSeen = t0
+        XCTAssertEqual(log.unreadCount, 0)
+        log.markDelivered(id, at: t0.addingTimeInterval(5))
+        XCTAssertEqual(log.record(id)?.status, .delivered)
+        log.recordReply(id, text: "  GET /firmware/latest ", at: t0.addingTimeInterval(20))
+        XCTAssertEqual(log.record(id)?.status, .replied)
+        XCTAssertEqual(log.record(id)?.reply, "GET /firmware/latest")
+        XCTAssertEqual(log.unreadCount, 1, "a reply counts as new")
+        XCTAssertEqual(log.records(for: "b").count, 1)
+    }
+
+    func testEmptyReplyIsNoReply() {
+        var log = RelayLog()
+        let id = log.add(source: ("a", "A"), target: ("b", "B"), text: "x", queued: false)
+        log.recordReply(id, text: "   ")
+        XCTAssertEqual(log.record(id)?.status, .noReply)
+    }
+
+    func testReplyEnvelopeAndAssistantText() {
+        let env = Relay.replyEnvelope(from: "Backend", text: "GET /firmware/latest")
+        XCTAssertEqual(Relay.parseReplyEnvelope(env)?.from, "Backend")
+        XCTAssertEqual(Relay.parseReplyEnvelope(env)?.text, "GET /firmware/latest")
+        XCTAssertNil(Relay.parseEnvelope(env))
+
+        var chat = ChatTranscript()
+        _ = chat.receiveRelay(from: "OTA", text: "which endpoint?")
+        let received = chat.lastItemID!
+        chat.apply(["type": "assistant", "message": ["id": "m1", "content": [["type": "text", "text": "Checking."]]]])
+        chat.apply(["type": "assistant", "message": ["id": "m2", "content": [["type": "text", "text": "GET /firmware/latest"]]]])
+        XCTAssertEqual(chat.assistantText(after: received), "Checking.\n\nGET /firmware/latest")
+
+        let reply = chat.receiveReply(from: "Backend", text: "ok")
+        XCTAssertEqual(chat.items.last?.kind, .reply(from: "Backend", text: "ok"))
+        XCTAssertNotNil(Relay.parseReplyEnvelope(reply["message"]?["content"]?.string ?? ""))
+    }
+}

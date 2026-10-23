@@ -85,6 +85,8 @@ public struct ChatItem: Identifiable, Equatable, Sendable {
         case notice(String, isError: Bool)
         /// A `//` message another session sent here.
         case received(from: String, text: String)
+        /// The answer to a `//` message this session sent, posted back automatically.
+        case reply(from: String, text: String)
         /// A `//` message this session sent elsewhere; `queued` until the target's turn ends.
         case sent(to: String, text: String, queued: Bool)
     }
@@ -247,6 +249,25 @@ public struct ChatTranscript {
         state = .working
         turnStartedByUser = true
         return ["type": "user", "message": ["role": "user", "content": .string(Relay.envelope(from: source, text: text))]]
+    }
+
+    /// Posts the answer to an earlier `//` message back into the sender's conversation.
+    public mutating func receiveReply(from source: String, text: String) -> JSON {
+        append(.reply(from: source, text: text))
+        state = .working
+        turnStartedByUser = true
+        return ["type": "user", "message": ["role": "user", "content": .string(Relay.replyEnvelope(from: source, text: text))]]
+    }
+
+    public var lastItemID: String? { items.last?.id }
+
+    /// Everything Claude said after an item, used as the reply to a `//` message.
+    public func assistantText(after itemID: String) -> String {
+        guard let index = items.firstIndex(where: { $0.id == itemID }) else { return "" }
+        return items[(index + 1)...].compactMap { item -> String? in
+            if case .assistant(let text) = item.kind { return text }
+            return nil
+        }.joined(separator: "\n\n")
     }
 
     /// Records a `//` message sent from here. Returns the item id so delivery can be marked later.
@@ -421,6 +442,10 @@ public struct ChatTranscript {
         if raw.hasPrefix("<local-command") || raw.hasPrefix("<system-reminder>") || raw.hasPrefix("Caveat:") { return }
         if let relayed = Relay.parseEnvelope(raw) {
             append(.received(from: relayed.from, text: relayed.text))
+            return
+        }
+        if let reply = Relay.parseReplyEnvelope(raw) {
+            append(.reply(from: reply.from, text: reply.text))
             return
         }
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)

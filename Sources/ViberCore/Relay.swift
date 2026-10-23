@@ -68,9 +68,22 @@ public enum Relay {
 
     public static func parseEnvelope(_ text: String) -> (from: String, text: String)? {
         guard text.hasPrefix("[Message from “"), let close = text.range(of: "” via Viber]") else { return nil }
-        let from = String(text[text.index(text.startIndex, offsetBy: 15)..<close.lowerBound])
+        let from = String(text[text.index(text.startIndex, offsetBy: "[Message from “".count)..<close.lowerBound])
         let body = text[close.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
         return (from, body)
+    }
+
+    /// The reply posted back to the sender. It asks for no answer, so replies never bounce back and forth.
+    public static func replyEnvelope(from source: String, text: String) -> String {
+        "[Reply from “\(source)” via Viber, answering your earlier message. No need to reply to it.]\n\(text)"
+    }
+
+    public static func parseReplyEnvelope(_ text: String) -> (from: String, text: String)? {
+        let open = "[Reply from “"
+        guard text.hasPrefix(open), let close = text.range(of: "” via Viber"),
+              let end = text.range(of: "]", range: close.upperBound..<text.endIndex) else { return nil }
+        let from = String(text[text.index(text.startIndex, offsetBy: open.count)..<close.lowerBound])
+        return (from, text[end.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     static let stopwords: Set<String> = ["the", "and", "for", "you", "can", "this", "that", "with", "from", "please",

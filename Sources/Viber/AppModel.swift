@@ -7,16 +7,20 @@ import ViberCore
 enum Target: Hashable {
     case pane(String)
     case external(String)
+    /// The timeline of `//` messages between sessions.
+    case messages
 
     var key: String {
         switch self {
+        case .messages: return "messages"
         case .pane(let id): return "pane:\(id)"
         case .external(let id): return "ext:\(id)"
         }
     }
 
     init?(key: String) {
-        if key.hasPrefix("pane:") { self = .pane(String(key.dropFirst(5))) }
+        if key == "messages" { self = .messages }
+        else if key.hasPrefix("pane:") { self = .pane(String(key.dropFirst(5))) }
         else if key.hasPrefix("ext:") { self = .external(String(key.dropFirst(4))) }
         else { return nil }
     }
@@ -46,6 +50,7 @@ final class AppModel {
     var showResume = false
     var closing: Pane?
     var cacheWarning: TimeInterval = 120
+    var relayLog = RelayLog()
 
     @ObservationIgnored let notifier = Notifier()
     @ObservationIgnored private let externalMonitor = ExternalMonitor()
@@ -237,13 +242,38 @@ final class AppModel {
         guard !message.isEmpty, let target = pane(targetID) else { return }
         let queued = !target.canReceiveNow || !target.inbox.isEmpty
         let sentID = source.chat.recordSent(to: target.title, text: message, queued: queued)
-        let incoming = IncomingRelay(sourcePaneID: source.id, sourceTitle: source.title, sentItemID: sentID, text: message)
+        let recordID = relayLog.add(source: (source.id, source.title), target: (target.id, target.title), text: message, queued: queued)
+        let incoming = IncomingRelay(recordID: recordID, sourcePaneID: source.id, sourceTitle: source.title, sentItemID: sentID, text: message)
         if queued { target.inbox.append(incoming) } else { deliver(incoming, to: target) }
+        saveRelays()
     }
 
     private func deliver(_ relay: IncomingRelay, to target: Pane) {
         target.deliver(relay, binDir: binDir, pluginDir: pluginDir)
-        pane(relay.sourcePaneID)?.chat.markDelivered(itemID: relay.sentItemID)
+        if let sent = relay.sentItemID { pane(relay.sourcePaneID)?.chat.markDelivered(itemID: sent) }
+        if !relay.isReply { relayLog.markDelivered(relay.recordID); saveRelays() }
+    }
+
+    /// When a session finishes answering a `//` message, post what it said back to the sender.
+    private func returnReply(from target: Pane) {
+        guard let answering = target.answering else { return }
+        target.answering = nil
+        let text = target.chat.assistantText(after: answering.itemID).trimmingCharacters(in: .whitespacesAndNewlines)
+        relayLog.recordReply(answering.recordID, text: text)
+        saveRelays()
+        guard !text.isEmpty, let record = relayLog.record(answering.recordID), let source = pane(record.sourceID) else { return }
+        let reply = IncomingRelay(recordID: record.id, sourcePaneID: target.id, sourceTitle: target.title, sentItemID: nil,
+                                  text: text, isReply: true)
+        if source.canReceiveNow && source.inbox.isEmpty { deliver(reply, to: source) } else { source.inbox.append(reply) }
+        if !(NSApp.isActive && selection == .pane(source.id)) {
+            notifier.post(id: "reply:\(record.id)", title: "\(source.title) · reply from \(target.title)",
+                          body: String(text.prefix(180)), target: Target.pane(source.id).key, sound: false)
+        }
+    }
+
+    func markMessagesSeen() {
+        relayLog.lastSeen = Date()
+        saveRelays()
     }
 
     /// One queued message per turn, so each gets its own reply.
@@ -303,6 +333,8 @@ final class AppModel {
         updateBadge()
         let state = pane.state
         // A session that just finished starting (or stopped) can take queued `//` messages.
+        // A session that stopped mid-answer still owes the sender a status.
+        if state == .exited, pane.answering != nil { returnReply(from: pane) }
         if [.idle, .exited].contains(state), !pane.inbox.isEmpty {
             DispatchQueue.main.async { [weak self] in self?.flushInbox(pane) }
         }
@@ -329,6 +361,7 @@ final class AppModel {
     }
 
     private func turnFinished(_ pane: Pane) {
+        returnReply(from: pane)
         if let request = pane.pendingClose {
             pane.pendingClose = nil
             close(pane, removeWorktree: request.removeWorktree, deleteBranch: request.deleteBranch)
@@ -469,7 +502,23 @@ final class AppModel {
         }
     }
 
+    func saveRelays() {
+        do {
+            try FileManager.default.createDirectory(at: ViberPaths.support, withIntermediateDirectories: true)
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .secondsSince1970
+            try encoder.encode(relayLog).write(to: ViberPaths.relays, options: .atomic)
+        } catch {
+            errorMessage = "Could not save messages: \(error.localizedDescription)"
+        }
+    }
+
     private func restore() {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        if let data = try? Data(contentsOf: ViberPaths.relays), let log = try? decoder.decode(RelayLog.self, from: data) {
+            relayLog = log
+        }
         guard let data = try? Data(contentsOf: ViberPaths.panes),
               let records = try? JSONDecoder().decode([PaneRecord].self, from: data) else { return }
         panes = records.map(Pane.init(record:))

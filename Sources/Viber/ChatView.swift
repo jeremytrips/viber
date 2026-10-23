@@ -161,6 +161,15 @@ struct ChatItemView: View {
             }
             .frame(maxWidth: .infinity, alignment: .trailing)
             .padding(.leading, 60)
+        case .reply(let from, let text):
+            VStack(alignment: .leading, spacing: 4) {
+                Label("Reply from \(from)", systemImage: "arrowshape.turn.up.left").font(.caption).foregroundStyle(.secondary)
+                MarkdownText(text: text)
+                    .padding(.horizontal, 13).padding(.vertical, 9)
+                    .background(RoundedRectangle(cornerRadius: 12).fill(Color.accentColor.opacity(0.08)))
+                    .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.accentColor.opacity(0.3)))
+            }
+            .padding(.trailing, 60)
         case .sent(let to, let text, let queued):
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Image(systemName: "arrow.up.right").foregroundStyle(Color.accentColor)
