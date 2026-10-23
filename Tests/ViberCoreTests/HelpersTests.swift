@@ -60,6 +60,14 @@ final class LaunchTests: XCTestCase {
     }
 }
 
+final class VSCodeLinkTests: XCTestCase {
+    func testFolderOpensInItsOwnWindow() {
+        XCTAssertEqual(VSCodeLink.url(for: "/Users/me/repo/.claude/worktrees/x")?.absoluteString,
+                       "vscode://file/Users/me/repo/.claude/worktrees/x/?windowId=_blank")
+        XCTAssertNil(VSCodeLink.url(for: "relative/path"))
+    }
+}
+
 final class ClauthTests: XCTestCase {
     func testStatusDecodes() throws {
         let json = #"""
