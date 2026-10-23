@@ -1,23 +1,22 @@
 import Foundation
-import ViberCore
 
 /// One running `claude -p --input-format stream-json …` process. Lines from stdout are decoded off the
 /// main thread and delivered on the main queue; writes go to stdin as NDJSON.
-final class ClaudeProcess {
+public final class ClaudeProcess {
     private let process = Process()
     private let stdin = Pipe()
     private let stdout = Pipe()
     private let stderr = Pipe()
     private let writeQueue = DispatchQueue(label: "viber.claude.stdin")
     private var buffer = Data()
-    private(set) var stderrTail = ""
+    public private(set) var stderrTail = ""
 
-    var onMessage: ((JSON) -> Void)?
-    var onExit: ((Int32, String) -> Void)?
+    public var onMessage: ((JSON) -> Void)?
+    public var onExit: ((Int32, String) -> Void)?
 
-    var isRunning: Bool { process.isRunning }
+    public var isRunning: Bool { process.isRunning }
 
-    init(spec: LaunchSpec, paneID: String, binDir: String?) throws {
+    public init(spec: LaunchSpec, paneID: String, binDir: String?) throws {
         let command = spec.command
         guard let executable = Executables.find(command.tool) else {
             throw NSError(domain: "Viber", code: 1, userInfo: [NSLocalizedDescriptionKey:
@@ -66,14 +65,14 @@ final class ClaudeProcess {
         }
     }
 
-    func send(_ message: JSON) {
+    public func send(_ message: JSON) {
         let data = Data((message.line() + "\n").utf8)
         writeQueue.async { [stdin] in
             try? stdin.fileHandleForWriting.write(contentsOf: data)
         }
     }
 
-    func terminate() {
+    public func terminate() {
         guard process.isRunning else { return }
         try? stdin.fileHandleForWriting.close()
         process.terminate()
