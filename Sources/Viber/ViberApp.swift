@@ -40,6 +40,7 @@ struct ViberApp: App {
                 Button("Jump to Session…") { model.showSwitcher = true }.keyboardShortcut("k")
                 Button("Next Session Waiting for You") { model.selectNextWaiting() }.keyboardShortcut("j")
                 Button("Show Messages") { model.select(.messages) }.keyboardShortcut("m", modifiers: [.command, .shift])
+                Button("Show Ideas") { model.select(.ideas) }.keyboardShortcut("i", modifiers: [.command, .shift])
                 Divider()
                 Button("Stop Claude") { model.selectedPane?.interrupt() }.keyboardShortcut(".")
                 Button("Open Folder in VS Code") {
@@ -77,6 +78,8 @@ struct ContentView: View {
             Group {
                 if model.selection == .messages {
                     MessagesView()
+                } else if model.selection == .ideas {
+                    IdeasView()
                 } else if let pane = model.selectedPane {
                     PaneView(pane: pane).id(pane.id)
                 } else if let session = model.selectedExternal {

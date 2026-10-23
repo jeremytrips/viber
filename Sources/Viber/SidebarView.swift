@@ -22,6 +22,7 @@ struct SidebarView: View {
         List(selection: selection) {
             Section {
                 MessagesRow().tag(Target.messages)
+                IdeasRow().tag(Target.ideas)
             }
             ForEach(groups, id: \.path) { group in
                 Section {
@@ -96,66 +97,48 @@ struct MessagesRow: View {
     }
 }
 
-/// A project's section title, with the note Viber gives the next sessions there.
-struct ProjectHeader: View {
+/// Entry point to the Ideas panel, with how many ideas are waiting to be planned.
+struct IdeasRow: View {
     @Environment(AppModel.self) private var model
-    let name: String
-    let path: String
-    @State private var editing = false
 
     var body: some View {
-        let note = model.notes.note(for: path)
-        HStack(spacing: 4) {
-            Text(name).help(path)
+        let count = model.ideas.ideas.filter { $0.status == .open }.count
+        HStack(spacing: 6) {
+            Label("Ideas", systemImage: "lightbulb")
             Spacer(minLength: 4)
-            Button { editing = true } label: {
-                Image(systemName: note == nil ? "note.text.badge.plus" : "note.text")
-                    .foregroundStyle(note == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.accentColor))
-            }
-            .buttonStyle(.borderless)
-            .help(note?.text ?? "Add a note for the next sessions in this project")
-            .accessibilityLabel(note == nil ? "Add project note" : "Edit project note")
-            .popover(isPresented: $editing, arrowEdge: .trailing) {
-                ProjectNoteEditor(name: name, path: path)
+            if count > 0 {
+                Text("\(count) to plan").font(.caption).foregroundStyle(.secondary)
             }
         }
     }
 }
 
-/// Edits a project's note. Saves when the popover closes.
-struct ProjectNoteEditor: View {
+/// A project's section title, with its ideas for later.
+struct ProjectHeader: View {
     @Environment(AppModel.self) private var model
     let name: String
     let path: String
-    @State private var draft = ""
-    @State private var original = ""
+    @State private var showingIdeas = false
 
     var body: some View {
-        let note = model.notes.note(for: path)
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Note for \(name)").font(.headline)
-            TextEditor(text: $draft)
-                .font(.body)
-                .frame(width: 340, height: 160)
-                .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(.separator))
-            Text("Given to new conversations in this project. Ongoing ones keep the version they started with, and can read the latest with `viber note`.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            HStack {
-                if let note {
-                    Text("Updated \(note.updatedAt, format: .relative(presentation: .named)) by \(note.updatedBy)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+        let count = model.ideas.toPlanCount(in: path)
+        HStack(spacing: 4) {
+            Text(name).help(path)
+            Spacer(minLength: 4)
+            Button { showingIdeas = true } label: {
+                HStack(spacing: 2) {
+                    Image(systemName: count == 0 ? "lightbulb" : "lightbulb.fill")
+                    if count > 0 { Text("\(count)").monospacedDigit() }
                 }
-                Spacer()
-                Button("Clear") { draft = "" }.disabled(draft.isEmpty)
+                .foregroundStyle(count == 0 ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.accentColor))
+            }
+            .buttonStyle(.borderless)
+            .help(count == 0 ? "Ideas for later in \(name)" : "\(count) idea\(count == 1 ? "" : "s") to plan in \(name)")
+            .accessibilityLabel(count == 0 ? "Project ideas" : "Project ideas, \(count) to plan")
+            .popover(isPresented: $showingIdeas, arrowEdge: .trailing) {
+                ProjectIdeasPopover(name: name, path: path) { showingIdeas = false }
             }
         }
-        .padding(14)
-        .frame(width: 368)
-        .onAppear { draft = note?.text ?? ""; original = draft }
-        .onDisappear { if draft != original { model.setNote(draft, for: path, by: "you") } }
     }
 }
 

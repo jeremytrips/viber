@@ -8,7 +8,7 @@ let usage = """
 usage: viber close [--remove-worktree] [--delete-branch]
        viber notify <text...>
        viber rename <title...>
-       viber note [set <text...> | set - | clear]
+       viber idea [list | add <text...> | add -]
        viber --help
 
 Talks to the Viber app that runs this Claude Code session.
@@ -17,9 +17,9 @@ Talks to the Viber app that runs this Claude Code session.
            --delete-branch    also delete its branch with `git branch -d` (kept if not merged)
   notify   Show a macOS notification for this session.
   rename   Set this session's title in the sidebar.
-  note     Print this project's note, which Viber gives every new session in the project.
-           set <text...>  replace the note (`set -` reads it from stdin)
-           clear          remove the note
+  idea     This project's ideas: things to do later that nobody has planned yet.
+           list           print the ideas that are not done (the default)
+           add <text...>  add an idea (`add -` reads it from stdin); the first line is its title
 """
 
 func fail(_ message: String, code: Int32) -> Never {
@@ -72,35 +72,31 @@ case "notify", "rename":
         request = ViberRequest(paneID: paneID, command: .rename, text: text)
         confirmation = "Viber will rename this session to: \(text)"
     }
-case "note":
-    guard let action = args.first else {
-        guard let project = ProcessInfo.processInfo.environment["VIBER_PROJECT"], !project.isEmpty else {
-            fail("viber: this session was started by an older Viber; restart it to read the project note", code: 2)
-        }
-        print(ProjectNotes.load().note(for: project)?.text ?? "No note for this project.")
-        exit(0)
-    }
-    let text: String
+case "idea":
+    let action = args.first ?? "list"
     switch action {
-    case "set":
+    case "list":
+        guard let project = ProcessInfo.processInfo.environment["VIBER_PROJECT"], !project.isEmpty else {
+            fail("viber: this session was started by an older Viber; restart it to read the project's ideas", code: 2)
+        }
+        print(IdeaList.listing(IdeaList.load().pending(in: project), projectName: URL(fileURLWithPath: project).lastPathComponent))
+        exit(0)
+    case "add":
         let rest = Array(args.dropFirst())
-        text = rest == ["-"]
+        let text = rest == ["-"]
             ? String(decoding: FileHandle.standardInput.readDataToEndOfFile(), as: UTF8.self)
             : rest.joined(separator: " ")
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            fail("viber: note set needs text (use `viber note clear` to remove the note)\n\n\(usage)", code: 64)
+            fail("viber: idea add needs text\n\n\(usage)", code: 64)
         }
-        guard text.count <= ProjectNotes.maxLength else {
-            fail("viber: the note is \(text.count) characters; keep it under \(ProjectNotes.maxLength)", code: 64)
+        guard text.count <= IdeaList.maxLength else {
+            fail("viber: the idea is \(text.count) characters; keep it under \(IdeaList.maxLength)", code: 64)
         }
-        confirmation = "Viber will save the project note in a few seconds. New sessions in this project will get it."
-    case "clear":
-        text = ""
-        confirmation = "Viber will remove the project note."
+        request = ViberRequest(paneID: paneID, command: .idea, text: text)
+        confirmation = "Viber will add the idea to this project's list in a few seconds."
     default:
-        fail("viber: unknown note action: \(action)\n\n\(usage)", code: 64)
+        fail("viber: unknown idea action: \(action)\n\n\(usage)", code: 64)
     }
-    request = ViberRequest(paneID: paneID, command: .note, text: text)
 default:
     fail("viber: unknown command: \(command)\n\n\(usage)", code: 64)
 }
