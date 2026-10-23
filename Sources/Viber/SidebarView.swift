@@ -32,6 +32,8 @@ struct SidebarView: View {
                             .contextMenu {
                                 Button("Open in VS Code") { model.openInVSCode(pane.cwd) }
                                 Button("Stop Claude") { pane.interrupt() }.disabled(pane.state != .working)
+                                Button("Restart Claude") { model.restart(pane) }
+                                    .help("Start a new Claude process on this conversation, e.g. after logging in again")
                                 Divider()
                                 Button("Close Session…") { model.requestClose(pane) }
                             }
