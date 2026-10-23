@@ -106,6 +106,7 @@ public struct SlashCommand: Equatable, Sendable {
 public struct ModelOption: Equatable, Sendable {
     public var value: String
     public var displayName: String
+    public init(value: String, displayName: String) { self.value = value; self.displayName = displayName }
 }
 
 public struct TurnUsage: Equatable, Sendable {
@@ -133,9 +134,18 @@ public struct ChatTranscript {
     public var commands: [SlashCommand] = []
     public var models: [ModelOption] = []
     public var turnStartedByUser = true
+    /// MCP servers, context, rules and the like, for the settings sheet.
+    public var controls = SessionControls()
+
+    private struct PendingRequest {
+        var subtype: String
+        /// Set for settings-sheet requests: their busy flag and where their error shows.
+        var key: String?
+        var body: [String: JSON]
+    }
 
     private var toolIndex: [String: Int] = [:]
-    private var pendingRequests: [String: String] = [:]
+    private var pendingRequests: [String: PendingRequest] = [:]
     private var blockCounts: [String: Int] = [:]
     private var seenRows: Set<String> = []
     private var nextID = 0
@@ -162,10 +172,11 @@ public struct ChatTranscript {
         return ["type": "user", "message": ["role": "user", "content": .string(text)]]
     }
 
-    public mutating func request(_ subtype: String, _ extra: [String: JSON] = [:]) -> JSON {
+    public mutating func request(_ subtype: String, _ extra: [String: JSON] = [:], key: String? = nil) -> JSON {
         nextID += 1
         let id = "viber-\(nextID)-\(subtype)"
-        pendingRequests[id] = subtype
+        pendingRequests[id] = PendingRequest(subtype: subtype, key: key, body: extra)
+        if let key { controls.busy.insert(key); controls.errors[key] = nil }
         var body = extra
         body["subtype"] = .string(subtype)
         return ["type": "control_request", "request_id": .string(id), "request": .object(body)]
@@ -239,6 +250,54 @@ public struct ChatTranscript {
     public mutating func setModel(_ value: String?) -> JSON {
         model = value ?? model
         return request("set_model", value.map { ["model": .string($0)] } ?? [:])
+    }
+
+    // MARK: Settings sheet (the control requests behind terminal-only commands)
+
+    /// What a tab needs to show itself.
+    public mutating func refresh(_ tab: SettingsTab) -> [JSON] {
+        switch tab {
+        case .mcp: return [request("mcp_status", key: "mcp")]
+        case .context: return [request("get_context_usage", ["detail": "full"], key: "context"), request("get_session_cost", key: "cost")]
+        case .permissions: return [request("list_permission_rules", key: "permissions")]
+        case .hooks: return [request("get_hooks_listing", key: "hooks")]
+        case .model: return [request("get_settings", key: "settings")]
+        }
+    }
+
+    /// Enabling or disabling is saved per project by the CLI, as `/mcp` does in the terminal.
+    public mutating func mcpToggle(_ server: String, enabled: Bool) -> JSON {
+        request("mcp_toggle", ["serverName": .string(server), "enabled": .bool(enabled)], key: "mcp:\(server)")
+    }
+
+    public mutating func mcpReconnect(_ server: String) -> JSON {
+        request("mcp_reconnect", ["serverName": .string(server)], key: "mcp:\(server)")
+    }
+
+    /// Starts an OAuth sign-in; the reply carries the page to open. The CLI reconnects once it completes.
+    public mutating func mcpAuthenticate(_ server: String) -> JSON {
+        request("mcp_authenticate", ["serverName": .string(server)], key: "mcp:\(server)")
+    }
+
+    public mutating func mcpClearAuth(_ server: String) -> JSON {
+        request("mcp_clear_auth", ["serverName": .string(server)], key: "mcp:\(server)")
+    }
+
+    /// Effort for this session only, through the CLI's session settings layer.
+    public mutating func setEffort(_ level: String) -> JSON {
+        controls.effort = level
+        return request("apply_flag_settings", ["settings": ["effortLevel": .string(level)]], key: "effort")
+    }
+
+    /// Saved to the project's .claude/settings.local.json by the CLI itself, as `/output-style` does.
+    public mutating func setOutputStyle(_ style: String) -> JSON {
+        controls.outputStyle = style
+        return request("update_settings", ["source": "localSettings", "settings": ["outputStyle": .string(style)]], key: "outputStyle")
+    }
+
+    /// Replaces this session's own permission rules (the CLI's flag settings layer).
+    public mutating func setSessionRules(_ edits: [RuleEdit]) -> JSON {
+        request("apply_flag_settings", ["settings": ["permissions": SettingsFile.permissionsJSON(edits)]], key: "sessionRules")
     }
 
     public mutating func note(_ text: String, isError: Bool = false) { append(.notice(text, isError: isError)) }
@@ -317,7 +376,7 @@ public struct ChatTranscript {
         case "result": applyResult(message)
         case "control_request": return applyControlRequest(message)
         case "control_cancel_request": cancelPrompt(requestID: message["request_id"]?.string ?? "")
-        case "control_response": applyControlResponse(message)
+        case "control_response": return applyControlResponse(message, now: now)
         default: break
         }
         return []
@@ -344,7 +403,11 @@ public struct ChatTranscript {
             cwd = message["cwd"]?.string ?? cwd
             model = message["model"]?.string ?? model
             permissionMode = message["permissionMode"]?.string ?? permissionMode
+            if let servers = message["mcp_servers"] { mergeServerStatus(McpServer.parse(servers)) }
             if state == .starting { state = .idle }
+        case "commands_changed":
+            // Plugin and MCP commands that finished loading after initialize.
+            if let list = message["commands"] { commands = Self.commands(list) }
         case "compact_boundary":
             append(.notice("Conversation compacted", isError: false))
         default: break
@@ -520,24 +583,84 @@ public struct ChatTranscript {
         resumeAfterPrompt()
     }
 
-    private mutating func applyControlResponse(_ message: JSON) {
+    private mutating func applyControlResponse(_ message: JSON, now: Date) -> [JSON] {
         guard let response = message["response"], let id = response["request_id"]?.string,
-              let subtype = pendingRequests.removeValue(forKey: id) else { return }
+              let pending = pendingRequests.removeValue(forKey: id) else { return [] }
+        let subtype = pending.subtype
+        let server = pending.body["serverName"]?.string
+        if let key = pending.key { controls.busy.remove(key) }
         if response["subtype"]?.string == "error" {
-            append(.notice("\(subtype) failed: \(response["error"]?.string ?? "unknown error")", isError: true))
-            return
+            let error = response["error"]?.string ?? "unknown error"
+            // Settings-sheet errors show in the sheet, next to what failed.
+            if let key = pending.key { controls.errors[key] = error } else { append(.notice("\(subtype) failed: \(error)", isError: true)) }
+            if let server { controls.signingIn[server] = nil }
+            return []
         }
-        guard subtype == "initialize", let body = response["response"] else { return }
-        commands = (body["commands"]?.array ?? []).compactMap { c in
+        let body = response["response"]
+        switch subtype {
+        case "initialize":
+            guard let body else { return [] }
+            commands = Self.commands(body["commands"])
+            models = (body["models"]?.array ?? []).compactMap { m in
+                guard let value = m["value"]?.string else { return nil }
+                return ModelOption(value: value, displayName: m["displayName"]?.string ?? value)
+            }
+            permissionMode = body["current_permission_mode"]?.string ?? permissionMode
+            controls.outputStyle = body["output_style"]?.string ?? controls.outputStyle
+            controls.outputStyles = (body["available_output_styles"]?.array ?? []).compactMap(\.string)
+            if state == .starting { state = .idle }
+            // The header's MCP count, before the first turn's init message would bring it.
+            return [request("mcp_status", key: "mcp")]
+        case "mcp_status":
+            let servers = McpServer.parse(body?["mcpServers"])
+            controls.mcp = servers
+            for s in servers where s.status == .connected { controls.signingIn[s.name] = nil }
+        case "mcp_toggle", "mcp_reconnect", "mcp_clear_auth":
+            return [request("mcp_status", key: "mcp")]
+        case "mcp_authenticate":
+            if let url = body?["authUrl"]?.string.flatMap(URL.init(string:)), body?["requiresUserAction"]?.bool != false {
+                controls.authURL = url
+                if let server {
+                    controls.signingIn[server] = now
+                    // claude.ai connectors are connected on claude.ai; nothing calls the CLI back.
+                    if body?["callbackExpected"]?.bool == false { controls.reconnectOnReturn.insert(server) }
+                }
+                return []
+            }
+            return [request("mcp_status", key: "mcp")] // already signed in
+        case "get_context_usage":
+            controls.context = ContextUsage.parse(body)
+        case "get_session_cost":
+            controls.costText = body?["text"]?.string
+        case "list_permission_rules":
+            (controls.rules, controls.directories) = PermissionRule.parse(body)
+        case "get_hooks_listing":
+            controls.hooks = HookEntry.parseListing(body)
+        case "get_settings":
+            controls.appliedModel = body?["applied"]?["model"]?.string ?? controls.appliedModel
+            controls.effort = body?["applied"]?["effort"]?.string ?? controls.effort
+            controls.outputStyle = body?["effective"]?["outputStyle"]?.string ?? controls.outputStyle
+        case "apply_flag_settings" where pending.key == "sessionRules":
+            return [request("list_permission_rules", key: "permissions")]
+        default: break
+        }
+        return []
+    }
+
+    private mutating func mergeServerStatus(_ servers: [McpServer]) {
+        guard var current = controls.mcp else { controls.mcp = servers; return }
+        for server in servers {
+            if let index = current.firstIndex(where: { $0.name == server.name }) { current[index].status = server.status }
+            else { current.append(server) }
+        }
+        controls.mcp = current
+    }
+
+    static func commands(_ list: JSON?) -> [SlashCommand] {
+        (list?.array ?? []).compactMap { c in
             guard let name = c["name"]?.string else { return nil }
             return SlashCommand(name: name, description: c["description"]?.string ?? "", argumentHint: c["argumentHint"]?.string ?? "")
         }
-        models = (body["models"]?.array ?? []).compactMap { m in
-            guard let value = m["value"]?.string else { return nil }
-            return ModelOption(value: value, displayName: m["displayName"]?.string ?? value)
-        }
-        permissionMode = body["current_permission_mode"]?.string ?? permissionMode
-        if state == .starting { state = .idle }
     }
 
     private mutating func resumeAfterPrompt() {

@@ -151,6 +151,130 @@ final class ChatTranscriptTests: XCTestCase {
         XCTAssertEqual(chat.state, .idle)
     }
 
+    private func reply(to request: JSON, _ response: JSON = .null, error: String? = nil) -> JSON {
+        let id = request["request_id"]!
+        if let error { return ["type": "control_response", "response": ["subtype": "error", "request_id": id, "error": .string(error)]] }
+        return ["type": "control_response", "response": ["subtype": "success", "request_id": id, "response": response]]
+    }
+
+    func testInitializeAsksForMcpStatus() {
+        var chat = ChatTranscript()
+        let out = chat.apply(reply(to: chat.request("initialize"), ["commands": [], "output_style": "default",
+                                                                     "available_output_styles": ["default", "Concise"]]))
+        XCTAssertEqual(out.first?["request"]?["subtype"]?.string, "mcp_status")
+        XCTAssertEqual(chat.controls.outputStyles, ["default", "Concise"])
+        XCTAssertTrue(chat.controls.busy.contains("mcp"))
+    }
+
+    func testMcpStatusFillsServers() {
+        var chat = ChatTranscript()
+        // Trimmed from a real `mcp_status` reply (claude 2.1.309).
+        chat.apply(reply(to: chat.refresh(.mcp)[0], ["mcpServers": [
+            ["name": "plugin:posthog:posthog", "status": "needs-auth", "config": ["type": "http", "url": "https://mcp.posthog.com/mcp"],
+             "transport": "http", "scope": "dynamic", "source": "plugin"],
+            ["name": "claude.ai Notion", "status": "connected", "serverInfo": ["name": "Notion MCP", "version": "1.2.0"],
+             "config": ["type": "claudeai-proxy"], "transport": "claudeai-proxy", "scope": "claudeai", "source": "claudeai",
+             "tools": [["name": "notion-search"], ["name": "notion-fetch"]]],
+            ["name": "local", "status": "failed", "error": "spawn ENOENT", "transport": "stdio"]
+        ]]))
+        let servers = try! XCTUnwrap(chat.controls.mcp)
+        XCTAssertEqual(servers.map(\.status), [.needsAuth, .connected, .failed])
+        XCTAssertEqual(servers[1].tools, ["notion-search", "notion-fetch"])
+        XCTAssertEqual(servers[1].version, "1.2.0")
+        XCTAssertTrue(servers[0].canSignOut)
+        XCTAssertFalse(servers[1].canSignOut)
+        XCTAssertEqual(servers[2].error, "spawn ENOENT")
+        XCTAssertEqual(chat.controls.mcpSummary?.connected, 1)
+        XCTAssertEqual(chat.controls.mcpSummary?.attention, true)
+        XCTAssertFalse(chat.controls.busy.contains("mcp"))
+    }
+
+    func testInitMessageUpdatesServerStatusKeepingTools() {
+        var chat = ChatTranscript()
+        chat.apply(reply(to: chat.refresh(.mcp)[0], ["mcpServers": [["name": "a", "status": "pending", "tools": [["name": "t"]]]]]))
+        chat.apply(["type": "system", "subtype": "init", "mcp_servers": [["name": "a", "status": "connected"], ["name": "b", "status": "failed"]]])
+        XCTAssertEqual(chat.controls.mcp?.map(\.name), ["a", "b"])
+        XCTAssertEqual(chat.controls.mcp?.first?.status, .connected)
+        XCTAssertEqual(chat.controls.mcp?.first?.tools, ["t"])
+    }
+
+    func testToggleClearsBusyAndRereadsStatus() {
+        var chat = ChatTranscript()
+        let toggle = chat.mcpToggle("a", enabled: false)
+        XCTAssertEqual(toggle["request"]?["enabled"]?.bool, false)
+        XCTAssertTrue(chat.controls.busy.contains("mcp:a"))
+        let out = chat.apply(reply(to: toggle))
+        XCTAssertFalse(chat.controls.busy.contains("mcp:a"))
+        XCTAssertEqual(out.first?["request"]?["subtype"]?.string, "mcp_status")
+    }
+
+    func testSignInOpensThePageAndRemembersTheServer() {
+        var chat = ChatTranscript()
+        let now = Date(timeIntervalSince1970: 50)
+        chat.apply(reply(to: chat.mcpAuthenticate("claude.ai Gmail"),
+                         ["authUrl": "https://claude.ai/settings/connectors", "requiresUserAction": true, "callbackExpected": false]), now: now)
+        XCTAssertEqual(chat.controls.authURL?.host, "claude.ai")
+        XCTAssertEqual(chat.controls.signingIn["claude.ai Gmail"], now)
+        XCTAssertEqual(chat.controls.takeReturnReconnects(), ["claude.ai Gmail"])
+        XCTAssertTrue(chat.controls.reconnectOnReturn.isEmpty)
+    }
+
+    func testSettingsErrorsStayOutOfTheChat() {
+        var chat = ChatTranscript()
+        chat.apply(reply(to: chat.mcpReconnect("a"), error: "Server not found: a"))
+        XCTAssertEqual(chat.controls.errors["mcp:a"], "Server not found: a")
+        XCTAssertTrue(chat.items.isEmpty)
+        // Other requests still report in the chat.
+        chat.apply(reply(to: chat.setModel("nope"), error: "bad model"))
+        XCTAssertEqual(chat.items.last?.kind, .notice("set_model failed: bad model", isError: true))
+    }
+
+    func testCommandsChangedRefreshesTheMenu() {
+        var chat = ChatTranscript()
+        chat.apply(["type": "system", "subtype": "commands_changed", "commands": [["name": "posthog:llma-cc-setup", "description": "Set up"]]])
+        XCTAssertEqual(chat.commands.map(\.name), ["posthog:llma-cc-setup"])
+    }
+
+    func testContextRulesHooksAndSettingsReplies() {
+        var chat = ChatTranscript()
+        let context = chat.refresh(.context)
+        chat.apply(reply(to: context[0], ["categories": [
+            ["name": "System prompt", "tokens": 2509, "kind": "used"], ["name": "Free space", "tokens": 952349, "kind": "free"]],
+            "totalTokens": 14651, "maxTokens": 1000000, "model": "claude-opus-5-5", "isAutoCompactEnabled": true]))
+        chat.apply(reply(to: context[1], ["text": "Total cost: $0.0000"]))
+        XCTAssertEqual(chat.controls.context?.categories.map(\.name), ["System prompt", "Free space"])
+        XCTAssertEqual(chat.controls.context?.fraction ?? 0, 0.014651, accuracy: 0.000001)
+        XCTAssertEqual(chat.controls.costText, "Total cost: $0.0000")
+
+        chat.apply(reply(to: chat.refresh(.permissions)[0], ["state": [
+            "rules": [["behavior": "allow", "source": "userSettings", "rule": "Bash(npx ng build:*)"],
+                      ["behavior": "allow", "source": "flagSettings", "rule": "Bash(echo viber:*)"],
+                      ["behavior": "deny", "source": "policySettings", "rule": "WebFetch"]],
+            "workspaceDirectories": [["path": "/tmp/x", "source": "session"]]]]))
+        XCTAssertEqual(chat.controls.rules?.map(\.scope), [.user, .session, nil])
+        XCTAssertEqual(chat.controls.rules?.last?.sourceLabel, "Managed policy")
+        XCTAssertEqual(chat.controls.directories, ["/tmp/x"])
+
+        chat.apply(reply(to: chat.refresh(.hooks)[0], ["hooks": [
+            ["event": "PreToolUse", "matcher": "__exec$", "source": "pluginHook", "pluginName": "posthog@posthog", "displayText": "gate.sh", "timeout": 5],
+            ["event": "Stop", "matcher": "", "source": "userSettings", "sourceLabel": "User settings (~/.claude/settings.json)", "displayText": "keep-awake.sh stop"]]]))
+        XCTAssertEqual(chat.controls.hooks?.map(\.source), ["Plugin posthog@posthog", "User settings (~/.claude/settings.json)"])
+
+        chat.apply(reply(to: chat.refresh(.model)[0], ["applied": ["model": "claude-opus-5-5", "effort": "xhigh"], "effective": ["outputStyle": "Concise"]]))
+        XCTAssertEqual(chat.controls.appliedModel, "claude-opus-5-5")
+        XCTAssertEqual(chat.controls.effort, "xhigh")
+        XCTAssertEqual(chat.controls.outputStyle, "Concise")
+    }
+
+    func testSessionRulesGoToTheFlagLayerAndRefreshTheList() {
+        var chat = ChatTranscript()
+        let apply = chat.setSessionRules([RuleEdit(behavior: "allow", rule: "Bash(echo:*)")])
+        XCTAssertEqual(apply["request"]?["settings"]?["permissions"]?["allow"], ["Bash(echo:*)"])
+        XCTAssertEqual(apply["request"]?["settings"]?["permissions"]?["deny"], [], "every list is sent so removals clear")
+        let out = chat.apply(reply(to: apply))
+        XCTAssertEqual(out.first?["request"]?["subtype"]?.string, "list_permission_rules")
+    }
+
     func testFailedResultShowsNotice() {
         var chat = ChatTranscript()
         _ = chat.userMessage("hi")

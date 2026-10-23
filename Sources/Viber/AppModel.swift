@@ -26,6 +26,13 @@ enum Target: Hashable {
     }
 }
 
+/// The settings sheet of one session, opened on a tab.
+struct SettingsSheetRequest: Identifiable {
+    var paneID: String
+    var tab: SettingsTab
+    var id: String { paneID }
+}
+
 struct NewSessionRequest {
     var folder: String
     var profile: String?
@@ -49,14 +56,16 @@ final class AppModel {
     var showSwitcher = false
     var showResume = false
     var closing: Pane?
-    var cacheWarning: TimeInterval = 120
+    var settingsSheet: SettingsSheetRequest?
     var relayLog = RelayLog()
+    var cacheWarning: TimeInterval { TimeInterval(max(Prefs.int(Prefs.cacheWarningMinutes), 1) * 60) }
 
     @ObservationIgnored let notifier = Notifier()
     @ObservationIgnored private let externalMonitor = ExternalMonitor()
     @ObservationIgnored private var externalStates: [String: SessionState] = [:]
     @ObservationIgnored private var cacheAlerted: Set<String> = []
     @ObservationIgnored private var timers: [Timer] = []
+    @ObservationIgnored private var activation: NSObjectProtocol?
     @ObservationIgnored let binDir: String?
     @ObservationIgnored let pluginDir: String?
 
@@ -68,12 +77,16 @@ final class AppModel {
         let fm = FileManager.default
         binDir = env["VIBER_BIN_DIR"] ?? bundledBin.flatMap { fm.fileExists(atPath: $0) ? $0 : nil }
         pluginDir = env["VIBER_PLUGIN_DIR"] ?? bundledPlugin.flatMap { fm.fileExists(atPath: $0) ? $0 : nil }
+        Prefs.register()
         restore()
         notifier.onOpen = { [weak self] key in
             guard let self, let target = Target(key: key) else { return }
             self.select(target)
         }
         notifier.setUp()
+        activation = NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.returnedToApp() }
+        }
         startTimers()
         reloadStatus()
         reloadRecent()
@@ -127,6 +140,8 @@ final class AppModel {
     func createSession(_ request: NewSessionRequest) {
         let title = request.name.isEmpty ? (request.firstMessage.isEmpty ? URL(fileURLWithPath: request.folder).lastPathComponent : String(request.firstMessage.prefix(50))) : request.name
         let mode = request.permissionMode == "default" ? nil : request.permissionMode
+        let model = Prefs.string(Prefs.newSessionModel)
+        let launchModel = model.isEmpty ? nil : model
         if request.useWorktree {
             let folder = request.folder, name = request.name.isEmpty ? title : request.name
             Task.detached {
@@ -134,7 +149,7 @@ final class AppModel {
                 await MainActor.run {
                     switch result {
                     case .success(let info):
-                        self.open(title: title, spec: LaunchSpec(profile: request.profile, cwd: info.path, permissionMode: mode),
+                        self.open(title: title, spec: LaunchSpec(profile: request.profile, cwd: info.path, permissionMode: mode, model: launchModel),
                                   worktree: info, firstMessage: request.firstMessage)
                     case .failure(let error):
                         self.errorMessage = error.localizedDescription
@@ -142,7 +157,7 @@ final class AppModel {
                 }
             }
         } else {
-            open(title: title, spec: LaunchSpec(profile: request.profile, cwd: request.folder, permissionMode: mode),
+            open(title: title, spec: LaunchSpec(profile: request.profile, cwd: request.folder, permissionMode: mode, model: launchModel),
                  worktree: nil, firstMessage: request.firstMessage)
         }
     }
@@ -176,6 +191,7 @@ final class AppModel {
     private func wire(_ pane: Pane) {
         pane.onStateChange = { [weak self] pane, previous in self?.stateChanged(pane, from: previous) }
         pane.onTurnFinished = { [weak self] pane in self?.turnFinished(pane) }
+        pane.onOpenURL = { NSWorkspace.shared.open($0) }
     }
 
     /// Routes composer text: skills go to the CLI, terminal-only commands are handled here.
@@ -214,6 +230,85 @@ final class AppModel {
             let usage = pane.chat.lastUsage
             pane.chat.note(String(format: "Session cost so far: $%.2f. Context: %@ tokens.", pane.chat.costUSD,
                                   usage.map { Self.compact($0.contextTokens) } ?? "unknown"))
+        case .openSettings(let tab):
+            openSettings(tab, in: pane)
+        }
+    }
+
+    // MARK: Session settings (what /mcp, /context, /permissions … show in the terminal)
+
+    func openSettings(_ tab: SettingsTab, in pane: Pane) {
+        control(pane) { $0.refresh(tab) }
+        settingsSheet = SettingsSheetRequest(paneID: pane.id, tab: tab)
+    }
+
+    /// Sends settings requests, starting the session's process first if it is not running.
+    func control(_ pane: Pane, _ update: (inout ChatTranscript) -> [JSON]) {
+        ensureRunning(pane)
+        pane.run(update)
+    }
+
+    /// Adds a permission rule where the user chose: the session's own layer, or a project settings file.
+    func addRule(_ edit: RuleEdit, scope: SettingsScope, in pane: Pane) {
+        if scope == .session {
+            guard !pane.sessionRules.contains(edit) else { return }
+            pane.sessionRules.append(edit)
+            save()
+            let rules = pane.sessionRules
+            control(pane) { [$0.setSessionRules(rules)] }
+            return
+        }
+        editSettings(scope, cwd: pane.cwd, then: pane) { try SettingsFile.addRule(edit, to: $0) }
+    }
+
+    func removeRule(_ rule: PermissionRule, in pane: Pane) {
+        let edit = RuleEdit(behavior: rule.behavior, rule: rule.rule)
+        guard let scope = rule.scope else { return }
+        if scope == .session {
+            pane.sessionRules.removeAll { $0 == edit }
+            save()
+            let rules = pane.sessionRules
+            control(pane) { [$0.setSessionRules(rules)] }
+            return
+        }
+        editSettings(scope, cwd: pane.cwd, then: pane) { try SettingsFile.removeRule(edit, from: $0) }
+    }
+
+    /// Writes a settings file off the main thread. The CLI watches its settings files and applies the change itself;
+    /// the session's rule list is re-read once its watcher has had a moment.
+    func editSettings(_ scope: SettingsScope, cwd: String, then pane: Pane?, done: (@MainActor () -> Void)? = nil,
+                      _ change: @escaping @Sendable (URL) throws -> Void) {
+        guard let url = SettingsFile.url(scope, cwd: cwd) else { return }
+        Task.detached {
+            let result = Result { try change(url) }
+            if case .success = result, scope == .projectLocal { SettingsFile.ensureIgnored(url, cwd: cwd) }
+            await MainActor.run {
+                if case .failure(let error) = result { self.errorMessage = error.localizedDescription }
+                done?()
+            }
+            guard let pane else { return }
+            try? await Task.sleep(for: .milliseconds(1500))
+            await MainActor.run { self.control(pane) { $0.refresh(.permissions) } }
+        }
+    }
+
+    /// Back from a browser sign-in: reconnect what needs it and re-read MCP status.
+    private func returnedToApp() {
+        for pane in panes where pane.isRunning && (!pane.chat.controls.signingIn.isEmpty || settingsSheet?.paneID == pane.id) {
+            pane.run { chat in
+                var out = chat.controls.takeReturnReconnects().map { chat.mcpReconnect($0) }
+                out += chat.refresh(.mcp)
+                return out
+            }
+        }
+    }
+
+    /// While a sign-in is pending, the CLI finishes it on its own; poll so the row turns connected.
+    private func pollSignIns() {
+        for pane in panes where pane.isRunning && !pane.chat.controls.signingIn.isEmpty {
+            pane.chat.controls.signingIn = pane.chat.controls.signingIn.filter { now.timeIntervalSince($0.value) < 120 }
+            guard !pane.chat.controls.signingIn.isEmpty, !pane.chat.controls.busy.contains("mcp") else { continue }
+            pane.run { $0.refresh(.mcp) }
         }
     }
 
@@ -292,6 +387,7 @@ final class AppModel {
         pane.stop()
         panes.removeAll { $0.id == pane.id }
         if selection == .pane(pane.id) { selection = panes.last.map { .pane($0.id) } }
+        if settingsSheet?.paneID == pane.id { settingsSheet = nil }
         notifier.clear(target: Target.pane(pane.id).key)
         save()
         guard removeWorktree, let info = pane.worktree else { return }
@@ -340,7 +436,7 @@ final class AppModel {
         }
         let target = Target.pane(pane.id)
         let focused = NSApp.isActive && selection == target
-        if focused { return }
+        if focused || !Self.notifies(state) { return }
         let body: String
         switch state {
         case .permission:
@@ -391,7 +487,7 @@ final class AppModel {
                 Task { @MainActor in self?.tick() }
             },
             Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-                Task { @MainActor in self?.pollExternal(); self?.drainRequests() }
+                Task { @MainActor in self?.pollExternal(); self?.drainRequests(); self?.pollSignIns() }
             },
             Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
                 Task { @MainActor in self?.reloadStatus() }
@@ -406,7 +502,7 @@ final class AppModel {
             guard let cache = pane.chat.cache else { continue }
             let remaining = cache.remaining(at: now)
             let key = "\(pane.id):\(cache.generation)"
-            if remaining > 0, remaining <= cacheWarning, !cacheAlerted.contains(key), pane.state != .working {
+            if remaining > 0, remaining <= cacheWarning, !cacheAlerted.contains(key), pane.state != .working, Prefs.bool(Prefs.notifyCache) {
                 cacheAlerted.insert(key)
                 // Only worth a ping if the cache was warm long enough to matter.
                 if cache.ttl > cacheWarning {
@@ -427,7 +523,8 @@ final class AppModel {
                 let previous = self.externalStates[session.id]
                 self.externalStates[session.id] = session.state
                 guard !bootstrap, previous != nil, previous != session.state, session.state.alerts,
-                      !(session.automatedTurn && session.state == .finished) else { continue }
+                      !(session.automatedTurn && session.state == .finished),
+                      Self.notifies(PaneState(session.state)) else { continue }
                 let target = Target.external(session.id)
                 if NSApp.isActive && self.selection == target { continue }
                 self.notifier.post(id: "\(session.id):\(session.state.rawValue):\(session.stateAt.timeIntervalSince1970)",
@@ -523,6 +620,11 @@ final class AppModel {
               let records = try? JSONDecoder().decode([PaneRecord].self, from: data) else { return }
         panes = records.map(Pane.init(record:))
         panes.forEach(wire)
+    }
+
+    /// Settings → General: which state changes post a notification.
+    static func notifies(_ state: PaneState) -> Bool {
+        state.needsYou ? Prefs.bool(Prefs.notifyNeedsYou) : Prefs.bool(Prefs.notifyFinished)
     }
 
     // MARK: Formatting

@@ -34,8 +34,22 @@ Launch Viber from /Applications and allow notifications when asked. Notification
   - `/clear` starts a fresh conversation in the same session
   - `/resume` opens the resume picker
   - `/cost` shows tokens and cost for the session
+  - `/mcp`, `/context` (or `/usage`), `/permissions`, `/hooks` and `/settings` (or bare `/config`, `/effort`, `/output-style`) open the session's settings on that tab. With arguments, `/mcp reconnect all`, `/effort high` and `/config key=value` still go to the CLI, which handles them itself.
 
   Everything else (skills, custom commands) is sent to the CLI as text. Viber's own skills work as `/cleanup` as well as `/viber:cleanup`.
+- **Session settings** (the sliders button in the session header, ⌥⌘, or the commands above) are the terminal panels for one conversation, drawn from the CLI's control requests:
+  - **MCP**: every server with its status, tools and errors. Sign in (opens the browser; the row turns connected when you finish), retry, reconnect, sign out, and turn a server off or on. Like `/mcp` in the terminal, on/off is saved for the project. The header shows "MCP 5/7", orange when a server needs sign-in or failed.
+  - **Context**: where the context window goes, by category, plus the session's cost. Compact now, with optional instructions.
+  - **Permissions**: the rules in effect and where each comes from. Add or remove a rule for *this session* (kept across relaunches, gone when the session closes), *this project, just me* (`.claude/settings.local.json`, which Viber keeps out of git) or *this project, shared* (`.claude/settings.json`). Claude Code picks file changes up right away.
+  - **Hooks**: every hook that runs, from settings files and plugins. Read-only; buttons open the settings files.
+  - **Model**: model, effort and permission mode for this session; output style, saved for the project.
+- **Settings** (⌘, or the gear at the bottom left of the sidebar) hold everything that is not about one conversation:
+  - **General**: which notifications to post, how early to warn about cache expiry, and the permission mode new sessions start in.
+  - **Permissions** and **Hooks** in `~/.claude/settings.json`, for every project.
+  - **MCP** servers for every project (`claude mcp add/remove --scope user`).
+  - **Model**: the model new sessions start with, and the default effort per model.
+
+  Changes to these files apply to sessions started afterwards.
 - **Messages between sessions**: start a message with `//` to send it to another open session instead of this one. A menu ranks the other sessions by what you typed (their title, project, branch and recent conversation), so `//the firmware endpoint is ready` goes to the session working on firmware. Start with a session's name (`//backend: …`) to pick it directly, or use ↑↓ to choose. The receiving session shows who it came from. If it is busy, the message waits until its current reply ends. When it finishes answering, its reply is posted back into the sender's chat (marked "Reply from …") so the sender's Claude can carry on; replies never ask for an answer, so sessions don't ping-pong.
 - **Messages panel** (top of the sidebar, ⇧⌘M): every message between sessions, newest first, with who sent it to whom, whether it is queued, waiting for a reply or answered, and the reply itself. Filter by status, search, and click a session name to jump to it. Unread messages show a badge.
 - **Worktrees**: start a session in a new git worktree at `<repo>/.claude/worktrees/<slug>` on branch `viber/<slug>`. Closing can remove the worktree (refused if it has uncommitted changes) and delete the branch (`git branch -d` only, so unmerged branches are kept).
@@ -56,6 +70,8 @@ Launch Viber from /Applications and allow notifications when asked. Notification
 | ⌘⇧O | Open folder in VS Code |
 | ⌘⇧W | Close session |
 | ⌘⇧R | Resume a past session |
+| ⌥⌘, | Session settings |
+| ⌘, | Settings for all sessions |
 
 ## The `viber` CLI and skills
 

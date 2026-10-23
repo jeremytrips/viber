@@ -138,6 +138,7 @@ struct NewSessionSheet: View {
         didLoad = true
         folder = model.selectedPane?.worktree?.repo ?? model.selectedPane?.spec.cwd ?? model.recentFolders.first ?? ""
         profile = AccountPicker.usableDefault(model)
+        permissionMode = Prefs.string(Prefs.newSessionMode)
     }
 
     private func checkRepo() async {

@@ -45,6 +45,9 @@ struct SidebarView: View {
         .listStyle(.sidebar)
         .safeAreaInset(edge: .bottom) {
             HStack {
+                SettingsLink { Image(systemName: "gearshape") }
+                    .buttonStyle(.borderless)
+                    .help("Settings for all sessions (⌘,)")
                 let waiting = model.waitingCount
                 Text(waiting == 0 ? "Nothing waiting for you" : "\(waiting) waiting for you · ⌘J")
                     .foregroundStyle(waiting == 0 ? .secondary : .primary)

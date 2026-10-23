@@ -73,14 +73,14 @@ public struct ShellResult {
 public enum Shell {
     /// Run a command to completion. Blocking: call it off the main thread.
     @discardableResult
-    public static func run(_ tool: String, _ arguments: [String], cwd: String? = nil) -> ShellResult {
+    public static func run(_ tool: String, _ arguments: [String], cwd: String? = nil, environment: [String: String]? = nil) -> ShellResult {
         guard let path = tool.hasPrefix("/") ? tool : Executables.find(tool) else {
             return ShellResult(status: 127, stdout: "", stderr: "\(tool) not found")
         }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
         process.arguments = arguments
-        process.environment = Executables.environment()
+        process.environment = environment ?? Executables.environment()
         if let cwd { process.currentDirectoryURL = URL(fileURLWithPath: cwd) }
         let out = Pipe(), err = Pipe()
         process.standardOutput = out

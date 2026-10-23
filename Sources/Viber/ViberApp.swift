@@ -48,11 +48,19 @@ struct ViberApp: App {
                 }.keyboardShortcut("o", modifiers: [.command, .shift])
                 Button("Close Session…") { if let pane = model.selectedPane { model.requestClose(pane) } }
                     .keyboardShortcut("w", modifiers: [.command, .shift])
+                Button("Session Settings…") { if let pane = model.selectedPane { model.openSettings(.model, in: pane) } }
+                    .keyboardShortcut(",", modifiers: [.command, .option])
+                    .disabled(model.selectedPane == nil)
                 Divider()
                 ForEach(1..<10) { n in
                     Button("Session \(n)") { model.select(index: n - 1) }.keyboardShortcut(KeyEquivalent(Character("\(n)")))
                 }
             }
+        }
+
+        // Settings that are not about one conversation (⌘, or the gear at the bottom of the sidebar).
+        Settings {
+            GlobalSettingsView().environment(model)
         }
     }
 }
@@ -85,6 +93,9 @@ struct ContentView: View {
         .sheet(isPresented: $model.showResume) { ResumeSheet() }
         .sheet(isPresented: $model.showSwitcher) { QuickSwitcher() }
         .sheet(item: $model.closing) { pane in CloseSheet(pane: pane) }
+        .sheet(item: $model.settingsSheet) { request in
+            if let pane = model.pane(request.paneID) { SessionSettingsSheet(pane: pane, tab: request.tab) }
+        }
         .alert("Viber", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
             Button("OK") { model.errorMessage = nil }
         } message: {

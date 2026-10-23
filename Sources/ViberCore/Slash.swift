@@ -10,6 +10,8 @@ public enum SlashAction: Equatable {
     case clear
     case resume
     case showCost
+    /// Terminal panels (`/mcp`, `/context`, …) open the session's settings sheet on a tab.
+    case openSettings(SettingsTab)
 }
 
 public enum SlashRouter {
@@ -19,7 +21,12 @@ public enum SlashRouter {
         SlashCommand(name: "model", description: "Switch model", argumentHint: "<model>"),
         SlashCommand(name: "clear", description: "Start a fresh conversation"),
         SlashCommand(name: "resume", description: "Resume a past session"),
-        SlashCommand(name: "cost", description: "Show tokens and cost for this session")
+        SlashCommand(name: "cost", description: "Show tokens and cost for this session"),
+        SlashCommand(name: "mcp", description: "MCP servers: status, sign in, enable or disable", argumentHint: "[reconnect|enable|disable <server>]"),
+        SlashCommand(name: "context", description: "Context window usage, and compact"),
+        SlashCommand(name: "permissions", description: "Permission rules for this session and project"),
+        SlashCommand(name: "hooks", description: "Hooks that run in this session"),
+        SlashCommand(name: "settings", description: "Session settings: model, effort, output style")
     ]
 
     public static func route(_ raw: String, commands: [SlashCommand]) -> SlashAction {
@@ -34,6 +41,14 @@ public enum SlashRouter {
         case "clear": return .clear
         case "resume": return .resume
         case "cost": return .showCost
+        case "context", "usage": return .openSettings(.context)
+        case "permissions", "allowed-tools": return .openSettings(.permissions)
+        case "hooks": return .openSettings(.hooks)
+        case "settings": return .openSettings(.model)
+        // With arguments these run headless in the CLI (`/mcp reconnect all`, `/effort high`, `/config key=value`).
+        case "mcp" where rest.isEmpty: return .openSettings(.mcp)
+        case "config", "effort", "output-style":
+            if rest.isEmpty { return .openSettings(.model) }
         default: break
         }
         if commands.contains(where: { $0.name == name }) { return .send(text) }

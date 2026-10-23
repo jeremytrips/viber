@@ -8,6 +8,8 @@ struct PaneRecord: Codable {
     var title: String
     var spec: LaunchSpec
     var worktree: WorktreeInfo?
+    /// Permission rules added for this session only, re-applied whenever its process starts.
+    var sessionRules: [RuleEdit]?
 }
 
 /// A `//` message, or the reply to one, waiting to be delivered to a session.
@@ -35,10 +37,13 @@ final class Pane: Identifiable {
     var inbox: [IncomingRelay] = []
     /// The `//` message this session is answering right now, and the chat item it arrived as.
     var answering: (recordID: String, itemID: String)?
+    var sessionRules: [RuleEdit] = []
     private(set) var started = false
     @ObservationIgnored private var process: ClaudeProcess?
     @ObservationIgnored var onStateChange: ((Pane, PaneState) -> Void)?
     @ObservationIgnored var onTurnFinished: ((Pane) -> Void)?
+    /// Opens a sign-in page for an MCP server.
+    @ObservationIgnored var onOpenURL: ((URL) -> Void)?
 
     init(id: String = UUID().uuidString, title: String, spec: LaunchSpec, worktree: WorktreeInfo? = nil) {
         self.id = id; self.title = title; self.spec = spec; self.worktree = worktree
@@ -46,9 +51,12 @@ final class Pane: Identifiable {
 
     convenience init(record: PaneRecord) {
         self.init(id: record.id, title: record.title, spec: record.spec, worktree: record.worktree)
+        sessionRules = record.sessionRules ?? []
     }
 
-    var record: PaneRecord { PaneRecord(id: id, title: title, spec: spec, worktree: worktree) }
+    var record: PaneRecord {
+        PaneRecord(id: id, title: title, spec: spec, worktree: worktree, sessionRules: sessionRules.isEmpty ? nil : sessionRules)
+    }
     var state: PaneState { chat.state }
     var profileLabel: String { spec.profile ?? "Default login" }
     var cwd: String { spec.cwd }
@@ -70,6 +78,7 @@ final class Pane: Identifiable {
             p.onExit = { [weak self] status, stderr in self?.exited(status: status, stderr: stderr) }
             process = p
             p.send(chat.request("initialize"))
+            if !sessionRules.isEmpty { p.send(chat.setSessionRules(sessionRules)) }
         } catch {
             chat.note(error.localizedDescription, isError: true)
             chat.state = .failed
@@ -80,6 +89,10 @@ final class Pane: Identifiable {
     private func handle(_ message: JSON) {
         let before = chat.state
         for reply in chat.apply(message) { process?.send(reply) }
+        if let url = chat.controls.authURL {
+            chat.controls.authURL = nil
+            onOpenURL?(url)
+        }
         if let session = chat.sessionID, spec.resume != session { spec.resume = session }
         lastActivity = Date()
         if message["type"]?.string == "result" { onTurnFinished?(self) }

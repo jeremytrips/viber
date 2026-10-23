@@ -16,9 +16,22 @@ final class SlashRouterTests: XCTestCase {
         XCTAssertEqual(SlashRouter.route("/unknown", commands: commands), .send("/unknown"))
     }
 
+    func testTerminalPanelsOpenTheSettingsSheet() {
+        XCTAssertEqual(SlashRouter.route("/mcp", commands: commands), .openSettings(.mcp))
+        XCTAssertEqual(SlashRouter.route("/mcp reconnect all", commands: commands), .send("/mcp reconnect all"))
+        XCTAssertEqual(SlashRouter.route("/context", commands: commands), .openSettings(.context))
+        XCTAssertEqual(SlashRouter.route("/usage", commands: commands), .openSettings(.context))
+        XCTAssertEqual(SlashRouter.route("/permissions", commands: commands), .openSettings(.permissions))
+        XCTAssertEqual(SlashRouter.route("/hooks", commands: commands), .openSettings(.hooks))
+        XCTAssertEqual(SlashRouter.route("/settings", commands: commands), .openSettings(.model))
+        XCTAssertEqual(SlashRouter.route("/effort", commands: commands), .openSettings(.model))
+        XCTAssertEqual(SlashRouter.route("/effort high", commands: commands), .send("/effort high"))
+        XCTAssertEqual(SlashRouter.route("/config theme=dark", commands: commands), .send("/config theme=dark"))
+    }
+
     func testSuggestionsShowShortNamesForViberSkills() {
         let names = SlashRouter.suggestions(for: "/c", commands: commands).map(\.name)
-        XCTAssertEqual(names.prefix(4), ["clear", "cost", "compact", "cleanup"])
+        XCTAssertEqual(names.prefix(5), ["clear", "cost", "context", "compact", "cleanup"])
         XCTAssertTrue(SlashRouter.suggestions(for: "/c x", commands: commands).isEmpty)
     }
 }

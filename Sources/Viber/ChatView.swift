@@ -33,6 +33,15 @@ struct PaneHeader: View {
                 Stat(label: "Context", value: "\(AppModel.compact(usage.contextTokens)) · \(AppModel.compact(usage.cacheRead)) cached")
             }
             if pane.chat.costUSD > 0 { Stat(label: "Cost", value: String(format: "$%.2f", pane.chat.costUSD)) }
+            if let mcp = pane.chat.controls.mcpSummary {
+                Button { model.openSettings(.mcp, in: pane) } label: {
+                    Stat(label: "MCP", value: "\(mcp.connected)/\(mcp.total)", warn: mcp.attention)
+                }
+                .buttonStyle(.plain)
+                .help(mcp.attention ? "Some MCP servers need sign-in or failed. Click to see them." : "MCP servers connected")
+            }
+            Button { model.openSettings(.model, in: pane) } label: { Image(systemName: "slider.horizontal.3") }
+                .help("Session settings: MCP, context, permissions, hooks, model (⌥⌘,)")
             Button("Open in VS Code") { model.openInVSCode(pane.cwd) }
         }
         .padding(.horizontal, 18).padding(.vertical, 10)
