@@ -157,6 +157,7 @@ struct NewSessionSheet: View {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
+        panel.canCreateDirectories = true
         panel.allowsMultipleSelection = false
         panel.prompt = "Choose"
         if !folder.isEmpty { panel.directoryURL = URL(fileURLWithPath: folder) }
