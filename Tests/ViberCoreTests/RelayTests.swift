@@ -58,11 +58,16 @@ final class RelayChatTests: XCTestCase {
         XCTAssertEqual(Relay.parseEnvelope(content)?.text, "Expose GET /firmware/latest")
     }
 
-    func testSentItemCanBeMarkedDelivered() {
+    func testSentItemShowsHowFarItGot() {
         var chat = ChatTranscript()
         let id = chat.recordSent(to: "Backend", text: "hi", queued: true)
-        chat.markDelivered(itemID: id)
-        XCTAssertEqual(chat.items.last?.kind, .sent(to: "Backend", text: "hi", queued: false))
+        XCTAssertEqual(chat.items.last?.kind, .sent(to: "Backend", text: "hi", status: .queued))
+        chat.setSentStatus(itemID: id, .delivered)
+        XCTAssertEqual(chat.items.last?.kind, .sent(to: "Backend", text: "hi", status: .delivered))
+        chat.setSentStatus(itemID: id, .replied)
+        XCTAssertEqual(chat.items.last?.kind, .sent(to: "Backend", text: "hi", status: .replied))
+        chat.recordSent(to: "UX", text: "yo", queued: false)
+        XCTAssertEqual(chat.items.last?.kind, .sent(to: "UX", text: "yo", status: .delivered))
     }
 
     func testHistoryRestoresReceivedMessages() {
@@ -72,32 +77,6 @@ final class RelayChatTests: XCTestCase {
                          "message": ["role": "user", "content": .string(envelope)]]
         chat.loadHistory(Data(row.line().utf8))
         XCTAssertEqual(chat.items.map(\.kind), [.received(from: "UX", text: "use the new tokens")])
-    }
-}
-
-final class RelayLogTests: XCTestCase {
-    func testLifecycleAndUnread() {
-        var log = RelayLog()
-        let t0 = Date(timeIntervalSince1970: 1000)
-        let id = log.add(source: ("a", "OTA"), target: ("b", "Backend"), text: "which endpoint?", queued: true, at: t0)
-        XCTAssertEqual(log.record(id)?.status, .queued)
-        XCTAssertEqual(log.unreadCount, 1)
-        log.lastSeen = t0
-        XCTAssertEqual(log.unreadCount, 0)
-        log.markDelivered(id, at: t0.addingTimeInterval(5))
-        XCTAssertEqual(log.record(id)?.status, .delivered)
-        log.recordReply(id, text: "  GET /firmware/latest ", at: t0.addingTimeInterval(20))
-        XCTAssertEqual(log.record(id)?.status, .replied)
-        XCTAssertEqual(log.record(id)?.reply, "GET /firmware/latest")
-        XCTAssertEqual(log.unreadCount, 1, "a reply counts as new")
-        XCTAssertEqual(log.records(for: "b").count, 1)
-    }
-
-    func testEmptyReplyIsNoReply() {
-        var log = RelayLog()
-        let id = log.add(source: ("a", "A"), target: ("b", "B"), text: "x", queued: false)
-        log.recordReply(id, text: "   ")
-        XCTAssertEqual(log.record(id)?.status, .noReply)
     }
 
     func testReplyEnvelopeAndAssistantText() {

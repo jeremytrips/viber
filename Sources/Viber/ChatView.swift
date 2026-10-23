@@ -271,12 +271,12 @@ struct ChatItemView: View {
                     .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.accentColor.opacity(0.3)))
             }
             .padding(.trailing, 60)
-        case .sent(let to, let text, let queued):
+        case .sent(let to, let text, let status):
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Image(systemName: "arrow.up.right").foregroundStyle(Color.accentColor)
-                Text(queued ? "Queued for \(to)" : "Sent to \(to)").fontWeight(.medium)
+                Text(status == .queued ? "Queued for \(to)" : "Sent to \(to)").fontWeight(.medium)
                 Text(text).foregroundStyle(.secondary).lineLimit(2)
-                if queued { Text("· delivered when its reply ends").foregroundStyle(.tertiary) }
+                Text("· \(status.label)").foregroundStyle(.tertiary)
             }
             .font(.callout)
             .textSelection(.enabled)
@@ -317,6 +317,16 @@ struct FoldedText: View {
                     .overlay(alignment: .leading) { Rectangle().fill(Color(nsColor: .separatorColor)).frame(width: 2) }
             }
         }
+    }
+}
+
+struct ExpandButton: View {
+    @Binding var expanded: Bool
+
+    var body: some View {
+        Button(expanded ? "Show less" : "Show more") { expanded.toggle() }
+            .buttonStyle(.borderless)
+            .font(.caption)
     }
 }
 

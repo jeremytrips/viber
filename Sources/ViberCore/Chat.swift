@@ -104,8 +104,8 @@ public struct ChatItem: Identifiable, Equatable, Sendable {
         case received(from: String, text: String)
         /// The answer to a `//` message this session sent, posted back automatically.
         case reply(from: String, text: String)
-        /// A `//` message this session sent elsewhere; `queued` until the target's turn ends.
-        case sent(to: String, text: String, queued: Bool)
+        /// A `//` message this session sent elsewhere, with how far it got.
+        case sent(to: String, text: String, status: RelayStatus)
     }
     public let id: String
     public var kind: Kind
@@ -580,17 +580,17 @@ public struct ChatTranscript {
         }.joined(separator: "\n\n")
     }
 
-    /// Records a `//` message sent from here. Returns the item id so delivery can be marked later.
+    /// Records a `//` message sent from here. Returns the item id so its status can be updated later.
     @discardableResult
     public mutating func recordSent(to target: String, text: String, queued: Bool) -> String {
-        append(.sent(to: target, text: text, queued: queued))
+        append(.sent(to: target, text: text, status: queued ? .queued : .delivered))
         return items[items.count - 1].id
     }
 
-    public mutating func markDelivered(itemID: String) {
+    public mutating func setSentStatus(itemID: String, _ status: RelayStatus) {
         guard let index = items.firstIndex(where: { $0.id == itemID }),
-              case .sent(let to, let text, true) = items[index].kind else { return }
-        items[index].kind = .sent(to: to, text: text, queued: false)
+              case .sent(let to, let text, _) = items[index].kind else { return }
+        items[index].kind = .sent(to: to, text: text, status: status)
     }
 
     public mutating func clear() {

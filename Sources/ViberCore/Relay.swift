@@ -28,6 +28,20 @@ public struct RelaySuggestion: Equatable {
     public var message: String
 }
 
+/// Where a `//` message stands, shown on its line in the sender's chat.
+public enum RelayStatus: Equatable, Sendable {
+    case queued, delivered, replied, noReply
+
+    public var label: String {
+        switch self {
+        case .queued: return "delivered when its reply ends"
+        case .delivered: return "waiting for reply"
+        case .replied: return "replied"
+        case .noReply: return "no reply"
+        }
+    }
+}
+
 /// `//message` routing: rank the other sessions by how well they match what you typed.
 public enum Relay {
     public static func isRelay(_ text: String) -> Bool { text.hasPrefix("//") }

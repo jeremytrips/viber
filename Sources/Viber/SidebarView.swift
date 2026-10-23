@@ -21,7 +21,6 @@ struct SidebarView: View {
         let selection = Binding<Target?>(get: { model.selection }, set: { model.select($0) })
         List(selection: selection) {
             Section {
-                MessagesRow().tag(Target.messages)
                 IdeasRow().tag(Target.ideas)
             }
             ForEach(groups, id: \.path) { group in
@@ -67,31 +66,6 @@ struct SidebarView: View {
             ToolbarItem {
                 Button { model.showNewSession = true } label: { Label("New Session", systemImage: "plus") }
                     .help("New session (⌘N)")
-            }
-        }
-    }
-}
-
-/// Entry point to the Messages panel, with unread and in-flight counts.
-struct MessagesRow: View {
-    @Environment(AppModel.self) private var model
-
-    var body: some View {
-        let unread = model.selection == .messages ? 0 : model.relayLog.unreadCount
-        let waiting = model.relayLog.records.filter { $0.status == .queued || $0.status == .delivered }.count
-        HStack(spacing: 6) {
-            Label("Messages", systemImage: "bubble.left.and.bubble.right")
-            Spacer(minLength: 4)
-            if waiting > 0 {
-                Text("\(waiting) waiting").font(.caption).foregroundStyle(.secondary)
-            }
-            if unread > 0 {
-                Text("\(unread)")
-                    .font(.caption2.weight(.semibold).monospacedDigit())
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 6).padding(.vertical, 1)
-                    .background(Capsule().fill(Color.accentColor))
-                    .accessibilityLabel("\(unread) unread")
             }
         }
     }

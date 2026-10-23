@@ -22,9 +22,9 @@ struct PreviewRecord: Codable {
 
 /// A `//` message, or the reply to one, waiting to be delivered to a session.
 struct IncomingRelay {
-    var recordID: String
     var sourcePaneID: String
     var sourceTitle: String
+    /// The "Sent to" line in the sender's chat, which shows how far the message got.
     var sentItemID: String?
     var text: String
     var isReply = false
@@ -44,7 +44,7 @@ final class Pane: Identifiable {
     /// `//` messages waiting for this session's current turn to end.
     var inbox: [IncomingRelay] = []
     /// The `//` message this session is answering right now, and the chat item it arrived as.
-    var answering: (recordID: String, itemID: String)?
+    var answering: (relay: IncomingRelay, itemID: String)?
     var sessionRules: [RuleEdit] = []
     /// Whether the browser preview shows beside the chat.
     var showPreview = false { didSet { if showPreview != oldValue { onPersist?() } } }
@@ -187,7 +187,7 @@ final class Pane: Identifiable {
             process?.send(chat.receiveReply(from: relay.sourceTitle, text: relay.text))
         } else {
             process?.send(chat.receiveRelay(from: relay.sourceTitle, text: relay.text))
-            if let item = chat.lastItemID { answering = (relay.recordID, item) }
+            if let item = chat.lastItemID { answering = (relay, item) }
         }
         lastActivity = Date()
         notifyIfChanged(from: before)
