@@ -6,7 +6,7 @@ public struct RelayRecord: Codable, Identifiable, Equatable {
         case queued, delivered, replied, noReply
         public var label: String {
             switch self {
-            case .queued: return "Queued"
+            case .queued: return "Not read yet"
             case .delivered: return "Waiting for reply"
             case .replied: return "Replied"
             case .noReply: return "No reply"

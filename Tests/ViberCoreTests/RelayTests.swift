@@ -65,6 +65,120 @@ final class RelayChatTests: XCTestCase {
         XCTAssertEqual(chat.items.last?.kind, .sent(to: "Backend", text: "hi", queued: false))
     }
 
+    private func text(_ id: String, _ text: String) -> JSON {
+        ["type": "assistant", "message": ["id": .string(id), "role": "assistant", "content": [["type": "text", "text": .string(text)]]]]
+    }
+
+    private func tool(_ id: String) -> JSON {
+        ["type": "assistant", "message": ["id": .string("m-\(id)"), "role": "assistant",
+                                          "content": [["type": "tool_use", "id": .string(id), "name": "Bash", "input": ["command": "make"]]]]]
+    }
+
+    private func toolResult(_ id: String) -> JSON {
+        ["type": "user", "message": ["role": "user", "content": [["type": "tool_result", "tool_use_id": .string(id), "content": "ok"]]]]
+    }
+
+    /// What the CLI prints when it hands a queued message to Claude.
+    private func echo(of message: JSON) -> JSON {
+        ["type": "user", "isReplay": true, "uuid": message["uuid"]!, "message": message["message"]!]
+    }
+
+    private let result: JSON = ["type": "result", "subtype": "success", "is_error": false]
+
+    /// A busy Claude reads the message after its running tool call; the first thing it says then is the answer.
+    func testMidTurnRelayIsAnsweredByFirstTextAfterReading() {
+        var chat = ChatTranscript()
+        _ = chat.userMessage("refactor the API")
+        chat.apply(tool("t1"))
+        let message = chat.receiveRelay(from: "OTA", text: "which endpoint?")
+        let item = chat.lastItemID!
+        chat.apply(text("m1", "Now the tests."))
+        XCTAssertEqual(chat.takeRelayUpdates(), [], "not read yet: that text was not about the message")
+
+        chat.apply(toolResult("t1"))
+        chat.apply(echo(of: message))
+        XCTAssertEqual(chat.takeRelayUpdates(), [.read(itemID: item)])
+        chat.apply(text("m2", "It's GET /firmware/latest."))
+        XCTAssertEqual(chat.takeRelayUpdates(), [.answered(itemID: item, text: "It's GET /firmware/latest.")])
+
+        chat.apply(text("m3", "Refactor done."))
+        chat.apply(result)
+        XCTAssertEqual(chat.takeRelayUpdates(), [], "answered once")
+    }
+
+    /// A message that starts a turn is answered by everything Claude says in it.
+    func testRelayToIdleSessionIsAnsweredAtTurnEnd() {
+        var chat = ChatTranscript()
+        let message = chat.receiveRelay(from: "OTA", text: "which endpoint?")
+        let item = chat.lastItemID!
+        chat.apply(echo(of: message))
+        chat.apply(text("m1", "Let me check."))
+        chat.apply(tool("t1"))
+        chat.apply(toolResult("t1"))
+        chat.apply(text("m2", "GET /firmware/latest."))
+        XCTAssertEqual(chat.takeRelayUpdates(), [.read(itemID: item)])
+        chat.apply(result)
+        XCTAssertEqual(chat.takeRelayUpdates(), [.answered(itemID: item, text: "Let me check.\n\nGET /firmware/latest.")])
+    }
+
+    /// Sent while Claude wrote its last words: the CLI runs it as a turn of its own, which shows as working.
+    func testRelayUnreadAtTurnEndGetsATurnOfItsOwn() {
+        var chat = ChatTranscript()
+        _ = chat.userMessage("summarize")
+        chat.apply(tool("t1"))
+        let message = chat.receiveRelay(from: "OTA", text: "which endpoint?")
+        let item = chat.lastItemID!
+        chat.apply(toolResult("t1"))
+        chat.apply(text("m1", "Here is the summary."))
+        chat.apply(result)
+        XCTAssertEqual(chat.takeRelayUpdates(), [])
+        XCTAssertEqual(chat.state, .finished)
+
+        chat.apply(["type": "system", "subtype": "status", "status": "requesting"])
+        XCTAssertEqual(chat.state, .working)
+        chat.apply(echo(of: message))
+        chat.apply(text("m2", "Let me check."))
+        chat.apply(text("m3", "GET /firmware/latest."))
+        XCTAssertEqual(chat.takeRelayUpdates(), [.read(itemID: item)], "a turn of its own is answered at its end")
+        chat.apply(result)
+        XCTAssertEqual(chat.takeRelayUpdates(), [.answered(itemID: item, text: "Let me check.\n\nGET /firmware/latest.")])
+    }
+
+    func testRelayKeepsAPendingPermissionCard() {
+        var chat = ChatTranscript()
+        chat.state = .permission
+        _ = chat.receiveRelay(from: "OTA", text: "which endpoint?")
+        _ = chat.receiveReply(from: "OTA", text: "thanks")
+        XCTAssertEqual(chat.state, .permission)
+    }
+
+    func testEchoMatchesOnTheIDTheMessageWentOutWith() {
+        var chat = ChatTranscript()
+        let message = chat.receiveRelay(from: "OTA", text: "which endpoint?")
+        let item = chat.lastItemID!
+        let uuid = message["uuid"]?.string
+        XCTAssertNotNil(uuid)
+        chat.apply(["type": "user", "isReplay": true, "uuid": .string(uuid!), "message": ["role": "user", "content": "rewritten"]])
+        XCTAssertEqual(chat.takeRelayUpdates(), [.read(itemID: item)])
+        XCTAssertTrue(chat.canRewind(itemID: item))
+    }
+
+    func testExitAnswersOpenRelays() {
+        var chat = ChatTranscript()
+        let message = chat.receiveRelay(from: "OTA", text: "first")
+        let read = chat.lastItemID!
+        _ = chat.receiveRelay(from: "UX", text: "second")
+        let unread = chat.lastItemID!
+        chat.apply(echo(of: message))
+        chat.apply(text("m1", "Working on it."))
+        _ = chat.takeRelayUpdates()
+        chat.processExited(status: 0)
+        let updates = chat.takeRelayUpdates()
+        XCTAssertEqual(updates.count, 2)
+        XCTAssertTrue(updates.contains(.answered(itemID: read, text: "Working on it.")))
+        XCTAssertTrue(updates.contains(.answered(itemID: unread, text: "Working on it.")), "never echoed: all it said after arriving")
+    }
+
     func testHistoryRestoresReceivedMessages() {
         var chat = ChatTranscript()
         let envelope = Relay.envelope(from: "UX", text: "use the new tokens")

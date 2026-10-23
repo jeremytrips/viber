@@ -274,9 +274,9 @@ struct ChatItemView: View {
         case .sent(let to, let text, let queued):
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Image(systemName: "arrow.up.right").foregroundStyle(Color.accentColor)
-                Text(queued ? "Queued for \(to)" : "Sent to \(to)").fontWeight(.medium)
+                Text("Sent to \(to)").fontWeight(.medium)
                 Text(text).foregroundStyle(.secondary).lineLimit(2)
-                if queued { Text("· delivered when its reply ends").foregroundStyle(.tertiary) }
+                if queued { Text("· not read yet").foregroundStyle(.tertiary) }
             }
             .font(.callout)
             .textSelection(.enabled)

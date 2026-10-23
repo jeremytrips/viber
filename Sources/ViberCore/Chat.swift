@@ -104,7 +104,7 @@ public struct ChatItem: Identifiable, Equatable, Sendable {
         case received(from: String, text: String)
         /// The answer to a `//` message this session sent, posted back automatically.
         case reply(from: String, text: String)
-        /// A `//` message this session sent elsewhere; `queued` until the target's turn ends.
+        /// A `//` message this session sent elsewhere; `queued` until Claude there has read it.
         case sent(to: String, text: String, queued: Bool)
     }
     public let id: String
@@ -161,6 +161,12 @@ public struct RewindPreview: Equatable, Sendable {
     public var deletions: Int
 }
 
+/// What happened to a `//` message this session received: Claude read it, or answered it.
+public enum RelayUpdate: Equatable, Sendable {
+    case read(itemID: String)
+    case answered(itemID: String, text: String)
+}
+
 /// Folds the CLI's stream-json output (and transcript rows when restoring history) into a chat.
 /// The protocol is the one the Agent SDK speaks; unknown messages are ignored.
 public struct ChatTranscript {
@@ -206,12 +212,16 @@ public struct ChatTranscript {
     private var blockCounts: [String: Int] = [:]
     private var seenRows: Set<String> = []
     private var nextID = 0
-    /// Messages sent but not yet echoed back with their ID: the chat item and the text that went out.
-    private var awaitingEcho: [(itemID: String, text: String)] = []
+    /// Messages sent but not yet echoed back with their ID: the chat item, the text that went out, and the ID it went out with.
+    private var awaitingEcho: [(itemID: String, text: String, uuid: String?)] = []
     /// The CLI's ID for each user message item, which rewinding needs.
     private var userMessageIDs: [String: String] = [:]
     /// Rewind requests in flight, by request ID, and the item they rewind to.
     private var rewinds: [String: String] = [:]
+    /// `//` messages Claude has yet to answer, by chat item: where its answer starts once the CLI handed it over,
+    /// and whether it arrived while Claude was busy, so Claude reads it inside the turn already running.
+    private var unanswered: [String: (readAt: Int?, inline: Bool)] = [:]
+    private var relayUpdates: [RelayUpdate] = []
 
     public init() {}
 
@@ -233,7 +243,7 @@ public struct ChatTranscript {
     public mutating func userMessage(_ text: String, images: [ImageAttachment] = []) -> JSON {
         if !images.isEmpty { append(.attachments(images.map(\.label))) }
         if !text.isEmpty || images.isEmpty { append(.user(text)) }
-        awaitingEcho.append((items[items.count - 1].id, text))
+        awaitingEcho.append((items[items.count - 1].id, text, nil))
         state = .working
         turnStartedByUser = true
         let content: JSON = images.isEmpty ? .string(text)
@@ -549,35 +559,75 @@ public struct ChatTranscript {
         return message
     }
 
-    /// Delivers a `//` message from another session as a user turn, keeping who sent it.
+    /// Delivers a `//` message from another session, keeping who sent it. Like a message typed while Claude works,
+    /// the CLI hands it over after the running tool call; its echo says when, and `takeRelayUpdates` reports it.
     public mutating func receiveRelay(from source: String, text: String) -> JSON {
+        let inline = state == .working || state.needsYou
         append(.received(from: source, text: text))
-        state = .working
+        if !state.needsYou { state = .working }
         turnStartedByUser = true
         let wire = Relay.envelope(from: source, text: text)
-        awaitingEcho.append((items[items.count - 1].id, wire))
-        return ["type": "user", "message": ["role": "user", "content": .string(wire)]]
+        let uuid = UUID().uuidString.lowercased()
+        awaitingEcho.append((items[items.count - 1].id, wire, uuid))
+        unanswered[items[items.count - 1].id] = (nil, inline)
+        return ["type": "user", "uuid": .string(uuid), "message": ["role": "user", "content": .string(wire)]]
     }
 
     /// Posts the answer to an earlier `//` message back into the sender's conversation.
     public mutating func receiveReply(from source: String, text: String) -> JSON {
         append(.reply(from: source, text: text))
-        state = .working
+        if !state.needsYou { state = .working }
         turnStartedByUser = true
         let wire = Relay.replyEnvelope(from: source, text: text)
-        awaitingEcho.append((items[items.count - 1].id, wire))
+        awaitingEcho.append((items[items.count - 1].id, wire, nil))
         return ["type": "user", "message": ["role": "user", "content": .string(wire)]]
     }
 
     public var lastItemID: String? { items.last?.id }
 
-    /// Everything Claude said after an item, used as the reply to a `//` message.
+    /// Everything Claude said after an item.
     public func assistantText(after itemID: String) -> String {
         guard let index = items.firstIndex(where: { $0.id == itemID }) else { return "" }
-        return items[(index + 1)...].compactMap { item -> String? in
+        return assistantText(from: index + 1)
+    }
+
+    /// Everything Claude said from a position in the chat on.
+    public func assistantText(from index: Int) -> String {
+        items[min(index, items.count)...].compactMap { item -> String? in
             if case .assistant(let text) = item.kind { return text }
             return nil
         }.joined(separator: "\n\n")
+    }
+
+    /// What happened to received `//` messages since the last call.
+    public mutating func takeRelayUpdates() -> [RelayUpdate] {
+        defer { relayUpdates = [] }
+        return relayUpdates
+    }
+
+    /// Answers the `//` messages whose answer is complete. A message that started a turn is answered by all
+    /// Claude said in it; one read inside a running turn, by the first thing Claude said after reading it.
+    private mutating func answerRelays(turnEnded: Bool = false, processEnded: Bool = false) {
+        let ended = turnEnded || processEnded
+        for (itemID, wait) in unanswered {
+            let text: String
+            if let readAt = wait.readAt {
+                text = assistantText(from: readAt)
+                guard ended || (wait.inline && !text.isEmpty) else { continue }
+            } else if processEnded || (turnEnded && !wait.inline) {
+                // The CLI never echoed it: all Claude said after it arrived.
+                text = assistantText(after: itemID)
+            } else {
+                // The turn ended before Claude got to it, so the CLI runs it next as a turn of its own.
+                if turnEnded {
+                    unanswered[itemID]?.inline = false
+                    turnExpected = true
+                }
+                continue
+            }
+            unanswered[itemID] = nil
+            relayUpdates.append(.answered(itemID: itemID, text: text))
+        }
     }
 
     /// Records a `//` message sent from here. Returns the item id so delivery can be marked later.
@@ -611,6 +661,7 @@ public struct ChatTranscript {
             default: break
             }
         }
+        answerRelays(processEnded: true)
         turnExpected = false
         if state != .failed { state = .exited }
         if status != 0 { append(.notice("Claude exited with status \(status).", isError: true)) }
@@ -738,6 +789,7 @@ public struct ChatTranscript {
                 isThinking = false
                 if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     append(.assistant(text), id: "a:\(messageID):\(n)")
+                    answerRelays()
                 }
             case "tool_use":
                 let id = block["id"]?.string ?? "\(messageID):\(n)"
@@ -882,9 +934,16 @@ public struct ChatTranscript {
     }
     /// Pairs an echoed message with the item it was sent as. Messages the CLI never echoes are skipped, not mismatched.
     private mutating func matchEcho(uuid: String, text: String) {
-        guard let index = awaitingEcho.firstIndex(where: { $0.text == text }) else { return }
-        userMessageIDs[awaitingEcho[index].itemID] = uuid
+        guard let index = awaitingEcho.firstIndex(where: { $0.uuid == uuid }) ?? awaitingEcho.firstIndex(where: { $0.text == text })
+        else { return }
+        let itemID = awaitingEcho[index].itemID
+        userMessageIDs[itemID] = uuid
         awaitingEcho.removeFirst(index + 1)
+        // The echo comes when the CLI hands the message to Claude: what Claude says from here on answers it.
+        if unanswered[itemID]?.readAt == nil, unanswered[itemID] != nil {
+            unanswered[itemID]?.readAt = items.count
+            relayUpdates.append(.read(itemID: itemID))
+        }
     }
 
     static func userText(_ content: JSON?) -> String {
@@ -967,6 +1026,7 @@ public struct ChatTranscript {
             let detail = message["result"]?.string ?? (message["errors"]?.array?.compactMap(\.string).joined(separator: "\n"))
             append(.notice(detail.flatMap { $0.isEmpty ? nil : $0 } ?? "The turn ended with \(subtype).", isError: true))
         }
+        answerRelays(turnEnded: true)
         guard pendingPromptCount == 0 else { return }
         state = isError ? .failed : .finished
     }

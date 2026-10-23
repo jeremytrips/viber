@@ -206,6 +206,7 @@ final class AppModel {
     private func wire(_ pane: Pane) {
         pane.onStateChange = { [weak self] pane, previous in self?.stateChanged(pane, from: previous) }
         pane.onTurnFinished = { [weak self] pane in self?.turnFinished(pane) }
+        pane.onRelayUpdate = { [weak self] pane, update in self?.relayUpdate(update, in: pane) }
         pane.onOpenURL = { NSWorkspace.shared.open($0) }
         pane.onPersist = { [weak self] in self?.save() }
     }
@@ -373,37 +374,45 @@ final class AppModel {
             }
     }
 
-    /// Sends `text` from one session to another, now if the target is free, else when its turn ends.
+    /// Sends `text` from one session to another right away. A busy target reads it after its running tool call.
     func relay(_ text: String, from source: Pane, to targetID: String) {
         let message = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !message.isEmpty, let target = pane(targetID) else { return }
-        let queued = !target.canReceiveNow || !target.inbox.isEmpty
-        let sentID = source.chat.recordSent(to: target.title, text: message, queued: queued)
-        let recordID = relayLog.add(source: (source.id, source.title), target: (target.id, target.title), text: message, queued: queued)
-        let incoming = IncomingRelay(recordID: recordID, sourcePaneID: source.id, sourceTitle: source.title, sentItemID: sentID, text: message)
-        if queued { target.inbox.append(incoming) } else { deliver(incoming, to: target) }
+        let sentID = source.chat.recordSent(to: target.title, text: message, queued: true)
+        let recordID = relayLog.add(source: (source.id, source.title), target: (target.id, target.title), text: message, queued: true)
+        target.deliver(IncomingRelay(recordID: recordID, sourcePaneID: source.id, sourceTitle: source.title, sentItemID: sentID, text: message),
+                       binDir: binDir, pluginDir: pluginDir)
         saveRelays()
     }
 
-    private func deliver(_ relay: IncomingRelay, to target: Pane) {
-        target.deliver(relay, binDir: binDir, pluginDir: pluginDir)
+    /// The target's Claude read a `//` message, or answered it.
+    private func relayUpdate(_ update: RelayUpdate, in target: Pane) {
+        switch update {
+        case .read(let item):
+            guard let relay = target.answering[item] else { return }
+            markRead(relay)
+        case .answered(let item, let text):
+            guard let relay = target.answering.removeValue(forKey: item) else { return }
+            markRead(relay)
+            returnReply(relay, from: target, text: text)
+        }
+        saveRelays()
+    }
+
+    private func markRead(_ relay: IncomingRelay) {
         if let sent = relay.sentItemID { pane(relay.sourcePaneID)?.chat.markDelivered(itemID: sent) }
-        if !relay.isReply { relayLog.markDelivered(relay.recordID); saveRelays() }
+        relayLog.markDelivered(relay.recordID)
     }
 
-    /// When a session finishes answering a `//` message, post what it said back to the sender.
-    private func returnReply(from target: Pane) {
-        guard let answering = target.answering else { return }
-        target.answering = nil
-        let text = target.chat.assistantText(after: answering.itemID).trimmingCharacters(in: .whitespacesAndNewlines)
-        relayLog.recordReply(answering.recordID, text: text)
-        saveRelays()
-        guard !text.isEmpty, let record = relayLog.record(answering.recordID), let source = pane(record.sourceID) else { return }
-        let reply = IncomingRelay(recordID: record.id, sourcePaneID: target.id, sourceTitle: target.title, sentItemID: nil,
-                                  text: text, isReply: true)
-        if source.canReceiveNow && source.inbox.isEmpty { deliver(reply, to: source) } else { source.inbox.append(reply) }
+    /// Posts what a session said in answer to a `//` message back to the sender, right away.
+    private func returnReply(_ relay: IncomingRelay, from target: Pane, text: String) {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        relayLog.recordReply(relay.recordID, text: text)
+        guard !text.isEmpty, let source = pane(relay.sourcePaneID) else { return }
+        source.deliver(IncomingRelay(recordID: relay.recordID, sourcePaneID: target.id, sourceTitle: target.title, sentItemID: nil,
+                                     text: text, isReply: true), binDir: binDir, pluginDir: pluginDir)
         if !(NSApp.isActive && selection == .pane(source.id)) {
-            notifier.post(id: "reply:\(record.id)", title: "\(source.title) · reply from \(target.title)",
+            notifier.post(id: "reply:\(relay.recordID)", title: "\(source.title) · reply from \(target.title)",
                           body: String(text.prefix(180)), target: Target.pane(source.id).key, sound: false)
         }
     }
@@ -411,12 +420,6 @@ final class AppModel {
     func markMessagesSeen() {
         relayLog.lastSeen = Date()
         saveRelays()
-    }
-
-    /// One queued message per turn, so each gets its own reply.
-    private func flushInbox(_ pane: Pane) {
-        guard pane.canReceiveNow, !pane.inbox.isEmpty else { return }
-        deliver(pane.inbox.removeFirst(), to: pane)
     }
 
     // MARK: Ideas
@@ -526,12 +529,6 @@ final class AppModel {
     private func stateChanged(_ pane: Pane, from previous: PaneState) {
         updateBadge()
         let state = pane.state
-        // A session that just finished starting (or stopped) can take queued `//` messages.
-        // A session that stopped mid-answer still owes the sender a status.
-        if state == .exited, pane.answering != nil { returnReply(from: pane) }
-        if [.idle, .exited].contains(state), !pane.inbox.isEmpty {
-            DispatchQueue.main.async { [weak self] in self?.flushInbox(pane) }
-        }
         let target = Target.pane(pane.id)
         let focused = NSApp.isActive && selection == target
         if focused || !Self.notifies(state) { return }
@@ -559,7 +556,6 @@ final class AppModel {
     }
 
     private func turnFinished(_ pane: Pane) {
-        returnReply(from: pane)
         if let request = pane.pendingClose {
             pane.pendingClose = nil
             close(pane, removeWorktree: request.removeWorktree, deleteBranch: request.deleteBranch)
@@ -567,7 +563,6 @@ final class AppModel {
         }
         refreshDiff(pane)
         save()
-        flushInbox(pane)
     }
 
     func refreshDiff(_ pane: Pane) {

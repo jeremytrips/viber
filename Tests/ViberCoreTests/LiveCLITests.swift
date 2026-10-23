@@ -97,6 +97,48 @@ final class LiveCLITests: XCTestCase {
         XCTAssertTrue(reply.uppercased().contains("PINEAPPLE"), "reply was: \(reply)")
     }
 
+    /// A `//` message sent while Claude works is handed over after the running tool call, and its first answer
+    /// comes back before the turn ends, as with a message typed into a busy Claude Code session.
+    func testRelayMidTurnIsReadAtNextStep() throws {
+        let env = ProcessInfo.processInfo.environment
+        try XCTSkipUnless(env["VIBER_LIVE_TEST"] == "1", "set VIBER_LIVE_TEST=1 to run")
+        var chat = ChatTranscript()
+        let spec = LaunchSpec(profile: env["VIBER_LIVE_PROFILE"], cwd: FileManager.default.temporaryDirectory.path, model: "haiku")
+        let process = try ClaudeProcess(spec: spec, paneID: "live-relay-mid-turn", binDir: nil)
+        let finished = expectation(description: "turn finished")
+        var received: String?
+        var updates: [RelayUpdate] = []
+        var updatesAtResult: [RelayUpdate]?
+        process.onMessage = { message in
+            for reply in chat.apply(message) { process.send(reply) }
+            if let card = chat.items.last(where: { if case .permission(let p) = $0.kind { return p.decision == nil }; return false }),
+               let reply = chat.decidePermission(itemID: card.id, allow: true) {
+                process.send(reply)
+            }
+            if received == nil, chat.items.contains(where: { if case .tool = $0.kind { return true }; return false }) {
+                process.send(chat.receiveRelay(from: "OTA firmware updates", text: "Reply with the word PINEAPPLE, then carry on."))
+                received = chat.lastItemID
+            }
+            updates += chat.takeRelayUpdates()
+            if message["type"]?.string == "result", updatesAtResult == nil {
+                updatesAtResult = updates
+                finished.fulfill()
+            }
+        }
+        process.send(chat.request("initialize"))
+        process.send(chat.userMessage("Use the Bash tool to run `sleep 3`. Then run `sleep 3` again with a second, separate Bash call. Then say DONE."))
+        wait(for: [finished], timeout: 180)
+        process.terminate()
+
+        let item = try XCTUnwrap(received)
+        let atResult = updatesAtResult ?? []
+        XCTAssertEqual(atResult.first, .read(itemID: item), "read before the turn ended: \(atResult)")
+        let answer = atResult.compactMap { update -> String? in
+            if case .answered(item, let text) = update { return text }; return nil
+        }.first
+        XCTAssertTrue(answer?.uppercased().contains("PINEAPPLE") == true, "answered before the turn ended: \(atResult)")
+    }
+
     /// The preview's tools, served over the control channel the way Pane does it, against a fake page.
     @MainActor
     func testPreviewToolsOverSdkMcp() async throws {
