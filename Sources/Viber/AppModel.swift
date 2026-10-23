@@ -541,7 +541,7 @@ final class AppModel {
             let prompt = pane.chat.items.reversed().compactMap { item -> PermissionPrompt? in
                 if case .permission(let p) = item.kind, p.decision == nil { return p }; return nil
             }.first
-            body = prompt.map { "Allow \($0.agent ?? "Claude") to use \($0.toolName)? \(ToolSummary.summary(name: $0.toolName, input: $0.input))" } ?? "Claude needs your permission."
+            body = prompt.map { "Allow Claude to use \($0.toolName)? \(ToolSummary.summary(name: $0.toolName, input: $0.input))" } ?? "Claude needs your permission."
         case .input:
             let asking = pane.chat.items.reversed().compactMap { item -> ElicitationPrompt? in
                 if case .elicitation(let e) = item.kind, e.decision == nil { return e }; return nil
