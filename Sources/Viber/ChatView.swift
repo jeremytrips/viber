@@ -152,7 +152,7 @@ struct WorkingRow: View {
     var body: some View {
         HStack(spacing: 8) {
             ProgressView().controlSize(.small)
-            Text(starting ? "Starting Claude…" : "Working…").foregroundStyle(.secondary)
+            Text(starting ? "Starting Claude…" : pane?.chat.isThinking == true ? "Thinking…" : "Working…").foregroundStyle(.secondary)
             Spacer()
             if !starting, let pane {
                 Button("Stop") { pane.interrupt() }.help("Interrupt Claude (⌘.)")
@@ -211,6 +211,8 @@ struct ChatItemView: View {
             }
         case .assistant(let text):
             MarkdownText(text: text)
+        case .thinking(let text):
+            ThinkingRow(text: text)
         case .tool(let call):
             ToolRow(call: call)
         case .permission(let prompt):
@@ -255,6 +257,35 @@ struct ChatItemView: View {
                 .font(.callout)
                 .foregroundStyle(isError ? Color.red : Color.secondary)
                 .textSelection(.enabled)
+        }
+    }
+}
+
+/// Claude's thinking, folded away until opened.
+struct ThinkingRow: View {
+    let text: String
+    @State private var open = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button { withAnimation(.easeOut(duration: 0.12)) { open.toggle() } } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "brain").font(.caption)
+                    Text("Thinking").font(.callout)
+                    if !open { Text(text.replacingOccurrences(of: "\n", with: " ")).font(.callout).lineLimit(1).foregroundStyle(.tertiary) }
+                    Image(systemName: open ? "chevron.down" : "chevron.right").font(.caption2).foregroundStyle(.tertiary)
+                    Spacer(minLength: 0)
+                }
+                .foregroundStyle(.secondary)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if open {
+                MarkdownText(text: text)
+                    .foregroundStyle(.secondary)
+                    .padding(.leading, 10)
+                    .overlay(alignment: .leading) { Rectangle().fill(Color(nsColor: .separatorColor)).frame(width: 2) }
+            }
         }
     }
 }

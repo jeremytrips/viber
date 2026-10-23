@@ -84,6 +84,8 @@ public struct ChatItem: Identifiable, Equatable, Sendable {
         /// Images sent with the next user message, by label.
         case attachments([String])
         case assistant(String)
+        /// Claude's (summarized) thinking before it answered.
+        case thinking(String)
         case tool(ToolCall)
         case permission(PermissionPrompt)
         case question(QuestionPrompt)
@@ -146,6 +148,8 @@ public struct ChatTranscript {
     /// As reported by the CLI.
     public var permissionMode: String?
     public var streamingText = ""
+    /// Claude is thinking right now (thinking deltas are streaming).
+    public var isThinking = false
     public var cache: CacheEstimate?
     public var lastUsage: TurnUsage?
     public var costUSD: Double = 0
@@ -408,6 +412,7 @@ public struct ChatTranscript {
 
     public mutating func processExited(status: Int32) {
         streamingText = ""
+        isThinking = false
         for index in items.indices {
             switch items[index].kind {
             case .permission(var p) where p.decision == nil: p.decision = .cancelled; items[index].kind = .permission(p)
@@ -496,9 +501,15 @@ public struct ChatTranscript {
             let n = blockCounts[messageID, default: 0]
             blockCounts[messageID] = n + 1
             switch block["type"]?.string {
+            case "thinking":
+                // Empty when the display is "omitted"; redacted thinking has a different type and is skipped.
+                let text = (block["thinking"]?.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                isThinking = false
+                if !text.isEmpty { append(.thinking(text), id: "th:\(messageID):\(n)") }
             case "text":
                 let text = block["text"]?.string ?? ""
                 streamingText = ""
+                isThinking = false
                 if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     append(.assistant(text), id: "a:\(messageID):\(n)")
                 }
@@ -620,14 +631,20 @@ public struct ChatTranscript {
         guard message["parent_tool_use_id"]?.string == nil, let event = message["event"] else { return }
         switch event["type"]?.string {
         case "message_start": streamingText = ""
+        case "content_block_start": isThinking = event["content_block"]?["type"]?.string == "thinking"
         case "content_block_delta":
-            if event["delta"]?["type"]?.string == "text_delta" { streamingText += event["delta"]?["text"]?.string ?? "" }
+            switch event["delta"]?["type"]?.string {
+            case "text_delta": streamingText += event["delta"]?["text"]?.string ?? ""; isThinking = false
+            case "thinking_delta": isThinking = true
+            default: break
+            }
         default: break
         }
     }
 
     private mutating func applyResult(_ message: JSON) {
         streamingText = ""
+        isThinking = false
         if let cost = message["total_cost_usd"]?.double { costUSD = cost }
         if let ms = message["duration_ms"]?.double { lastTurnSeconds = ms / 1000 }
         let isError = message["is_error"]?.bool ?? false

@@ -26,7 +26,7 @@ Launch Viber from /Applications and allow notifications when asked. Notification
 ## Features
 
 - **Sessions sidebar**: every open session with its state (working, waiting for you, finished, failed). Sessions started outside Viber show up too.
-- **Chat**: streamed replies, tool calls summarized inline, stop with ⌘.
+- **Chat**: streamed replies, tool calls summarized inline, Claude's thinking folded into a row you can open, stop with ⌘.
 - **Rewind files**: hover a message you sent (or right-click it) and choose rewind to put files back the way they were before it, like Esc Esc → restore code in the terminal. Viber shows which files would change and asks first; the conversation itself is left as it is.
 - **Images and files**: paste (⌘V), drop or attach (paperclip) images to send them with a message; they are scaled to at most 2000 px. Other files and folders are mentioned as `@path`, and typing `@` offers the project's files (from `git ls-files`).
 - **Cards** for permission requests, questions from Claude (`AskUserQuestion`), plans to approve (`ExitPlanMode`), and MCP servers asking for input (a form built from the server's schema, or a page to open in the browser).
