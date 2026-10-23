@@ -36,6 +36,7 @@ Launch Viber from /Applications and allow notifications when asked. Notification
   - `/cost` shows tokens and cost for the session
 
   Everything else (skills, custom commands) is sent to the CLI as text. Viber's own skills work as `/cleanup` as well as `/viber:cleanup`.
+- **Messages between sessions**: start a message with `//` to send it to another open session instead of this one. A menu ranks the other sessions by what you typed (their title, project, branch and recent conversation), so `//the firmware endpoint is ready` goes to the session working on firmware. Start with a session's name (`//backend: …`) to pick it directly, or use ↑↓ to choose. The receiving session shows who it came from. If it is busy, the message waits until its current reply ends.
 - **Worktrees**: start a session in a new git worktree at `<repo>/.claude/worktrees/<slug>` on branch `viber/<slug>`. Closing can remove the worktree (refused if it has uncommitted changes) and delete the branch (`git branch -d` only, so unmerged branches are kept).
 - **Cache ring**: time left on the prompt cache per session; Viber can warn before it expires.
 - **Usage bar**: plan usage from `clauth` (start `clauth daemon` to keep it current).

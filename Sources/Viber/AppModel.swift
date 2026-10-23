@@ -175,6 +175,14 @@ final class AppModel {
 
     /// Routes composer text: skills go to the CLI, terminal-only commands are handled here.
     func submit(_ text: String, in pane: Pane) {
+        if Relay.isRelay(text) {
+            // Without a choice from the menu, use the best match.
+            guard let best = Relay.rank(text, candidates: relayCandidates(excluding: pane)).first else {
+                pane.chat.note("There is no other session to send this to.", isError: true); return
+            }
+            relay(best.message, from: pane, to: best.candidate.id)
+            return
+        }
         switch SlashRouter.route(text, commands: pane.chat.commands) {
         case .send(let message):
             guard !message.isEmpty else { return }
@@ -202,6 +210,46 @@ final class AppModel {
             pane.chat.note(String(format: "Session cost so far: $%.2f. Context: %@ tokens.", pane.chat.costUSD,
                                   usage.map { Self.compact($0.contextTokens) } ?? "unknown"))
         }
+    }
+
+    // MARK: `//` messages between sessions
+
+    /// The other open sessions, most recently active first, with recent conversation for ranking.
+    func relayCandidates(excluding source: Pane) -> [RelayCandidate] {
+        panes.filter { $0.id != source.id }
+            .sorted { $0.lastActivity > $1.lastActivity }
+            .map { pane in
+                let recentText = pane.chat.items.suffix(12).compactMap { item -> String? in
+                    switch item.kind {
+                    case .user(let t), .assistant(let t), .received(_, let t): return t
+                    case .tool(let call): return ToolSummary.summary(name: call.name, input: call.input)
+                    default: return nil
+                    }
+                }.joined(separator: "\n")
+                return RelayCandidate(id: pane.id, title: pane.title, project: pane.projectName,
+                                      branch: pane.worktree?.branch, context: String(recentText.suffix(4000)))
+            }
+    }
+
+    /// Sends `text` from one session to another, now if the target is free, else when its turn ends.
+    func relay(_ text: String, from source: Pane, to targetID: String) {
+        let message = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !message.isEmpty, let target = pane(targetID) else { return }
+        let queued = !target.canReceiveNow || !target.inbox.isEmpty
+        let sentID = source.chat.recordSent(to: target.title, text: message, queued: queued)
+        let incoming = IncomingRelay(sourcePaneID: source.id, sourceTitle: source.title, sentItemID: sentID, text: message)
+        if queued { target.inbox.append(incoming) } else { deliver(incoming, to: target) }
+    }
+
+    private func deliver(_ relay: IncomingRelay, to target: Pane) {
+        target.deliver(relay, binDir: binDir, pluginDir: pluginDir)
+        pane(relay.sourcePaneID)?.chat.markDelivered(itemID: relay.sentItemID)
+    }
+
+    /// One queued message per turn, so each gets its own reply.
+    private func flushInbox(_ pane: Pane) {
+        guard pane.canReceiveNow, !pane.inbox.isEmpty else { return }
+        deliver(pane.inbox.removeFirst(), to: pane)
     }
 
     private func ensureRunning(_ pane: Pane) {
@@ -254,6 +302,10 @@ final class AppModel {
     private func stateChanged(_ pane: Pane, from previous: PaneState) {
         updateBadge()
         let state = pane.state
+        // A session that just finished starting (or stopped) can take queued `//` messages.
+        if [.idle, .exited].contains(state), !pane.inbox.isEmpty {
+            DispatchQueue.main.async { [weak self] in self?.flushInbox(pane) }
+        }
         let target = Target.pane(pane.id)
         let focused = NSApp.isActive && selection == target
         if focused { return }
@@ -284,6 +336,7 @@ final class AppModel {
         }
         refreshDiff(pane)
         save()
+        flushInbox(pane)
     }
 
     func refreshDiff(_ pane: Pane) {

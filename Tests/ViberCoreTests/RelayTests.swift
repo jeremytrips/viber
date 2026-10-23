@@ -47,3 +47,30 @@ final class RelayTests: XCTestCase {
         XCTAssertEqual(parsed?.text, "Expose GET /firmware/latest")
     }
 }
+
+final class RelayChatTests: XCTestCase {
+    func testReceiveSendsEnvelopeAndShowsSender() {
+        var chat = ChatTranscript()
+        let message = chat.receiveRelay(from: "OTA firmware updates", text: "Expose GET /firmware/latest")
+        XCTAssertEqual(chat.items.last?.kind, .received(from: "OTA firmware updates", text: "Expose GET /firmware/latest"))
+        XCTAssertEqual(chat.state, .working)
+        let content = message["message"]?["content"]?.string ?? ""
+        XCTAssertEqual(Relay.parseEnvelope(content)?.text, "Expose GET /firmware/latest")
+    }
+
+    func testSentItemCanBeMarkedDelivered() {
+        var chat = ChatTranscript()
+        let id = chat.recordSent(to: "Backend", text: "hi", queued: true)
+        chat.markDelivered(itemID: id)
+        XCTAssertEqual(chat.items.last?.kind, .sent(to: "Backend", text: "hi", queued: false))
+    }
+
+    func testHistoryRestoresReceivedMessages() {
+        var chat = ChatTranscript()
+        let envelope = Relay.envelope(from: "UX", text: "use the new tokens")
+        let row: JSON = ["type": "user", "uuid": "u9", "timestamp": "2026-10-23T08:00:00Z",
+                         "message": ["role": "user", "content": .string(envelope)]]
+        chat.loadHistory(Data(row.line().utf8))
+        XCTAssertEqual(chat.items.map(\.kind), [.received(from: "UX", text: "use the new tokens")])
+    }
+}

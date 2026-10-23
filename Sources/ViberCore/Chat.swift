@@ -83,6 +83,10 @@ public struct ChatItem: Identifiable, Equatable, Sendable {
         case question(QuestionPrompt)
         case plan(PlanPrompt)
         case notice(String, isError: Bool)
+        /// A `//` message another session sent here.
+        case received(from: String, text: String)
+        /// A `//` message this session sent elsewhere; `queued` until the target's turn ends.
+        case sent(to: String, text: String, queued: Bool)
     }
     public let id: String
     public var kind: Kind
@@ -236,6 +240,27 @@ public struct ChatTranscript {
     }
 
     public mutating func note(_ text: String, isError: Bool = false) { append(.notice(text, isError: isError)) }
+
+    /// Delivers a `//` message from another session as a user turn, keeping who sent it.
+    public mutating func receiveRelay(from source: String, text: String) -> JSON {
+        append(.received(from: source, text: text))
+        state = .working
+        turnStartedByUser = true
+        return ["type": "user", "message": ["role": "user", "content": .string(Relay.envelope(from: source, text: text))]]
+    }
+
+    /// Records a `//` message sent from here. Returns the item id so delivery can be marked later.
+    @discardableResult
+    public mutating func recordSent(to target: String, text: String, queued: Bool) -> String {
+        append(.sent(to: target, text: text, queued: queued))
+        return items[items.count - 1].id
+    }
+
+    public mutating func markDelivered(itemID: String) {
+        guard let index = items.firstIndex(where: { $0.id == itemID }),
+              case .sent(let to, let text, true) = items[index].kind else { return }
+        items[index].kind = .sent(to: to, text: text, queued: false)
+    }
 
     public mutating func clear() {
         items.removeAll(); toolIndex.removeAll(); streamingText = ""
@@ -394,6 +419,10 @@ public struct ChatTranscript {
             return
         }
         if raw.hasPrefix("<local-command") || raw.hasPrefix("<system-reminder>") || raw.hasPrefix("Caveat:") { return }
+        if let relayed = Relay.parseEnvelope(raw) {
+            append(.received(from: relayed.from, text: relayed.text))
+            return
+        }
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if !text.isEmpty { append(.user(text)) }
     }

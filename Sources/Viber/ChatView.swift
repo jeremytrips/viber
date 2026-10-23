@@ -150,6 +150,26 @@ struct ChatItemView: View {
             QuestionCard(itemID: item.id, prompt: prompt, pane: pane)
         case .plan(let prompt):
             PlanCard(itemID: item.id, prompt: prompt, pane: pane)
+        case .received(let from, let text):
+            VStack(alignment: .trailing, spacing: 4) {
+                Label("From \(from)", systemImage: "arrow.down.left").font(.caption).foregroundStyle(.secondary)
+                Text(text)
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 13).padding(.vertical, 9)
+                    .background(RoundedRectangle(cornerRadius: 14).fill(Color.accentColor.opacity(0.12)))
+                    .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color.accentColor.opacity(0.35)))
+            }
+            .frame(maxWidth: .infinity, alignment: .trailing)
+            .padding(.leading, 60)
+        case .sent(let to, let text, let queued):
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Image(systemName: "arrow.up.right").foregroundStyle(Color.accentColor)
+                Text(queued ? "Queued for \(to)" : "Sent to \(to)").fontWeight(.medium)
+                Text(text).foregroundStyle(.secondary).lineLimit(2)
+                if queued { Text("· delivered when its reply ends").foregroundStyle(.tertiary) }
+            }
+            .font(.callout)
+            .textSelection(.enabled)
         case .notice(let text, let isError):
             Label(text, systemImage: isError ? "exclamationmark.triangle" : "info.circle")
                 .font(.callout)

@@ -10,6 +10,13 @@ struct PaneRecord: Codable {
     var worktree: WorktreeInfo?
 }
 
+struct IncomingRelay {
+    var sourcePaneID: String
+    var sourceTitle: String
+    var sentItemID: String
+    var text: String
+}
+
 /// One Claude Code session shown in Viber.
 @MainActor @Observable
 final class Pane: Identifiable {
@@ -21,6 +28,8 @@ final class Pane: Identifiable {
     var diffStat: String?
     var lastActivity = Date()
     var pendingClose: ViberRequest?
+    /// `//` messages waiting for this session's current turn to end.
+    var inbox: [IncomingRelay] = []
     private(set) var started = false
     @ObservationIgnored private var process: ClaudeProcess?
     @ObservationIgnored var onStateChange: ((Pane, PaneState) -> Void)?
@@ -102,6 +111,19 @@ final class Pane: Identifiable {
     func run(_ update: (inout ChatTranscript) -> [JSON]) {
         let before = chat.state
         for message in update(&chat) { process?.send(message) }
+        notifyIfChanged(from: before)
+    }
+
+    /// Whether a `//` message can go in now instead of waiting for the current turn.
+    var canReceiveNow: Bool {
+        !(state == .working || state == .starting || state.needsYou)
+    }
+
+    func deliver(_ relay: IncomingRelay, binDir: String?, pluginDir: String?) {
+        if !isRunning { start(binDir: binDir, pluginDir: pluginDir) }
+        let before = chat.state
+        process?.send(chat.receiveRelay(from: relay.sourceTitle, text: relay.text))
+        lastActivity = Date()
         notifyIfChanged(from: before)
     }
 
