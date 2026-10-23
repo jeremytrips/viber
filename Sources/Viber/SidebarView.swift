@@ -4,14 +4,17 @@ import ViberCore
 struct SidebarView: View {
     @Environment(AppModel.self) private var model
 
-    private var groups: [(name: String, panes: [Pane])] {
+    private var groups: [(path: String, name: String, panes: [Pane])] {
         var order: [String] = []
         var byProject: [String: [Pane]] = [:]
         for pane in model.panes {
-            if byProject[pane.projectName] == nil { order.append(pane.projectName) }
-            byProject[pane.projectName, default: []].append(pane)
+            if byProject[pane.projectPath] == nil { order.append(pane.projectPath) }
+            byProject[pane.projectPath, default: []].append(pane)
         }
-        return order.map { ($0, byProject[$0] ?? []) }
+        return order.map { path in
+            let panes = byProject[path] ?? []
+            return (path, panes.first?.projectName ?? path, panes)
+        }
     }
 
     var body: some View {
@@ -20,8 +23,8 @@ struct SidebarView: View {
             Section {
                 MessagesRow().tag(Target.messages)
             }
-            ForEach(groups, id: \.name) { group in
-                Section(group.name) {
+            ForEach(groups, id: \.path) { group in
+                Section {
                     ForEach(group.panes) { pane in
                         PaneRow(pane: pane, index: model.panes.firstIndex { $0.id == pane.id } ?? 0)
                             .tag(Target.pane(pane.id))
@@ -32,6 +35,8 @@ struct SidebarView: View {
                                 Button("Close Session…") { model.requestClose(pane) }
                             }
                     }
+                } header: {
+                    ProjectHeader(name: group.name, path: group.path)
                 }
             }
             if !model.externals.isEmpty {
@@ -85,6 +90,69 @@ struct MessagesRow: View {
                     .accessibilityLabel("\(unread) unread")
             }
         }
+    }
+}
+
+/// A project's section title, with the note Viber gives the next sessions there.
+struct ProjectHeader: View {
+    @Environment(AppModel.self) private var model
+    let name: String
+    let path: String
+    @State private var editing = false
+
+    var body: some View {
+        let note = model.notes.note(for: path)
+        HStack(spacing: 4) {
+            Text(name).help(path)
+            Spacer(minLength: 4)
+            Button { editing = true } label: {
+                Image(systemName: note == nil ? "note.text.badge.plus" : "note.text")
+                    .foregroundStyle(note == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.accentColor))
+            }
+            .buttonStyle(.borderless)
+            .help(note?.text ?? "Add a note for the next sessions in this project")
+            .accessibilityLabel(note == nil ? "Add project note" : "Edit project note")
+            .popover(isPresented: $editing, arrowEdge: .trailing) {
+                ProjectNoteEditor(name: name, path: path)
+            }
+        }
+    }
+}
+
+/// Edits a project's note. Saves when the popover closes.
+struct ProjectNoteEditor: View {
+    @Environment(AppModel.self) private var model
+    let name: String
+    let path: String
+    @State private var draft = ""
+    @State private var original = ""
+
+    var body: some View {
+        let note = model.notes.note(for: path)
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Note for \(name)").font(.headline)
+            TextEditor(text: $draft)
+                .font(.body)
+                .frame(width: 340, height: 160)
+                .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(.separator))
+            Text("Given to new conversations in this project. Ongoing ones keep the version they started with, and can read the latest with `viber note`.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                if let note {
+                    Text("Updated \(note.updatedAt, format: .relative(presentation: .named)) by \(note.updatedBy)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Clear") { draft = "" }.disabled(draft.isEmpty)
+            }
+        }
+        .padding(14)
+        .frame(width: 368)
+        .onAppear { draft = note?.text ?? ""; original = draft }
+        .onDisappear { if draft != original { model.setNote(draft, for: path, by: "you") } }
     }
 }
 

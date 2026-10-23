@@ -33,4 +33,20 @@ Rules:
 - Do not invent progress. If something was not verified, say so.
 - Keep it short enough to read in a minute.
 
-If running in Viber (`VIBER_PANE_ID` is set), finish with `viber notify "Handoff note ready"`.
+If running in Viber (`VIBER_PANE_ID` is set), also save a short version to the project note, which Viber gives every new session in this project:
+
+1. Run `viber note` to read the current note.
+2. Write it back with `viber note set -` and a heredoc. Keep everything already in the note exactly as it is, especially what the user wrote. Add a section `## Handoff: <branch or session title>` with at most 8 lines: the goal, the current state, and the next step. If a section with that heading is already there, replace it instead of adding another.
+
+   ```sh
+   viber note set - <<'EOF'
+   <existing note, unchanged>
+
+   ## Handoff: <branch or session title>
+   - Goal: …
+   - State: …
+   - Next: …
+   EOF
+   ```
+
+3. Finish with `viber notify "Handoff note ready"`.

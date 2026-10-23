@@ -8,6 +8,7 @@ let usage = """
 usage: viber close [--remove-worktree] [--delete-branch]
        viber notify <text...>
        viber rename <title...>
+       viber note [set <text...> | set - | clear]
        viber --help
 
 Talks to the Viber app that runs this Claude Code session.
@@ -16,6 +17,9 @@ Talks to the Viber app that runs this Claude Code session.
            --delete-branch    also delete its branch with `git branch -d` (kept if not merged)
   notify   Show a macOS notification for this session.
   rename   Set this session's title in the sidebar.
+  note     Print this project's note, which Viber gives every new session in the project.
+           set <text...>  replace the note (`set -` reads it from stdin)
+           clear          remove the note
 """
 
 func fail(_ message: String, code: Int32) -> Never {
@@ -68,6 +72,35 @@ case "notify", "rename":
         request = ViberRequest(paneID: paneID, command: .rename, text: text)
         confirmation = "Viber will rename this session to: \(text)"
     }
+case "note":
+    guard let action = args.first else {
+        guard let project = ProcessInfo.processInfo.environment["VIBER_PROJECT"], !project.isEmpty else {
+            fail("viber: this session was started by an older Viber; restart it to read the project note", code: 2)
+        }
+        print(ProjectNotes.load().note(for: project)?.text ?? "No note for this project.")
+        exit(0)
+    }
+    let text: String
+    switch action {
+    case "set":
+        let rest = Array(args.dropFirst())
+        text = rest == ["-"]
+            ? String(decoding: FileHandle.standardInput.readDataToEndOfFile(), as: UTF8.self)
+            : rest.joined(separator: " ")
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            fail("viber: note set needs text (use `viber note clear` to remove the note)\n\n\(usage)", code: 64)
+        }
+        guard text.count <= ProjectNotes.maxLength else {
+            fail("viber: the note is \(text.count) characters; keep it under \(ProjectNotes.maxLength)", code: 64)
+        }
+        confirmation = "Viber will save the project note in a few seconds. New sessions in this project will get it."
+    case "clear":
+        text = ""
+        confirmation = "Viber will remove the project note."
+    default:
+        fail("viber: unknown note action: \(action)\n\n\(usage)", code: 64)
+    }
+    request = ViberRequest(paneID: paneID, command: .note, text: text)
 default:
     fail("viber: unknown command: \(command)\n\n\(usage)", code: 64)
 }

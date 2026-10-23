@@ -39,6 +39,8 @@ final class Pane: Identifiable {
     @ObservationIgnored private var process: ClaudeProcess?
     @ObservationIgnored var onStateChange: ((Pane, PaneState) -> Void)?
     @ObservationIgnored var onTurnFinished: ((Pane) -> Void)?
+    /// The project note for the system prompt, looked up each time the process starts.
+    @ObservationIgnored var notePrompt: ((Pane) -> String?)?
 
     init(id: String = UUID().uuidString, title: String, spec: LaunchSpec, worktree: WorktreeInfo? = nil) {
         self.id = id; self.title = title; self.spec = spec; self.worktree = worktree
@@ -52,7 +54,9 @@ final class Pane: Identifiable {
     var state: PaneState { chat.state }
     var profileLabel: String { spec.profile ?? "Default login" }
     var cwd: String { spec.cwd }
-    var projectName: String { URL(fileURLWithPath: worktree?.repo ?? spec.cwd).lastPathComponent }
+    /// What project notes are keyed by: the repo root for worktree sessions, else the session's folder.
+    var projectPath: String { worktree?.repo ?? spec.cwd }
+    var projectName: String { URL(fileURLWithPath: projectPath).lastPathComponent }
     var isRunning: Bool { process?.isRunning == true }
 
     func start(binDir: String?, pluginDir: String?) {
@@ -62,10 +66,11 @@ final class Pane: Identifiable {
         }
         started = true
         spec.pluginDir = pluginDir
+        spec.appendSystemPrompt = notePrompt?(self)
         let before = chat.state
         chat.state = .starting
         do {
-            let p = try ClaudeProcess(spec: spec, paneID: id, binDir: binDir)
+            let p = try ClaudeProcess(spec: spec, paneID: id, binDir: binDir, project: projectPath)
             p.onMessage = { [weak self] message in self?.handle(message) }
             p.onExit = { [weak self] status, stderr in self?.exited(status: status, stderr: stderr) }
             process = p

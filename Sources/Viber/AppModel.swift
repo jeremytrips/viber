@@ -51,6 +51,7 @@ final class AppModel {
     var closing: Pane?
     var cacheWarning: TimeInterval = 120
     var relayLog = RelayLog()
+    var notes = ProjectNotes()
 
     @ObservationIgnored let notifier = Notifier()
     @ObservationIgnored private let externalMonitor = ExternalMonitor()
@@ -176,6 +177,7 @@ final class AppModel {
     private func wire(_ pane: Pane) {
         pane.onStateChange = { [weak self] pane, previous in self?.stateChanged(pane, from: previous) }
         pane.onTurnFinished = { [weak self] pane in self?.turnFinished(pane) }
+        pane.notePrompt = { [weak self] pane in self?.notePrompt(for: pane) }
     }
 
     /// Routes composer text: skills go to the CLI, terminal-only commands are handled here.
@@ -280,6 +282,18 @@ final class AppModel {
     private func flushInbox(_ pane: Pane) {
         guard pane.canReceiveNow, !pane.inbox.isEmpty else { return }
         deliver(pane.inbox.removeFirst(), to: pane)
+    }
+
+    // MARK: Project notes
+
+    /// Saves a project's note. Sessions pick it up the next time they start.
+    func setNote(_ text: String, for project: String, by author: String) {
+        notes.set(text, for: project, by: author)
+        saveNotes()
+    }
+
+    private func notePrompt(for pane: Pane) -> String? {
+        notes.note(for: pane.projectPath).map { ProjectNotes.systemPrompt(projectName: pane.projectName, note: $0) }
     }
 
     private func ensureRunning(_ pane: Pane) {
@@ -456,6 +470,8 @@ final class AppModel {
                 notifier.post(id: UUID().uuidString, title: pane.title, body: request.text ?? "", target: Target.pane(pane.id).key)
             case .rename:
                 if let text = request.text, !text.isEmpty { pane.title = text; save() }
+            case .note:
+                setNote(request.text ?? "", for: pane.projectPath, by: pane.title)
             }
         }
     }
@@ -513,7 +529,16 @@ final class AppModel {
         }
     }
 
+    func saveNotes() {
+        do {
+            try notes.save()
+        } catch {
+            errorMessage = "Could not save project notes: \(error.localizedDescription)"
+        }
+    }
+
     private func restore() {
+        notes = ProjectNotes.load()
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .secondsSince1970
         if let data = try? Data(contentsOf: ViberPaths.relays), let log = try? decoder.decode(RelayLog.self, from: data) {

@@ -34,6 +34,15 @@ final class LaunchTests: XCTestCase {
         XCTAssertEqual(LaunchSpec(profile: nil, cwd: "/tmp").command.tool, "claude")
     }
 
+    func testAppendSystemPrompt() throws {
+        XCTAssertFalse(LaunchSpec(profile: nil, cwd: "/tmp").claudeArguments.contains("--append-system-prompt"))
+        let args = LaunchSpec(profile: nil, cwd: "/tmp", appendSystemPrompt: "Use pnpm").claudeArguments
+        XCTAssertEqual(args.split(separator: "--append-system-prompt").last?.first, "Use pnpm")
+        // Records saved before the field existed still load.
+        let old = try JSONDecoder().decode(LaunchSpec.self, from: Data(#"{"cwd":"/tmp","profile":"Private"}"#.utf8))
+        XCTAssertNil(old.appendSystemPrompt)
+    }
+
     func testTranscriptPathMatchesCLINaming() {
         let url = ViberPaths.transcript(sessionID: "s1", cwd: "/Users/jt.sidis/dev/viber")
         XCTAssertEqual(url.deletingLastPathComponent().lastPathComponent, "-Users-jt-sidis-dev-viber")
@@ -112,5 +121,51 @@ final class RequestTests: XCTestCase {
         XCTAssertEqual(drained.first?.paneID, "p1")
         XCTAssertTrue(drained.first?.deleteBranch == true)
         XCTAssertTrue(ViberRequest.drain(dir).isEmpty)
+    }
+
+    func testNoteRequest() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("viber-req-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try ViberRequest(paneID: "p1", command: .note, text: "line one\nline two").write(to: dir)
+        let drained = ViberRequest.drain(dir)
+        XCTAssertEqual(drained.first?.command, .note)
+        XCTAssertEqual(drained.first?.text, "line one\nline two")
+    }
+}
+
+final class ProjectNotesTests: XCTestCase {
+    func testSetClearAndPersist() throws {
+        var notes = ProjectNotes()
+        let at = Date(timeIntervalSince1970: 1_790_000_000)
+        notes.set("  Run swift test first.\n", for: "/repo", by: "you", at: at)
+        XCTAssertEqual(notes.note(for: "/repo"), ProjectNote(text: "Run swift test first.", updatedAt: at, updatedBy: "you"))
+        XCTAssertNil(notes.note(for: "/other"))
+
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("viber-notes-\(UUID().uuidString)/notes.json")
+        defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
+        try notes.save(to: file)
+        XCTAssertEqual(ProjectNotes.load(from: file), notes)
+
+        notes.set(" \n", for: "/repo", by: "Backend")
+        XCTAssertNil(notes.note(for: "/repo"), "empty text removes the note")
+        XCTAssertEqual(ProjectNotes.load(from: file.appendingPathExtension("missing")), ProjectNotes())
+    }
+
+    func testLongNotesAreCut() {
+        var notes = ProjectNotes()
+        notes.set(String(repeating: "x", count: ProjectNotes.maxLength + 10), for: "/repo", by: "you")
+        XCTAssertEqual(notes.note(for: "/repo")?.text.count, ProjectNotes.maxLength)
+    }
+
+    func testSystemPrompt() {
+        let note = ProjectNote(text: "Don't touch the firmware API.", updatedAt: Date(timeIntervalSince1970: 1_790_000_000),
+                               updatedBy: "Login screen")
+        let prompt = ProjectNotes.systemPrompt(projectName: "viber", note: note)
+        XCTAssertTrue(prompt.contains("every session in viber"))
+        XCTAssertTrue(prompt.contains("Don't touch the firmware API."))
+        XCTAssertTrue(prompt.contains("the session “Login screen”"))
+        XCTAssertTrue(prompt.contains("viber note"))
+        XCTAssertTrue(ProjectNotes.systemPrompt(projectName: "viber", note: ProjectNote(text: "x", updatedAt: Date(), updatedBy: "you"))
+            .contains("by the user"))
     }
 }
