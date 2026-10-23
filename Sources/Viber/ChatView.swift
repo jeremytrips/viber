@@ -159,6 +159,8 @@ struct ChatItemView: View {
             QuestionCard(itemID: item.id, prompt: prompt, pane: pane)
         case .plan(let prompt):
             PlanCard(itemID: item.id, prompt: prompt, pane: pane)
+        case .elicitation(let prompt):
+            ElicitationCard(itemID: item.id, prompt: prompt, pane: pane)
         case .received(let from, let text):
             VStack(alignment: .trailing, spacing: 4) {
                 Label("From \(from)", systemImage: "arrow.down.left").font(.caption).foregroundStyle(.secondary)
@@ -299,6 +301,7 @@ struct DecisionLabel: View {
             case .alwaysAllowed: return ("Allowed for this session", "checkmark.circle", .green)
             case .denied: return ("Denied", "xmark.circle", .red)
             case .answered: return ("Answered", "checkmark.circle", .green)
+            case .declined: return ("Declined", "xmark.circle", .secondary)
             case .approved(let mode): return ("Approved · \(mode.label.lowercased())", "checkmark.circle", .green)
             case .keepPlanning: return ("Kept planning", "arrow.uturn.backward.circle", .secondary)
             case .cancelled: return ("No longer needed", "minus.circle", .secondary)
@@ -472,6 +475,107 @@ struct PlanCard: View {
                 }
             }
         }
+    }
+}
+
+/// An MCP server asking for input: a small form built from its schema, or a page to open in the browser.
+struct ElicitationCard: View {
+    let itemID: String
+    let prompt: ElicitationPrompt
+    let pane: Pane?
+    @State private var text: [String: String] = [:]
+    @State private var picks: [String: Set<String>] = [:]
+    @State private var toggles: [String: Bool] = [:]
+
+    var body: some View {
+        if let decision = prompt.decision {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("\(prompt.heading): \(prompt.message)").font(.callout).foregroundStyle(.secondary).lineLimit(2)
+                if prompt.isURL, decision == .answered {
+                    Label(prompt.completed ? "Completed" : "Opened in your browser. Waiting for \(prompt.server)…",
+                          systemImage: prompt.completed ? "checkmark.circle" : "globe")
+                        .font(.callout).foregroundStyle(prompt.completed ? Color.green : Color.secondary)
+                } else {
+                    DecisionLabel(decision: decision)
+                }
+            }
+        } else {
+            Card(title: prompt.heading, color: .purple) {
+                if !prompt.message.isEmpty { MarkdownText(text: prompt.message) }
+                if prompt.isURL {
+                    if let url = prompt.url {
+                        Text(url.absoluteString).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(2).textSelection(.enabled)
+                    }
+                } else {
+                    ForEach(prompt.fields) { field($0) }
+                }
+                if let pane { buttons(pane) }
+            }
+        }
+    }
+
+    @ViewBuilder private func field(_ f: ElicitationField) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 3) {
+                Text(f.title).fontWeight(.medium)
+                if f.required { Text("*").foregroundStyle(.red) }
+            }
+            if !f.description.isEmpty { Text(f.description).font(.caption).foregroundStyle(.secondary) }
+            switch f.kind {
+            case .boolean:
+                Toggle(f.title, isOn: Binding(get: { toggles[f.name] ?? (f.defaultValue?.bool ?? false) }, set: { toggles[f.name] = $0 }))
+                    .labelsHidden()
+            case .choice(let options), .multiChoice(let options):
+                let multi = { if case .multiChoice = f.kind { return true }; return false }()
+                ForEach(options, id: \.value) { option in
+                    OptionRow(label: option.label, description: "", multi: multi, selected: picks[f.name, default: []].contains(option.value)) {
+                        var set = picks[f.name, default: []]
+                        if multi { if set.contains(option.value) { set.remove(option.value) } else { set.insert(option.value) } } else { set = [option.value] }
+                        picks[f.name] = set
+                    }
+                }
+            case .text, .number, .integer:
+                TextField(f.format ?? (f.kind == .text ? "" : "Number"),
+                          text: Binding(get: { text[f.name] ?? f.defaultText }, set: { text[f.name] = $0 }))
+                    .textFieldStyle(.roundedBorder)
+            }
+        }
+    }
+
+    @ViewBuilder private func buttons(_ pane: Pane) -> some View {
+        HStack {
+            if prompt.isURL {
+                Button("Open page") {
+                    pane.run { $0.answerElicitation(itemID: itemID, action: "accept").map { [$0] } ?? [] }
+                    if let url = prompt.url { pane.onOpenURL?(url) }
+                }
+                .keyboardShortcut(.defaultAction)
+            } else {
+                Button("Submit") { pane.run { $0.answerElicitation(itemID: itemID, action: "accept", content: values).map { [$0] } ?? [] } }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!prompt.missing(values).isEmpty)
+            }
+            Button("Decline") { pane.run { $0.answerElicitation(itemID: itemID, action: "decline").map { [$0] } ?? [] } }
+        }
+    }
+
+    /// What the form holds, typed per the schema. Untouched fields fall back to their defaults.
+    private var values: [String: JSON] {
+        var out: [String: JSON] = [:]
+        for f in prompt.fields {
+            switch f.kind {
+            case .boolean:
+                out[f.name] = .bool(toggles[f.name] ?? (f.defaultValue?.bool ?? false))
+            case .choice:
+                if let pick = picks[f.name]?.first { out[f.name] = .string(pick) } else if let d = f.defaultValue { out[f.name] = d }
+            case .multiChoice(let options):
+                let chosen = options.map(\.value).filter { picks[f.name, default: []].contains($0) }
+                if !chosen.isEmpty { out[f.name] = .array(chosen.map(JSON.string)) } else if let d = f.defaultValue { out[f.name] = d }
+            case .text, .number, .integer:
+                if let v = f.value(from: text[f.name] ?? f.defaultText) { out[f.name] = v }
+            }
+        }
+        return out
     }
 }
 

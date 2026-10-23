@@ -27,7 +27,7 @@ Launch Viber from /Applications and allow notifications when asked. Notification
 
 - **Sessions sidebar**: every open session with its state (working, waiting for you, finished, failed). Sessions started outside Viber show up too.
 - **Chat**: streamed replies, tool calls summarized inline, stop with ⌘.
-- **Cards** for permission requests, questions from Claude (`AskUserQuestion`), and plans to approve (`ExitPlanMode`).
+- **Cards** for permission requests, questions from Claude (`AskUserQuestion`), plans to approve (`ExitPlanMode`), and MCP servers asking for input (a form built from the server's schema, or a page to open in the browser).
 - **Slash commands**: type `/` for a menu. Commands that only exist in Claude Code's terminal UI are handled by Viber:
   - `/plan [prompt]` switches to plan mode (and sends the prompt, if any)
   - `/model [name]` switches model, or opens a picker

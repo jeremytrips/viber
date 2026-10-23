@@ -36,7 +36,7 @@ public struct ToolCall: Equatable, Sendable {
 }
 
 public enum PromptDecision: Equatable, Sendable {
-    case allowed, alwaysAllowed, denied, answered, keepPlanning, cancelled
+    case allowed, alwaysAllowed, denied, answered, declined, keepPlanning, cancelled
     /// A plan approved, continuing in this mode.
     case approved(PermissionMode)
 }
@@ -86,6 +86,8 @@ public struct ChatItem: Identifiable, Equatable, Sendable {
         case permission(PermissionPrompt)
         case question(QuestionPrompt)
         case plan(PlanPrompt)
+        /// An MCP server asking for input: a form, or a page to open.
+        case elicitation(ElicitationPrompt)
         case notice(String, isError: Bool)
         /// A `//` message another session sent here.
         case received(from: String, text: String)
@@ -163,6 +165,7 @@ public struct ChatTranscript {
             case .permission(let p) where p.decision == nil: return count + 1
             case .question(let q) where q.decision == nil && q.requestID != nil: return count + 1
             case .plan(let p) where p.decision == nil && p.requestID != nil: return count + 1
+            case .elicitation(let e) where e.decision == nil: return count + 1
             default: return count
             }
         }
@@ -242,6 +245,18 @@ public struct ChatTranscript {
             if !note.isEmpty { append(.user(note)) }
             return [Self.controlSuccess(requestID, ["behavior": "deny", "message": .string(message)])]
         }
+    }
+
+    /// Answer an MCP server's request: "accept" with the form's values (or consent to open the page), "decline" or "cancel".
+    public mutating func answerElicitation(itemID: String, action: String, content: [String: JSON] = [:]) -> JSON? {
+        guard let index = items.firstIndex(where: { $0.id == itemID }),
+              case .elicitation(var prompt) = items[index].kind, prompt.decision == nil else { return nil }
+        prompt.decision = action == "accept" ? .answered : action == "decline" ? .declined : .cancelled
+        items[index].kind = .elicitation(prompt)
+        resumeAfterPrompt()
+        var response: [String: JSON] = ["action": .string(action)]
+        if action == "accept", !prompt.isURL { response["content"] = .object(content) }
+        return Self.controlSuccess(prompt.requestID, .object(response))
     }
 
     /// `permissionMode` changes once the CLI confirms; it refuses auto mode on some models.
@@ -355,6 +370,7 @@ public struct ChatTranscript {
             case .permission(var p) where p.decision == nil: p.decision = .cancelled; items[index].kind = .permission(p)
             case .question(var q) where q.decision == nil && q.requestID != nil: q.decision = .cancelled; items[index].kind = .question(q)
             case .plan(var p) where p.decision == nil && p.requestID != nil: p.decision = .cancelled; items[index].kind = .plan(p)
+            case .elicitation(var e) where e.decision == nil: e.decision = .cancelled; items[index].kind = .elicitation(e)
             default: break
             }
         }
@@ -416,6 +432,15 @@ public struct ChatTranscript {
             if let list = message["commands"] { commands = Self.commands(list) }
         case "compact_boundary":
             append(.notice("Conversation compacted", isError: false))
+        case "elicitation_complete":
+            // A URL-mode elicitation the user accepted: the server says the page flow finished.
+            guard let id = message["elicitation_id"]?.string else { break }
+            for index in items.indices {
+                if case .elicitation(var e) = items[index].kind, e.elicitationID == id {
+                    e.completed = true
+                    items[index].kind = .elicitation(e)
+                }
+            }
         default: break
         }
     }
@@ -548,8 +573,14 @@ public struct ChatTranscript {
 
     private mutating func applyControlRequest(_ message: JSON) -> [JSON] {
         let requestID = message["request_id"]?.string ?? ""
-        guard let request = message["request"], request["subtype"]?.string == "can_use_tool" else {
+        guard let request = message["request"], ["can_use_tool", "elicitation"].contains(request["subtype"]?.string) else {
             return [Self.controlError(requestID, "Viber does not handle \(message["request"]?["subtype"]?.string ?? "this request").")]
+        }
+        if request["subtype"]?.string == "elicitation" {
+            streamingText = ""
+            append(.elicitation(ElicitationPrompt.parse(requestID: requestID, request)), id: "e:\(requestID)")
+            state = .input
+            return []
         }
         let toolName = request["tool_name"]?.string ?? "Tool"
         let input = request["input"] ?? .null
@@ -584,6 +615,8 @@ public struct ChatTranscript {
                 q.decision = .cancelled; items[index].kind = .question(q)
             case .plan(var p) where p.requestID == requestID && p.decision == nil:
                 p.decision = .cancelled; items[index].kind = .plan(p)
+            case .elicitation(var e) where e.requestID == requestID && e.decision == nil:
+                e.decision = .cancelled; items[index].kind = .elicitation(e)
             default: continue
             }
         }

@@ -462,7 +462,11 @@ final class AppModel {
                 if case .permission(let p) = item.kind, p.decision == nil { return p }; return nil
             }.first
             body = prompt.map { "Allow Claude to use \($0.toolName)? \(ToolSummary.summary(name: $0.toolName, input: $0.input))" } ?? "Claude needs your permission."
-        case .input: body = "Claude has a question for you."
+        case .input:
+            let asking = pane.chat.items.reversed().compactMap { item -> ElicitationPrompt? in
+                if case .elicitation(let e) = item.kind, e.decision == nil { return e }; return nil
+            }.first
+            body = asking.map { "\($0.server) needs your input." } ?? "Claude has a question for you."
         case .plan: body = "A plan is ready for review."
         case .finished:
             guard previous == .working, pane.chat.turnStartedByUser else { return }
