@@ -68,6 +68,10 @@ struct NewSessionSheet: View {
     @State private var firstMessage = ""
     @State private var didLoad = false
     @State private var maker = WorktreeMaker.git(include: false)
+    /// The worktree's branch. It follows the name (`viber/<slug>`) until it is edited.
+    @State private var branch = ""
+    @State private var branchEdited = false
+    @State private var branchProblem: String?
 
     /// What makes the worktree for this folder: git, or the project's WorktreeCreate hook.
     enum WorktreeMaker: Equatable {
@@ -78,7 +82,7 @@ struct NewSessionSheet: View {
         var note: String {
             switch self {
             case .git(let include):
-                return "Creates .claude/worktrees/<name> on branch viber/<name>, so parallel sessions don't collide"
+                return "Creates .claude/worktrees/<name> on a new branch, so parallel sessions don't collide"
                     + (include ? ". Copies the gitignored files .worktreeinclude lists." : "")
             case .hooks:
                 return "The project's WorktreeCreate hook makes it, as in Claude Code. Its output shows in the sidebar while it runs."
@@ -88,6 +92,7 @@ struct NewSessionSheet: View {
         }
 
         var blocksWorktree: Bool { if case .unsupported = self { return true }; return false }
+        var usesHook: Bool { if case .hooks = self { return true }; return false }
 
         /// Looks up the folder's Claude Code settings. Blocking: run it off the main thread.
         static func find(folder: String, root: String) -> WorktreeMaker {
@@ -153,6 +158,16 @@ struct NewSessionSheet: View {
                         }
                     }
                     TextField("Name", text: $name, prompt: Text("Session name (used for the branch)"))
+                    if useWorktree && repoRoot != nil {
+                        VStack(alignment: .leading, spacing: 4) {
+                            TextField("Branch", text: Binding(get: { branch }, set: { branch = $0; branchEdited = !$0.isEmpty }),
+                                      prompt: Text(defaultBranch))
+                                .font(.body.monospaced())
+                            if let branchProblem {
+                                Text(branchProblem).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
                     Picker("Mode", selection: $permissionMode) {
                         ForEach(PermissionMode.offered, id: \.self) { Text($0.label).tag($0.rawValue) }
                     }
@@ -174,7 +189,7 @@ struct NewSessionSheet: View {
                     .keyboardShortcut(.cancelAction)
                 Button("Start", action: start)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(folder.isEmpty || (useWorktree && repoRoot != nil && maker.blocksWorktree))
+                    .disabled(folder.isEmpty || (useWorktree && repoRoot != nil && (maker.blocksWorktree || branchProblem != nil)))
             }
             .padding(16)
         }
@@ -182,6 +197,36 @@ struct NewSessionSheet: View {
         .fixedSize(horizontal: false, vertical: true)
         .onAppear(perform: load)
         .task(id: folder) { await checkRepo() }
+        .onChange(of: defaultBranch) { if !branchEdited { branch = defaultBranch } }
+        .task(id: "\(folder)|\(branch)|\(branchEdited)|\(useWorktree)|\(maker.usesHook)") { await checkBranch() }
+    }
+
+    /// `viber/<slug>` of the name the session will get, as the session's title is chosen.
+    private var defaultBranch: String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = !trimmed.isEmpty ? trimmed
+            : firstMessage.isEmpty ? URL(fileURLWithPath: folder).lastPathComponent : String(firstMessage.prefix(50))
+        return Worktree.defaultBranch(forName: title)
+    }
+
+    private var chosenBranch: String? {
+        let typed = branch.trimmingCharacters(in: .whitespaces)
+        return branchEdited && !typed.isEmpty ? typed : nil
+    }
+
+    /// `git check-ref-format --branch`, that it doesn't exist yet, and what a hook can take, after a short pause in typing.
+    private func checkBranch() async {
+        guard useWorktree, let root = repoRoot else { branchProblem = nil; return }
+        try? await Task.sleep(for: .milliseconds(250))
+        guard !Task.isCancelled else { return }
+        let name = chosenBranch ?? defaultBranch, typed = chosenBranch != nil, hook = maker.usesHook
+        let problem = await Task.detached { () -> String? in
+            // An untouched default is numbered if taken, so only a typed name has to be new.
+            if typed, case .problem(let problem) = Worktree.checkBranch(name, repo: root) { return problem }
+            return hook ? Worktree.hookNameProblem(name) : nil
+        }.value
+        guard !Task.isCancelled else { return }
+        branchProblem = problem
     }
 
     private func load() {
@@ -190,6 +235,7 @@ struct NewSessionSheet: View {
         folder = model.selectedPane?.worktree?.repo ?? model.selectedPane?.spec.cwd ?? model.recentFolders.first ?? ""
         profile = AccountPicker.usableDefault(model)
         permissionMode = Prefs.string(Prefs.newSessionMode)
+        branch = defaultBranch
     }
 
     /// The worktree row's subtitle, or the error from creating a repository.
@@ -248,6 +294,7 @@ struct NewSessionSheet: View {
             profile: profile,
             useWorktree: useWorktree && repoRoot != nil,
             name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+            branch: useWorktree ? chosenBranch : nil,
             permissionMode: permissionMode,
             firstMessage: firstMessage
         ))

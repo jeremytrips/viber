@@ -1,5 +1,20 @@
 import Foundation
 
+/// What the app saved about its open sessions, as far as the `viber` command needs it.
+public enum RecordedSessions {
+    private struct Record: Decodable {
+        var id: String
+        var worktree: WorktreeInfo?
+    }
+
+    /// The worktree Viber made for the session with this pane ID, if it made one.
+    public static func worktree(paneID: String, file: URL = ViberPaths.panes) -> WorktreeInfo? {
+        guard let data = try? Data(contentsOf: file),
+              let records = try? JSONDecoder().decode([Record].self, from: data) else { return nil }
+        return records.first { $0.id == paneID }?.worktree
+    }
+}
+
 /// A request from the `viber` command (run by skills inside a session) to the app.
 /// Delivered through the same atomic file-drop as HookInbox.
 public struct ViberRequest: Codable, Equatable {

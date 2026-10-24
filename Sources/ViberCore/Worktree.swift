@@ -36,11 +36,19 @@ public struct WorktreeRequest: Sendable {
     public var folder: String
     /// The session's name, which the worktree's folder and default branch are named after.
     public var name: String
+    /// The branch to create; nil for `viber/<slug>`, numbered if that is taken.
+    public var branch: String?
     public var permissionMode: String?
 
-    public init(folder: String, name: String, permissionMode: String? = nil) {
-        self.folder = folder; self.name = name; self.permissionMode = permissionMode
+    public init(folder: String, name: String, branch: String? = nil, permissionMode: String? = nil) {
+        self.folder = folder; self.name = name; self.branch = branch; self.permissionMode = permissionMode
     }
+}
+
+/// Whether a branch name typed for a new worktree can be used.
+public enum BranchCheck: Equatable, Sendable {
+    case ok
+    case problem(String)
 }
 
 /// How far creating or removing a worktree has got, for showing while it runs.
@@ -65,11 +73,14 @@ public enum Worktree {
         try Task.checkCancellation()
         guard !hooks.isEmpty else {
             progress(.step("Creating the worktree with git"))
-            let info = try create(repoDir: request.folder, name: request.name)
+            let info = try create(repoDir: request.folder, name: request.name, branch: request.branch)
             return info
         }
-        var name = slug(request.name)
-        if name.isEmpty { name = "session" }
+        // The hook gets the branch as the worktree `name` (Claude Code's only naming field), so it must also be
+        // a name Claude Code itself would pass.
+        let name = request.branch ?? unusedDefaultBranch(forName: request.name, root: root)
+        if let problem = hookNameProblem(name) { throw WorktreeError(message: problem) }
+        if case .problem(let problem) = checkBranch(name, repo: root) { throw WorktreeError(message: problem) }
         let input = WorktreeHooks.input(.create, cwd: request.folder, name: name, permissionMode: request.permissionMode)
         let checkout = WorktreeHooks.mainCheckout(request.folder) ?? root
         var created: String?
@@ -108,6 +119,51 @@ public enum Worktree {
         return String(collapsed.prefix(40)).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
     }
 
+    /// `viber/<slug>`: the branch a worktree session gets unless another one is typed.
+    public static func defaultBranch(forName name: String) -> String {
+        let s = slug(name)
+        return "viber/" + (s.isEmpty ? "session" : s)
+    }
+
+    /// The default branch, numbered (`viber/login-2`) if one by that name exists.
+    static func unusedDefaultBranch(forName name: String, root: String) -> String {
+        let first = defaultBranch(forName: name)
+        var candidate = first, n = 2
+        while branchExists(candidate, repo: root) { candidate = "\(first)-\(n)"; n += 1 }
+        return candidate
+    }
+
+    public static func branchExists(_ branch: String, repo: String) -> Bool {
+        Shell.run("git", ["-C", repo, "rev-parse", "--verify", "--quiet", "refs/heads/\(branch)"]).ok
+    }
+
+    /// Whether `name` can be a new branch: `git check-ref-format --branch` must accept it, and it may not exist yet.
+    /// Blocking: call it off the main thread.
+    public static func checkBranch(_ name: String, repo: String?) -> BranchCheck {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return .problem("Enter a branch name.") }
+        guard trimmed == name, !name.hasPrefix("-") else { return .problem("“\(name)” is not a valid branch name.") }
+        let check = Shell.run("git", (repo.map { ["-C", $0] } ?? []) + ["check-ref-format", "--branch", name])
+        guard check.ok, check.output == name else { return .problem("“\(name)” is not a valid branch name.") }
+        if let repo, branchExists(name, repo: repo) { return .problem("A branch named \(name) already exists.") }
+        return .ok
+    }
+
+    /// Claude Code's rules for a worktree name, which is what a WorktreeCreate hook receives: at most 64 characters,
+    /// and each `/`-separated part made of letters, digits, `.`, `_` and `-` (not `.`, `..` or `.git`).
+    public static func hookNameProblem(_ name: String) -> String? {
+        if name.count > 64 { return "The project's WorktreeCreate hook gets the branch as its worktree name, which can be at most 64 characters." }
+        for part in name.split(separator: "/", omittingEmptySubsequences: false) {
+            let plain = part.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || "._-".contains($0)) }
+            var lowered = part.lowercased()
+            while lowered.hasSuffix(".") { lowered.removeLast() }
+            if part.isEmpty || !plain || part == "." || part == ".." || lowered == ".git" {
+                return "The project's WorktreeCreate hook gets the branch as its worktree name, so each part between slashes may only use letters, digits, “.”, “_” and “-”."
+            }
+        }
+        return nil
+    }
+
     public static func repoRoot(_ dir: String) -> String? {
         let r = Shell.run("git", ["-C", dir, "rev-parse", "--show-toplevel"])
         return r.ok ? r.output : nil
@@ -128,22 +184,25 @@ public enum Worktree {
         try check(Shell.run("git", ["-C", dir, "commit", "-q", "-m", "Initial commit"]), "git commit")
     }
 
-    /// Creates `<repo>/.claude/worktrees/<slug>` on a new `viber/<slug>` branch from the current branch, then copies
-    /// the gitignored files `.worktreeinclude` lists into it, as Claude Code does for worktrees it makes with git.
-    public static func create(repoDir: String, name: String) throws -> WorktreeInfo {
+    /// Creates `<repo>/.claude/worktrees/<slug>` on a new branch (`viber/<slug>` unless `branch` names one) from the
+    /// current branch, then copies the gitignored files `.worktreeinclude` lists into it, as Claude Code does for
+    /// worktrees it makes with git.
+    public static func create(repoDir: String, name: String, branch requested: String? = nil) throws -> WorktreeInfo {
         guard let root = repoRoot(repoDir) else { throw WorktreeError(message: "\(repoDir) is not inside a git repository.") }
         let base = Shell.run("git", ["-C", root, "rev-parse", "--abbrev-ref", "HEAD"]).output
         guard !base.isEmpty, base != "HEAD" else { throw WorktreeError(message: "The repository has no current branch to start from.") }
+        if let requested, case .problem(let problem) = checkBranch(requested, repo: root) { throw WorktreeError(message: problem) }
         var slug = slug(name)
         if slug.isEmpty { slug = "session" }
         let dir = URL(fileURLWithPath: root).appendingPathComponent(directory)
+        // The folder is numbered when it is taken, and so is the default branch along with it.
         var candidate = slug, n = 2
         while FileManager.default.fileExists(atPath: dir.appendingPathComponent(candidate).path)
-                || Shell.run("git", ["-C", root, "rev-parse", "--verify", "--quiet", "refs/heads/viber/\(candidate)"]).ok {
+                || (requested == nil && branchExists("viber/\(candidate)", repo: root)) {
             candidate = "\(slug)-\(n)"; n += 1
         }
         let path = dir.appendingPathComponent(candidate).path
-        let branch = "viber/\(candidate)"
+        let branch = requested ?? "viber/\(candidate)"
         excludeWorktreeDir(root: root)
         let add = Shell.run("git", ["-C", root, "worktree", "add", "-b", branch, path, base])
         guard add.ok else { throw WorktreeError(message: "git worktree add failed: \(add.stderr.trimmingCharacters(in: .whitespacesAndNewlines))") }
