@@ -47,7 +47,7 @@ final class Pane: Identifiable {
     var worktree: WorktreeInfo?
     var chat = ChatTranscript()
     var diffStat: String?
-    /// What the worktree has checked out, read from its HEAD whenever the diff stat is refreshed.
+    /// The branch checked out in the worktree, read with the diff stat. Claude may have switched away from `worktree.branch`.
     var liveBranch: String?
     var lastActivity = Date()
     var pendingClose: ViberRequest?
@@ -123,10 +123,12 @@ final class Pane: Identifiable {
     /// What ideas are filed under: the repo root for worktree sessions, else the session's folder.
     var projectPath: String { worktree?.repo ?? spec.cwd }
     var projectName: String { URL(fileURLWithPath: projectPath).lastPathComponent }
-    /// The worktree's branch as shown: what it has checked out now, else the branch it was created on.
-    var branchName: String? {
+    /// The worktree's branch as it is now, or the one it was created on until it is read (and while HEAD is detached).
+    /// Nil when there is neither: a hook can make a worktree on a detached HEAD.
+    var branch: String? {
         guard let worktree else { return nil }
-        return liveBranch ?? (worktree.branch.isEmpty ? nil : worktree.branch)
+        let branch = liveBranch ?? worktree.branch
+        return branch.isEmpty ? nil : branch
     }
     var isRunning: Bool { process?.isRunning == true }
 

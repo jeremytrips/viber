@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import ViberCore
 
@@ -33,26 +34,12 @@ struct SidebarView: View {
                     ForEach(group.panes) { pane in
                         PaneRow(pane: pane, index: model.panes.firstIndex { $0.id == pane.id } ?? 0)
                             .tag(Target.pane(pane.id))
-                            .contextMenu {
-                                Button("Open in VS Code") { model.openInVSCode(pane.cwd) }
-                                Button("Stop Claude") { pane.interrupt() }.disabled(pane.state != .working)
-                                Button("Restart Claude") { model.restart(pane) }
-                                    .help("Start a new Claude process on this conversation, e.g. after logging in again")
-                                Divider()
-                                Button("Close Session…") { model.requestClose(pane) }
-                            }
+                            .contextMenu { PaneRowMenu(pane: pane) }
                     }
                     ForEach(group.jobs) { job in
                         WorktreeJobRow(job: job)
                             .tag(Target.job(job.id))
-                            .contextMenu {
-                                if job.isRunning {
-                                    Button(job.isRemoval ? "Stop Teardown" : "Stop Setup") { model.cancel(job) }
-                                } else {
-                                    Button("Try Again") { model.retry(job) }
-                                    Button("Dismiss") { model.dismiss(job) }
-                                }
-                            }
+                            .contextMenu { WorktreeJobMenu(job: job) }
                     }
                 } header: {
                     ProjectHeader(name: group.name, path: group.path)
@@ -67,17 +54,7 @@ struct SidebarView: View {
                     ExternalsPanel()
                     Divider()
                 }
-                HStack {
-                    SettingsLink { Image(systemName: "gearshape") }
-                        .buttonStyle(.borderless)
-                        .help("Settings for all sessions (⌘,)")
-                    let waiting = model.waitingCount
-                    Text(waiting == 0 ? "Nothing waiting for you" : "\(waiting) waiting for you · ⌘J")
-                        .foregroundStyle(waiting == 0 ? .secondary : .primary)
-                    Spacer()
-                }
-                .font(.caption)
-                .padding(.horizontal, 12).padding(.vertical, 8)
+                SidebarFooter()
             }
             .background(.bar)
         }
@@ -87,6 +64,40 @@ struct SidebarView: View {
                     .help("New session (⌘N)")
             }
         }
+    }
+}
+
+/// Its own view: the count reads every session's state, and the list above shouldn't redraw each time one changes.
+struct SidebarFooter: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        HStack {
+            SettingsLink { Image(systemName: "gearshape") }
+                .buttonStyle(.borderless)
+                .help("Settings for all sessions (⌘,)")
+            let waiting = model.waitingCount
+            Text(waiting == 0 ? "Nothing waiting for you" : "\(waiting) waiting for you · ⌘J")
+                .foregroundStyle(waiting == 0 ? .secondary : .primary)
+            Spacer()
+        }
+        .font(.caption)
+        .padding(.horizontal, 12).padding(.vertical, 8)
+    }
+}
+
+/// A session row's right-click menu. Its own view for the same reason as the footer: it reads the session's state.
+struct PaneRowMenu: View {
+    @Environment(AppModel.self) private var model
+    let pane: Pane
+
+    var body: some View {
+        Button("Open in VS Code") { model.openInVSCode(pane.cwd) }
+        Button("Stop Claude") { pane.interrupt() }.disabled(pane.state != .working)
+        Button("Restart Claude") { model.restart(pane) }
+            .help("Start a new Claude process on this conversation, e.g. after logging in again")
+        Divider()
+        Button("Close Session…") { model.requestClose(pane) }
     }
 }
 
@@ -147,8 +158,12 @@ struct PaneRow: View {
                 Text(pane.title).lineLimit(1).fontWeight(.medium)
                 HStack(spacing: 5) {
                     Chip(text: pane.profileLabel)
-                    if pane.worktree != nil {
-                        if let branch = pane.branchName { Chip(text: "⑂ " + branch.replacingOccurrences(of: "viber/", with: "")).help(branch) }
+                    if let worktree = pane.worktree {
+                        if let branch = pane.branch {
+                            // The last part, so "feat/NEX-705-…" shows its ticket in the narrow chip.
+                            Chip(text: "⑂ " + (branch.split(separator: "/").last.map(String.init) ?? branch))
+                                .help(worktree.branch.isEmpty || branch == worktree.branch ? branch : "\(branch), created as \(worktree.branch)")
+                        }
                         if let diff = pane.diffStat { Text(diff).font(.caption2.monospaced()).foregroundStyle(.secondary) }
                     } else {
                         Text(pane.state.label).font(.caption).foregroundStyle(.secondary)
@@ -273,16 +288,60 @@ extension PaneState {
 
 struct StateDot: View {
     let state: PaneState
-    @State private var pulse = false
 
     var body: some View {
-        Circle()
-            .fill(state.color)
+        PulsingDot(color: NSColor(state.color), pulsing: state == .working)
             .frame(width: 8, height: 8)
-            .opacity(state == .working && pulse ? 0.35 : 1)
-            .animation(state == .working ? .easeInOut(duration: 0.8).repeatForever() : .default, value: pulse)
-            .onAppear { pulse = true }
+            .accessibilityElement()
             .accessibilityLabel(state.label)
+    }
+}
+
+/// A dot whose pulse runs in Core Animation, so it costs the app nothing per frame.
+/// A repeating SwiftUI animation redrew the sidebar on every frame, and kept going after the session stopped working.
+private struct PulsingDot: NSViewRepresentable {
+    let color: NSColor
+    let pulsing: Bool
+
+    func makeNSView(context: Context) -> DotView {
+        let view = DotView()
+        view.wantsLayer = true
+        return view
+    }
+
+    func updateNSView(_ view: DotView, context: Context) {
+        view.color = color
+        view.pulsing = pulsing
+    }
+
+    final class DotView: NSView {
+        var color = NSColor.secondaryLabelColor { didSet { if color != oldValue { needsDisplay = true } } }
+        var pulsing = false { didSet { if pulsing != oldValue { updatePulse() } } }
+
+        override var wantsUpdateLayer: Bool { true }
+
+        /// Runs with the view's appearance current, so dynamic colors resolve for light or dark mode.
+        override func updateLayer() {
+            layer?.backgroundColor = color.cgColor
+            layer?.cornerRadius = bounds.width / 2
+        }
+
+        /// Core Animation drops animations when a layer leaves the window, as sidebar rows do when scrolled away.
+        override func viewDidMoveToWindow() { updatePulse() }
+
+        private func updatePulse() {
+            guard let layer else { return }
+            layer.removeAnimation(forKey: "pulse")
+            guard pulsing, window != nil else { return }
+            let pulse = CABasicAnimation(keyPath: "opacity")
+            pulse.fromValue = 1
+            pulse.toValue = 0.35
+            pulse.duration = 0.8
+            pulse.autoreverses = true
+            pulse.repeatCount = .infinity
+            pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            layer.add(pulse, forKey: "pulse")
+        }
     }
 }
 

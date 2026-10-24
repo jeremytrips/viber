@@ -122,4 +122,37 @@ public enum Simctl {
     public static func logs(_ udid: String, process: String?, seconds: Int) async throws -> String {
         try await check(logArguments(udid, process: process, seconds: seconds), what: "read the simulator's log").stdout
     }
+
+    // MARK: Settings
+
+    /// The service's name for `simctl privacy`; nil when simctl can't grant it.
+    public static func privacyService(_ service: PrivacyService) -> String? {
+        switch service {
+        case .camera, .notifications: return nil
+        default: return service.rawValue.replacingOccurrences(of: "_", with: "-")
+        }
+    }
+
+    /// What `set` runs; nil when simctl can't change the setting.
+    public static func settingArguments(_ udid: String, _ setting: DeviceSetting) -> [String]? {
+        switch setting {
+        case .appearance(let dark):
+            return ["ui", udid, "appearance", dark ? "dark" : "light"]
+        case .location(let latitude, let longitude):
+            // simctl wants "." as the decimal separator, whatever the Mac's locale.
+            return ["location", udid, "set", String(format: "%.6f,%.6f", latitude, longitude)]
+        case .grant(let service, let app):
+            return privacyService(service).map { ["privacy", udid, "grant", $0, app] }
+        case .statusBar(clean: true):
+            return ["status_bar", udid, "override", "--time", "9:41", "--dataNetwork", "wifi", "--wifiMode", "active", "--wifiBars", "3",
+                    "--cellularMode", "active", "--cellularBars", "4", "--operatorName", "", "--batteryState", "charged", "--batteryLevel", "100"]
+        case .statusBar(clean: false):
+            return ["status_bar", udid, "clear"]
+        }
+    }
+
+    public static func set(_ udid: String, _ setting: DeviceSetting) async throws {
+        guard let arguments = settingArguments(udid, setting) else { throw DeviceError.failed("simctl can't \(setting.what).") }
+        try await check(arguments, what: setting.what)
+    }
 }

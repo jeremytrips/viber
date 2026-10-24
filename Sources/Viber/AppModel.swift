@@ -42,7 +42,7 @@ struct NewSessionRequest {
     var profile: String?
     var useWorktree: Bool
     var name: String
-    /// The worktree's branch; nil for `viber/<slug>`.
+    /// The worktree's branch; nil for `branchPattern` filled in with the name.
     var branch: String? = nil
     /// Where a git worktree's branch starts.
     var base: WorktreeBase = .originDefault
@@ -50,6 +50,8 @@ struct NewSessionRequest {
     var firstMessage: String
     /// The idea this session is started for, linked to it once it opens.
     var ideaID: String?
+    /// The project's branch pattern, such as `viber/<slug>`.
+    var branchPattern = Worktree.defaultBranchPattern
 }
 
 @MainActor @Observable
@@ -65,6 +67,8 @@ final class AppModel {
     var now = Date()
     var errorMessage: String?
     var showNewSession = false
+    /// Starting values for the next New Session sheet.
+    var newSessionPrefill: NewSessionRequest?
     var showSwitcher = false
     var showResume = false
     var closing: Pane?
@@ -164,6 +168,8 @@ final class AppModel {
         let mode = request.permissionMode == "default" ? nil : request.permissionMode
         let model = Prefs.string(Prefs.newSessionModel)
         let launchModel = model.isEmpty ? nil : model
+        // Also for ideas started from the sheet, so Plan can't start a second session while the worktree is made.
+        if let id = request.ideaID { planningIdeas.insert(id) }
         if request.useWorktree {
             let job = WorktreeJob(creating: request, title: title)
             jobs.append(job)
@@ -210,7 +216,6 @@ final class AppModel {
             saveIdeas()
         }
         if selecting { select(.pane(pane.id)) }
-        if worktree != nil { refreshDiff(pane) }
         let text = firstMessage.trimmingCharacters(in: .whitespacesAndNewlines)
         if !text.isEmpty { submit(text, in: pane) }
         return pane
@@ -229,7 +234,8 @@ final class AppModel {
         switch job.kind {
         case .create(let request):
             let worktreeRequest = WorktreeRequest(folder: request.folder, name: request.name.isEmpty ? job.title : request.name,
-                                                  branch: request.branch, base: request.base, permissionMode: request.permissionMode)
+                                                  branch: request.branch, branchPattern: request.branchPattern,
+                                                  base: request.base, permissionMode: request.permissionMode)
             job.task = Task {
                 do {
                     let info = try await Worktree.create(worktreeRequest, progress: report)
@@ -478,7 +484,7 @@ final class AppModel {
                     }
                 }.joined(separator: "\n")
                 return RelayCandidate(id: pane.id, title: pane.title, project: pane.projectName,
-                                      branch: pane.branchName, context: String(recentText.suffix(4000)))
+                                      branch: pane.branch, context: String(recentText.suffix(4000)))
             }
     }
 
@@ -557,11 +563,22 @@ final class AppModel {
         planningIdeas.insert(idea.id)
         let project = idea.project
         Task.detached {
-            let isRepo = Worktree.repoRoot(project) != nil
+            let root = Worktree.repoRoot(project)
+            let key = root.map { WorktreeHooks.mainCheckout($0) ?? $0 }
             await MainActor.run {
-                self.createSession(NewSessionRequest(folder: project, profile: AccountPicker.usableDefault(self), useWorktree: isRepo,
-                                                     name: idea.title, permissionMode: PermissionMode.plan.rawValue,
-                                                     firstMessage: idea.text, ideaID: idea.id))
+                let pattern = key.map { Prefs.branchPattern(project: $0) } ?? Worktree.defaultBranchPattern
+                let request = NewSessionRequest(folder: project, profile: AccountPicker.usableDefault(self), useWorktree: root != nil,
+                                                name: idea.title, permissionMode: PermissionMode.plan.rawValue,
+                                                firstMessage: idea.text, ideaID: idea.id, branchPattern: pattern)
+                guard root != nil, Worktree.needsInput(pattern) else { self.createSession(request); return }
+                // The branch needs a part only the user knows, such as a ticket number: ask in the sheet.
+                self.planningIdeas.remove(idea.id)
+                self.newSessionPrefill = request
+                Task {
+                    // The ideas popover closes in the same click.
+                    try? await Task.sleep(for: .milliseconds(200))
+                    self.showNewSession = true
+                }
             }
         }
     }
@@ -653,20 +670,17 @@ final class AppModel {
             close(pane, removeWorktree: request.removeWorktree, deleteBranch: request.deleteBranch)
             return
         }
-        refreshDiff(pane)
+        refreshWorktree(pane)
         save()
     }
 
-    /// Re-reads the worktree's diff stat and the branch it has checked out (sessions switch branches).
-    func refreshDiff(_ pane: Pane) {
+    /// Reads the worktree's diff stat and the branch checked out in it.
+    func refreshWorktree(_ pane: Pane) {
         guard let info = pane.worktree else { return }
         Task.detached {
             let stat = Worktree.diffStat(info)
-            let head = Worktree.headName(info.path)
-            await MainActor.run {
-                pane.diffStat = stat
-                if let head { pane.liveBranch = head }
-            }
+            let branch = Worktree.currentBranch(info.path)
+            await MainActor.run { pane.diffStat = stat; pane.liveBranch = branch }
         }
     }
 
@@ -687,7 +701,7 @@ final class AppModel {
                 Task { @MainActor in self?.reloadStatus(); self?.deviceHub.reap() }
             }
         ]
-        for pane in panes where pane.worktree != nil { refreshDiff(pane) }
+        for pane in panes where pane.worktree != nil { refreshWorktree(pane) }
     }
 
     private func tick() {

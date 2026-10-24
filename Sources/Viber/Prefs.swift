@@ -1,4 +1,5 @@
 import Foundation
+import ViberCore
 
 /// Viber's own preferences (Settings → General). Views bind to the same keys with @AppStorage.
 enum Prefs {
@@ -18,6 +19,9 @@ enum Prefs {
     /// Approve taps, typing, installs and launches on simulators and emulators without a permission card.
     static let deviceActions = "deviceActions"
 
+    /// New worktrees' branch patterns, by the repository's main checkout. A missing one is Worktree.defaultBranchPattern.
+    static let branchPatterns = "branchPatterns"
+
     static func register() {
         UserDefaults.standard.register(defaults: [
             notifyFinished: true, notifyNeedsYou: true, notifyCache: true, cacheWarningMinutes: 2,
@@ -29,4 +33,16 @@ enum Prefs {
     static func bool(_ key: String) -> Bool { UserDefaults.standard.bool(forKey: key) }
     static func string(_ key: String) -> String { UserDefaults.standard.string(forKey: key) ?? "" }
     static func int(_ key: String) -> Int { UserDefaults.standard.integer(forKey: key) }
+
+    static func branchPattern(project: String) -> String {
+        (UserDefaults.standard.dictionary(forKey: branchPatterns)?[project] as? String) ?? Worktree.defaultBranchPattern
+    }
+
+    /// An empty pattern or the default one removes the project's own.
+    static func setBranchPattern(_ pattern: String, project: String) {
+        var all = UserDefaults.standard.dictionary(forKey: branchPatterns) ?? [:]
+        let trimmed = pattern.trimmingCharacters(in: .whitespaces)
+        all[project] = trimmed.isEmpty || trimmed == Worktree.defaultBranchPattern ? nil : trimmed
+        UserDefaults.standard.set(all, forKey: branchPatterns)
+    }
 }
