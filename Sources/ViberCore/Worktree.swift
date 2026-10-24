@@ -372,12 +372,10 @@ public enum Worktree {
             } else {
                 let input = WorktreeHooks.input(.remove, cwd: folder, worktreePath: info.path)
                 var failure: String?
-                var lastLine: String?
                 for hook in hooks {
                     progress(.step("Running the WorktreeRemove hook: \(hook.display)"))
                     let result = await WorktreeHooks.run(hook, input: input, folder: folder) { progress(.output($0)) }
                     if !result.ok, failure == nil { failure = WorktreeHooks.failure(hook, result, event: .remove) }
-                    lastLine = WorktreeHooks.printedPath(result.output) ?? lastLine
                 }
                 // Like Claude Code: a failed hook that still removed the directory counts as removed.
                 if let failure {
@@ -386,7 +384,8 @@ public enum Worktree {
                     }
                     said.append("The WorktreeRemove hook failed, but the worktree is gone.")
                 } else {
-                    said.append("The WorktreeRemove hook removed the worktree" + (lastLine.map { ": \($0)" } ?? "."))
+                    // Its output is in the removal's log; its last line (e.g. "Its volumes are kept") isn't a summary.
+                    said.append("The WorktreeRemove hook removed the worktree.")
                 }
             }
         }
