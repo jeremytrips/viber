@@ -10,6 +10,8 @@ usage: viber close [--remove-worktree] [--delete-branch]
        viber notify <text...>
        viber rename <title...>
        viber idea [list | add <text...> | add -]
+       viber idea done [<summary...> | -]
+       viber idea failed <why...> | -
        viber --help
 
 Talks to the Viber app that runs this Claude Code session.
@@ -23,6 +25,9 @@ Talks to the Viber app that runs this Claude Code session.
   idea     This project's ideas: things to do later that nobody has planned yet.
            list           print the ideas that are not done (the default)
            add <text...>  add an idea (`add -` reads it from stdin); the first line is its title
+           done [summary] mark the idea this session was started for as done, saying what shipped
+           failed <why>   say it got stuck and why; it stays started, linked to this session
+           After either, an autopilot run moves on to its next idea.
 """
 
 func fail(_ message: String, code: Int32) -> Never {
@@ -107,6 +112,22 @@ case "idea":
         }
         request = ViberRequest(paneID: paneID, command: .idea, text: text)
         confirmation = "Viber will add the idea to this project's list in a few seconds."
+    case "done", "failed":
+        let rest = Array(args.dropFirst())
+        let text = (rest == ["-"]
+            ? String(decoding: FileHandle.standardInput.readDataToEndOfFile(), as: UTF8.self)
+            : rest.joined(separator: " ")).trimmingCharacters(in: .whitespacesAndNewlines)
+        if action == "failed", text.isEmpty { fail("viber: idea failed needs the reason\n\n\(usage)", code: 64) }
+        guard text.count <= IdeaList.maxLength else {
+            fail("viber: the report is \(text.count) characters; keep it under \(IdeaList.maxLength)", code: 64)
+        }
+        guard let idea = IdeaList.load().idea(startedIn: paneID) else {
+            fail("viber: this session wasn't started for an idea, so there is none to mark", code: 1)
+        }
+        request = ViberRequest(paneID: paneID, command: action == "done" ? .ideaDone : .ideaFailed, text: text)
+        confirmation = action == "done"
+            ? "Viber will mark “\(idea.title)” as done."
+            : "Viber will mark “\(idea.title)” as stuck, with your reason."
     default:
         fail("viber: unknown idea action: \(action)\n\n\(usage)", code: 64)
     }

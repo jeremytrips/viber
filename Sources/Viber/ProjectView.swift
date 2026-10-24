@@ -146,11 +146,19 @@ struct ProjectView: View {
         let pending = model.ideas.pending(in: path)
         let toPlan = model.ideas.toPlanCount(in: path)
         return PageSection(title: "Ideas", detail: toPlan > 0 ? "\(toPlan) to plan" : nil) {
-            Button("All Ideas") { model.select(.ideas) }
-                .buttonStyle(.link)
-                .help("Every project's ideas, done ones too (⇧⌘I)")
+            HStack(spacing: 14) {
+                if model.autopilots[path] == nil, toPlan > 0, summary?.isRepo != false {
+                    Button { model.offerAutopilot(project: path) } label: { Label("Autopilot…", systemImage: "airplane") }
+                        .buttonStyle(.link)
+                        .help("Implement the ideas one after another on their own, each in a new worktree, shipped once it works")
+                }
+                Button("All Ideas") { model.select(.ideas) }
+                    .buttonStyle(.link)
+                    .help("Every project's ideas, done ones too (⇧⌘I)")
+            }
         } content: {
             VStack(alignment: .leading, spacing: 6) {
+                AutopilotCard(project: path)
                 HStack(alignment: .top, spacing: 6) {
                     TextField("Something to do later…", text: $draft, axis: .vertical)
                         .textFieldStyle(.roundedBorder)

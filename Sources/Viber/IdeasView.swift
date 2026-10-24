@@ -198,10 +198,17 @@ struct ProjectIdeasPopover: View {
             HStack {
                 Text("Ideas for \(name)").font(.headline)
                 Spacer()
+                if model.autopilots[path] == nil, ideas.contains(where: { $0.status == .open }) {
+                    Button { model.offerAutopilot(project: path, fromPopover: true); close() } label: { Image(systemName: "airplane") }
+                        .buttonStyle(.borderless)
+                        .help("Autopilot: implement these ideas one after another on their own")
+                        .accessibilityLabel("Autopilot")
+                }
                 Button("Show All") { model.select(.ideas); close() }
                     .buttonStyle(.borderless)
                     .help("Every project's ideas (⇧⌘I)")
             }
+            AutopilotCard(project: path, onLeave: close)
             HStack(alignment: .top, spacing: 6) {
                 TextField("Something to do later…", text: $draft, axis: .vertical)
                     .textFieldStyle(.roundedBorder)
@@ -279,6 +286,7 @@ struct IdeaRow: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 if editing { editor } else { content }
+                if let report = idea.report, !editing { reportLine(report) }
                 meta
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -329,6 +337,11 @@ struct IdeaRow: View {
             Text(idea.createdBy == "you" ? "You" : idea.createdBy)
                 .help(idea.createdBy == "you" ? "Added by you" : "Added by the session “\(idea.createdBy)”")
             Text("· \(Self.relative(idea.createdAt, now: model.now))")
+            if let place = autopilotPlace {
+                Text("·")
+                Label(place, systemImage: "airplane").labelStyle(.titleAndIcon)
+                    .foregroundStyle(Color.accentColor)
+            }
             if idea.status == .started, let id = idea.sessionID {
                 let pane = model.pane(id)
                 let title = pane?.title ?? idea.sessionTitle ?? "a session"
@@ -352,6 +365,14 @@ struct IdeaRow: View {
         if idea.status == .open {
             Button("Plan in a New Session", action: plan)
                 .disabled(model.planningIdeas.contains(idea.id))
+            if model.autopilots[idea.project] == nil {
+                Button("Implement on Autopilot…") {
+                    model.offerAutopilot(project: idea.project, ideaID: idea.id, fromPopover: onLeave != nil)
+                    onLeave?()
+                }
+            } else if autopilotPlace == nil {
+                Button("Add to Autopilot") { model.addToAutopilot(idea) }
+            }
         }
         if idea.status == .started, let id = idea.sessionID, model.pane(id) != nil {
             Button("Open Session") { model.select(.pane(id)); onLeave?() }
@@ -378,6 +399,25 @@ struct IdeaRow: View {
     private func plan() {
         model.plan(idea)
         onLeave?()
+    }
+
+    /// Where the project's autopilot has this idea: on it now, or in line.
+    private var autopilotPlace: String? {
+        guard let pilot = model.autopilots[idea.project] else { return nil }
+        if pilot.current == idea.id { return "on autopilot" }
+        guard let index = pilot.upcoming(in: model.ideas).firstIndex(where: { $0.id == idea.id }) else { return nil }
+        return index == 0 ? "next on autopilot" : "#\(index + 1) on autopilot"
+    }
+
+    /// What the idea's session said at the end, or why the autopilot couldn't start one.
+    private func reportLine(_ report: Idea.Report) -> some View {
+        Label(report.text.isEmpty ? "Done." : report.text,
+              systemImage: report.finished ? "checkmark.seal" : "exclamationmark.triangle")
+            .font(.caption)
+            .foregroundStyle(report.finished ? Color.secondary : Color.orange)
+            .lineLimit(expanded ? nil : 3)
+            .fixedSize(horizontal: false, vertical: true)
+            .help(report.finished ? "What its session said it shipped" : "Why it got stuck")
     }
 
     private func save() {

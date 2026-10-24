@@ -18,7 +18,11 @@ public enum RecordedSessions {
 /// A request from the `viber` command (run by skills inside a session) to the app.
 /// Delivered through the same atomic file-drop as HookInbox.
 public struct ViberRequest: Codable, Equatable {
-    public enum Command: String, Codable { case close, notify, rename, idea }
+    public enum Command: String, Codable {
+        case close, notify, rename, idea
+        /// How the idea this session was started for went: shipped, or stuck (with why).
+        case ideaDone, ideaFailed
+    }
     public var paneID: String
     public var command: Command
     public var text: String?

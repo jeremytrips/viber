@@ -34,6 +34,14 @@ enum Target: Hashable {
     }
 }
 
+/// The Autopilot sheet, on a project's ideas to plan or on one of them.
+struct AutopilotSheetRequest: Identifiable {
+    var project: String
+    /// Just this idea; nil for every idea still to plan.
+    var ideaID: String?
+    var id: String { project + "|" + (ideaID ?? "") }
+}
+
 /// The settings sheet of one session, opened on a tab.
 struct SettingsSheetRequest: Identifiable {
     var paneID: String
@@ -93,6 +101,11 @@ final class AppModel {
     var planningIdeas: Set<String> = []
     /// Worktrees being set up for new sessions, shown in the sidebar until their session opens.
     var jobs: [WorktreeJob] = []
+    /// Projects whose ideas are being implemented one after another, by path.
+    var autopilots: [String: Autopilot] = [:]
+    /// Runs that ended, kept on the project's page until dismissed so you can see what they did.
+    var finishedAutopilots: [String: Autopilot] = [:]
+    var autopilotSheet: AutopilotSheetRequest?
 
     @ObservationIgnored let notifier = Notifier()
     @ObservationIgnored private let externalMonitor = ExternalMonitor()
@@ -183,7 +196,7 @@ final class AppModel {
 
     // MARK: Sessions
 
-    func createSession(_ request: NewSessionRequest) {
+    func createSession(_ request: NewSessionRequest, selecting: Bool = true) {
         ensureProject(ProjectRoot.resolve(request.folder))
         let title = request.name.isEmpty ? (request.firstMessage.isEmpty ? URL(fileURLWithPath: request.folder).lastPathComponent : String(request.firstMessage.prefix(50))) : request.name
         let mode = request.permissionMode == "default" ? nil : request.permissionMode
@@ -194,11 +207,11 @@ final class AppModel {
         if request.useWorktree {
             let job = WorktreeJob(creating: request, title: title)
             jobs.append(job)
-            select(.job(job.id))
+            if selecting { select(.job(job.id)) }
             run(job)
         } else {
             open(title: title, spec: LaunchSpec(profile: request.profile, cwd: request.folder, permissionMode: mode, model: launchModel),
-                 worktree: nil, firstMessage: request.firstMessage, ideaID: request.ideaID)
+                 worktree: nil, firstMessage: request.firstMessage, ideaID: request.ideaID, selecting: selecting)
         }
     }
 
@@ -267,6 +280,7 @@ final class AppModel {
                 } catch {
                     if let id = request.ideaID { planningIdeas.remove(id) }
                     fail(job, error, title: "worktree setup failed")
+                    if let id = request.ideaID { autopilotSetupFailed(id, error) }
                 }
             }
         case .remove(let info, let deleteBranch):
@@ -298,7 +312,8 @@ final class AppModel {
         let pane = open(title: job.title, spec: LaunchSpec(profile: request.profile, cwd: info.path, permissionMode: mode,
                                                            model: model.isEmpty ? nil : model),
                         worktree: info, firstMessage: request.firstMessage, ideaID: request.ideaID, selecting: watching)
-        if !(NSApp.isActive && watching) {
+        // An autopilot's sessions start unwatched by design.
+        if !(NSApp.isActive && watching), request.ideaID.flatMap(autopilotProject(working:)) == nil {
             notifier.post(id: "job:\(job.id):ready", title: "\(job.title) · worktree ready",
                           body: "The session has started in \((info.path as NSString).abbreviatingWithTildeInPath).",
                           target: Target.pane(pane.id).key, sound: false)
@@ -640,8 +655,11 @@ final class AppModel {
     }
 
     func addIdea(_ text: String, project: String, by author: String) {
-        guard ideas.add(text, project: project, by: author) != nil else { return }
+        guard let idea = ideas.add(text, project: project, by: author) else { return }
         saveIdeas()
+        // Ideas you write while the project's autopilot runs join its queue. Ones its sessions add wait for you,
+        // so a run can't keep feeding itself.
+        if author == "you" { autopilots[project]?.enqueue(idea.id) }
     }
 
     func editIdea(_ id: String, text: String) {
@@ -652,11 +670,13 @@ final class AppModel {
     func setIdeaStatus(_ id: String, _ status: Idea.Status) {
         ideas.setStatus(id, status)
         saveIdeas()
+        releaseFromAutopilot(id, finished: status == .done)
     }
 
     func removeIdea(_ id: String) {
         ideas.remove(id)
         saveIdeas()
+        releaseFromAutopilot(id, finished: false)
     }
 
     /// Starts a plan-mode session for an idea, in a new worktree when the project is a git repo.
@@ -686,6 +706,208 @@ final class AppModel {
         }
     }
 
+    // MARK: Autopilot
+
+    /// Opens the Autopilot sheet on a project's ideas to plan, or on one idea.
+    func offerAutopilot(project: String, ideaID: String? = nil, fromPopover: Bool = false) {
+        let request = AutopilotSheetRequest(project: project, ideaID: ideaID)
+        guard fromPopover else { autopilotSheet = request; return }
+        Task {
+            // The ideas popover closes in the same click.
+            try? await Task.sleep(for: .milliseconds(200))
+            self.autopilotSheet = request
+        }
+    }
+
+    func startAutopilot(_ pilot: Autopilot) {
+        guard autopilots[pilot.project] == nil else { return }
+        autopilots[pilot.project] = pilot
+        finishedAutopilots[pilot.project] = nil
+        advanceAutopilot(pilot.project)
+    }
+
+    /// Adds an idea to the project's running autopilot.
+    func addToAutopilot(_ idea: Idea) {
+        autopilots[idea.project]?.enqueue(idea.id)
+    }
+
+    /// The project whose autopilot is on this idea now.
+    func autopilotProject(working ideaID: String) -> String? {
+        autopilots.first { $0.value.current == ideaID }?.key
+    }
+
+    /// The session of the idea the project's autopilot is on, once its worktree is made.
+    func autopilotPane(_ project: String) -> Pane? {
+        guard let id = autopilots[project]?.current, let idea = ideas.idea(id), idea.status == .started,
+              let session = idea.sessionID else { return nil }
+        return pane(session)
+    }
+
+    func isAutopilotSession(_ pane: Pane) -> Bool {
+        ideas.idea(startedIn: pane.id).flatMap { autopilotProject(working: $0.id) } != nil
+    }
+
+    /// Starts the next idea's session in a new worktree, or ends the run when none is left.
+    private func advanceAutopilot(_ project: String) {
+        guard var pilot = autopilots[project], pilot.paused == nil, pilot.current == nil else { return }
+        if pilot.stuckInARow >= Autopilot.maxStuckInARow {
+            pauseAutopilot(project, "\(pilot.stuckInARow) ideas in a row got stuck, so something may be wrong with the project. "
+                           + "Look at their sessions, then resume.")
+            return
+        }
+        guard !pilot.stopping, let idea = pilot.takeNext(from: ideas) else {
+            autopilots[project] = nil
+            finishedAutopilots[project] = pilot
+            notifier.post(id: "autopilot:\(project):\(Date().timeIntervalSince1970)", title: "Autopilot · \(projectName(project))",
+                          body: (pilot.stopping ? "Stopped as you asked: " : "No ideas left to plan: ") + pilot.tally + ".",
+                          target: Target.project(project).key)
+            return
+        }
+        autopilots[project] = pilot
+        createSession(NewSessionRequest(folder: project, profile: pilot.profile, useWorktree: true, name: idea.title,
+                                        // Merged ideas build on each other; pull requests each start from origin.
+                                        base: pilot.finish == .merge ? .current : .originDefault,
+                                        permissionMode: pilot.permissionMode, firstMessage: pilot.prompt(for: idea),
+                                        ideaID: idea.id, branchPattern: pilot.branchPattern),
+                      selecting: false)
+    }
+
+    /// `viber idea done` or `failed`: records how the session's idea went, and moves its autopilot on.
+    private func reportIdea(from pane: Pane, text: String, finished: Bool) {
+        guard let idea = ideas.idea(startedIn: pane.id) else { return }
+        ideas.report(idea.id, text, finished: finished)
+        saveIdeas()
+        guard let project = autopilotProject(working: idea.id) else { return }
+        autopilots[project]?.finishCurrent(stuck: !finished)
+        if !finished {
+            notifier.post(id: "autopilot:\(idea.id):stuck", title: "\(idea.title) · stuck", body: String(text.prefix(180)),
+                          target: Target.pane(pane.id).key)
+        }
+        advanceAutopilot(project)
+    }
+
+    /// The current idea's session ended a turn without a report: wait for its background work to wake it, remind it,
+    /// or give up on the idea. A failed turn (an API error, a dead login, a usage limit) or your Stop pauses the run.
+    private func autopilotTurnEnded(_ pane: Pane, stalled: Bool = false) {
+        guard let idea = ideas.idea(startedIn: pane.id), let project = autopilotProject(working: idea.id),
+              let pilot = autopilots[project], pilot.paused == nil else { return }
+        if let stopped = pane.interruptedAt, Date().timeIntervalSince(stopped) < 120 {
+            pane.interruptedAt = nil
+            pauseAutopilot(project, "You stopped “\(pane.title)”. Resume to let it carry on, or skip to the next idea.")
+            return
+        }
+        switch pane.state {
+        case .failed, .exited:
+            pauseAutopilot(project, "“\(pane.title)” stopped with an error. Look at it, then resume.")
+        case .finished, .idle:
+            let background = !pane.chat.controls.runningTasks.isEmpty || !pane.chat.runningAgents.isEmpty
+            switch pilot.afterTurn(backgroundWork: background && !stalled) {
+            case .wait: break
+            case .nudge:
+                autopilots[project]?.nudged()
+                submit(pilot.nudge(), in: pane)
+            case .giveUp:
+                giveUp(on: idea.id, project: project, why: "Its session kept stopping without saying whether it finished.")
+            }
+        default:
+            // Still working, or waiting for you: answering it lets it carry on.
+            break
+        }
+    }
+
+    /// A session that sat idle a long time without a report is reminded, even while a background command
+    /// (which may never end, like a dev server) still runs. One whose process died mid-turn never ends that turn.
+    private func checkStalledAutopilots() {
+        for project in autopilots.keys {
+            guard let pane = autopilotPane(project) else { continue }
+            if pane.state == .exited { autopilotTurnEnded(pane); continue }
+            guard [.finished, .idle].contains(pane.state), now.timeIntervalSince(pane.lastActivity) > Autopilot.stallInterval else { continue }
+            autopilotTurnEnded(pane, stalled: true)
+        }
+    }
+
+    private func giveUp(on ideaID: String, project: String, why: String) {
+        let title = ideas.idea(ideaID)?.title ?? "An idea"
+        ideas.report(ideaID, why, finished: false)
+        saveIdeas()
+        autopilots[project]?.finishCurrent(stuck: true)
+        notifier.post(id: "autopilot:\(ideaID):stuck", title: "\(title) · stuck", body: why, target: Target.project(project).key)
+        advanceAutopilot(project)
+    }
+
+    /// The current idea's worktree couldn't be made. That is usually the project's setup, which would stop the next idea too.
+    private func autopilotSetupFailed(_ ideaID: String, _ error: Error) {
+        guard let project = autopilotProject(working: ideaID) else { return }
+        let title = ideas.idea(ideaID)?.title ?? "the idea"
+        ideas.report(ideaID, "The autopilot couldn't make its worktree: \(error.localizedDescription)", finished: false)
+        saveIdeas()
+        autopilots[project]?.finishCurrent(stuck: true)
+        pauseAutopilot(project, "The worktree for “\(title)” couldn't be made. Its setup's output is in the sidebar.")
+    }
+
+    private func pauseAutopilot(_ project: String, _ reason: String) {
+        guard autopilots[project] != nil else { return }
+        autopilots[project]?.paused = reason
+        notifier.post(id: "autopilot:\(project):paused:\(Date().timeIntervalSince1970)", title: "Autopilot paused · \(projectName(project))",
+                      body: reason, target: Target.project(project).key)
+    }
+
+    /// Picks a paused run up again: the current idea's session is told to carry on, or the next idea starts.
+    func resumeAutopilot(_ project: String) {
+        guard autopilots[project]?.paused != nil else { return }
+        autopilots[project]?.resume()
+        if let pane = autopilotPane(project) {
+            if pane.state != .working && !pane.state.needsYou { submit(Autopilot.resumeMessage, in: pane) }
+        } else {
+            advanceAutopilot(project)
+        }
+    }
+
+    /// Lets the current idea finish, then ends the run. Asked again, it keeps going after all.
+    func toggleStopAfterCurrent(_ project: String) {
+        guard let pilot = autopilots[project] else { return }
+        if pilot.current == nil { stopAutopilot(project); return }
+        autopilots[project]?.stopping.toggle()
+    }
+
+    /// Gives up on the current idea and starts the next one. Its session is stopped and stays open.
+    func skipAutopilotIdea(_ project: String) {
+        guard let id = autopilots[project]?.current else { return }
+        let pane = autopilotPane(project)
+        pane?.interrupt()
+        pane?.interruptedAt = nil
+        if let job = jobs.first(where: { $0.ideaID == id }) { dismiss(job) }
+        ideas.report(id, "You skipped it.", finished: false)
+        saveIdeas()
+        autopilots[project]?.finishCurrent(stuck: true)
+        autopilots[project]?.resume()
+        advanceAutopilot(project)
+    }
+
+    /// Ends the run now. The current idea's session is stopped and stays open; a worktree still being made is dropped.
+    func stopAutopilot(_ project: String) {
+        guard var pilot = autopilots[project] else { return }
+        autopilots[project] = nil
+        pilot.stopping = true
+        finishedAutopilots[project] = pilot
+        if let id = pilot.current, let job = jobs.first(where: { $0.ideaID == id }) { dismiss(job) }
+        if let pane = pilot.current.flatMap({ ideas.idea($0)?.sessionID }).flatMap(pane) {
+            pane.interrupt()
+            pane.interruptedAt = nil
+        }
+    }
+
+    func dismissFinishedAutopilot(_ project: String) {
+        finishedAutopilots[project] = nil
+    }
+
+    /// You changed or deleted the idea the autopilot is on, so it moves on. Its session carries on as an ordinary one.
+    private func releaseFromAutopilot(_ id: String, finished: Bool) {
+        guard let project = autopilotProject(working: id) else { return }
+        autopilots[project]?.finishCurrent(stuck: !finished)
+        advanceAutopilot(project)
+    }
+
     private func ensureRunning(_ pane: Pane) {
         if !pane.isRunning { pane.start(binDir: binDir, pluginDir: pluginDir) }
     }
@@ -709,6 +931,9 @@ final class AppModel {
         if settingsSheet?.paneID == pane.id { settingsSheet = nil }
         notifier.clear(target: Target.pane(pane.id).key)
         save()
+        if let idea = ideas.idea(startedIn: pane.id), let project = autopilotProject(working: idea.id) {
+            giveUp(on: idea.id, project: project, why: "Its session was closed before it said how it went.")
+        }
         guard removeWorktree, let info = pane.worktree else { return }
         let job = WorktreeJob(removing: info, deleteBranch: deleteBranch, title: pane.title, project: pane.projectPath)
         jobs.append(job)
@@ -769,6 +994,12 @@ final class AppModel {
     }
 
     private func turnFinished(_ pane: Pane) {
+        // A `viber idea done` from the turn that just ended decides what the autopilot does next: read it now,
+        // not on the next poll.
+        if isAutopilotSession(pane) {
+            drainRequests()
+            guard panes.contains(where: { $0 === pane }) else { return }
+        }
         if let request = pane.pendingClose {
             pane.pendingClose = nil
             close(pane, removeWorktree: request.removeWorktree, deleteBranch: request.deleteBranch)
@@ -776,6 +1007,7 @@ final class AppModel {
         }
         refreshWorktree(pane)
         save()
+        autopilotTurnEnded(pane)
     }
 
     /// Reads the worktree's diff stat and the branch checked out in it.
@@ -802,7 +1034,7 @@ final class AppModel {
                 Task { @MainActor in self?.pollExternal(); self?.drainRequests(); self?.pollSignIns() }
             },
             Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-                Task { @MainActor in self?.reloadStatus(); self?.deviceHub.reap() }
+                Task { @MainActor in self?.reloadStatus(); self?.deviceHub.reap(); self?.checkStalledAutopilots() }
             }
         ]
         for pane in panes where pane.worktree != nil { refreshWorktree(pane) }
@@ -867,6 +1099,8 @@ final class AppModel {
                 if let text = request.text, !text.isEmpty { pane.title = text; save() }
             case .idea:
                 addIdea(request.text ?? "", project: pane.projectPath, by: pane.title)
+            case .ideaDone, .ideaFailed:
+                reportIdea(from: pane, text: request.text ?? "", finished: request.command == .ideaDone)
             }
         }
     }

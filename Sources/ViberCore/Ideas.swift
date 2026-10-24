@@ -22,6 +22,19 @@ public struct Idea: Codable, Equatable, Identifiable {
     /// The session started for this idea, and its title at the time.
     public var sessionID: String?
     public var sessionTitle: String?
+    /// What that session said at the end (`viber idea done` or `failed`), or why the autopilot couldn't start one.
+    public var report: Report?
+
+    public struct Report: Codable, Equatable {
+        public var text: String
+        /// False when it got stuck: the idea stays started, linked to its session, so you can see why.
+        public var finished: Bool
+        public var at: Date
+
+        public init(text: String, finished: Bool, at: Date) {
+            self.text = text; self.finished = finished; self.at = at
+        }
+    }
 
     public init(id: String = UUID().uuidString, project: String, text: String, createdAt: Date, createdBy: String,
                 status: Status = .open, updatedAt: Date? = nil) {
@@ -67,17 +80,32 @@ public struct IdeaList: Codable, Equatable {
             $0.status = .started
             $0.sessionID = sessionID
             $0.sessionTitle = sessionTitle
+            $0.report = nil
             $0.updatedAt = now
         }
     }
 
-    /// Moving an idea back to open forgets the session it was started in.
+    /// Moving an idea back to open forgets the session it was started in, and what it reported.
     public mutating func setStatus(_ id: String, _ status: Idea.Status, at now: Date = Date()) {
         update(id) {
             $0.status = status
             $0.updatedAt = now
-            if status == .open { $0.sessionID = nil; $0.sessionTitle = nil }
+            if status == .open { $0.sessionID = nil; $0.sessionTitle = nil; $0.report = nil }
         }
+    }
+
+    /// Records how an idea went. A finished one is done; a stuck one keeps its status and session.
+    public mutating func report(_ id: String, _ text: String, finished: Bool, at now: Date = Date()) {
+        update(id) {
+            $0.report = Idea.Report(text: Self.clean(text), finished: finished, at: now)
+            if finished { $0.status = .done }
+            $0.updatedAt = now
+        }
+    }
+
+    /// The idea a session was started for, if any.
+    public func idea(startedIn sessionID: String) -> Idea? {
+        ideas.last { $0.sessionID == sessionID }
     }
 
     public mutating func remove(_ id: String) { ideas.removeAll { $0.id == id } }
@@ -98,6 +126,11 @@ public struct IdeaList: Codable, Equatable {
     public func pending(in project: String) -> [Idea] {
         let mine = ideas.filter { $0.project == project }
         return Array(mine.filter { $0.status == .open }.reversed()) + Array(mine.filter { $0.status == .started }.reversed())
+    }
+
+    /// A project's ideas still to plan, oldest first: the order the autopilot takes them in.
+    public func toPlan(in project: String) -> [Idea] {
+        ideas.filter { $0.project == project && $0.status == .open }
     }
 
     public func toPlanCount(in project: String) -> Int {

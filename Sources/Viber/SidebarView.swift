@@ -162,6 +162,14 @@ struct ProjectRow: View {
                 Text("\(panes.count)").font(.caption).monospacedDigit().foregroundStyle(.secondary)
                     .help("\(panes.count) open session\(panes.count == 1 ? "" : "s")")
             }
+            if let pilot = model.autopilots[project.path] {
+                Button { model.select(.project(project.path)) } label: {
+                    Image(systemName: "airplane").foregroundStyle(pilot.paused == nil ? Color.accentColor : Color.orange)
+                }
+                .buttonStyle(.borderless)
+                .help(pilot.paused.map { "Autopilot paused: \($0)" } ?? "The autopilot is implementing \(project.name)'s ideas")
+                .accessibilityLabel(pilot.paused == nil ? "Autopilot running" : "Autopilot paused")
+            }
             if ideas > 0 || hovering || showingIdeas {
                 Button { showingIdeas = true } label: {
                     HStack(spacing: 2) {
@@ -225,7 +233,13 @@ struct PaneRow: View {
         HStack(spacing: 10) {
             CacheRing(cache: pane.chat.cache, now: model.now)
             VStack(alignment: .leading, spacing: 3) {
-                Text(pane.title).lineLimit(1).fontWeight(.medium)
+                HStack(spacing: 4) {
+                    if model.isAutopilotSession(pane) {
+                        Image(systemName: "airplane").font(.caption).foregroundStyle(Color.accentColor)
+                            .help("The autopilot started this session for an idea")
+                    }
+                    Text(pane.title).lineLimit(1).fontWeight(.medium)
+                }
                 HStack(spacing: 5) {
                     Chip(text: pane.profileLabel)
                     if let worktree = pane.worktree {

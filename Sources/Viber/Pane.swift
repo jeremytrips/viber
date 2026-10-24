@@ -51,6 +51,8 @@ final class Pane: Identifiable {
     var liveBranch: String?
     var lastActivity = Date()
     var pendingClose: ViberRequest?
+    /// When Stop was last pressed, so an autopilot run can tell your stop from Claude ending its turn.
+    @ObservationIgnored var interruptedAt: Date?
     /// `//` messages this session has yet to answer, by the chat item each arrived as.
     var answering: [String: IncomingRelay] = [:]
     var sessionRules: [RuleEdit] = []
@@ -248,6 +250,7 @@ final class Pane: Identifiable {
 
     func interrupt() {
         guard isRunning else { return }
+        interruptedAt = Date()
         process?.send(chat.request("interrupt"))
     }
 
