@@ -115,7 +115,7 @@ struct PaneHeader: View {
 
     private var subtitle: String {
         var parts = [pane.cwd.replacingOccurrences(of: FileManager.default.homeDirectoryForCurrentUser.path, with: "~")]
-        if let worktree = pane.worktree { parts.append("branch \(worktree.branch)") }
+        if let branch = pane.branchName { parts.append(branch.hasPrefix("detached") ? branch : "branch \(branch)") }
         return parts.joined(separator: "  ·  ")
     }
 

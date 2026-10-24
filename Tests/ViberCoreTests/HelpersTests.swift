@@ -110,7 +110,7 @@ final class WorktreeTests: XCTestCase {
         XCTAssertEqual(Worktree.slug("Phone-number login screen!"), "phone-number-login-screen")
     }
 
-    func testCreateDiffAndRemove() throws {
+    func testCreateDiffAndRemove() async throws {
         let info = try Worktree.create(repoDir: repo.path, name: "Login screen")
         XCTAssertEqual(info.branch, "viber/login-screen")
         XCTAssertEqual(info.base, "main")
@@ -119,10 +119,12 @@ final class WorktreeTests: XCTestCase {
 
         try "a\nb\n".write(to: URL(fileURLWithPath: info.path).appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
         XCTAssertEqual(Worktree.diffStat(info), "+1 −0")
-        XCTAssertThrowsError(try Worktree.remove(info, deleteBranch: true), "uncommitted changes block removal")
+        do { try await Worktree.remove(info, deleteBranch: true); XCTFail("uncommitted changes block removal") } catch {}
 
         XCTAssertTrue(Shell.run("git", ["-C", info.path, "commit", "-qam", "b"]).ok)
-        XCTAssertThrowsError(try Worktree.remove(info, deleteBranch: true), "unmerged branch is kept")
+        do { try await Worktree.remove(info, deleteBranch: true); XCTFail("unmerged branch is kept") } catch {
+            XCTAssertTrue(error is BranchKept)
+        }
         XCTAssertFalse(FileManager.default.fileExists(atPath: info.path), "worktree itself was removed")
 
         let second = try Worktree.create(repoDir: repo.path, name: "Login screen")

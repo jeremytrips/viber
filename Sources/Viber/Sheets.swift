@@ -67,6 +67,46 @@ struct NewSessionSheet: View {
     @State private var permissionMode = "auto"
     @State private var firstMessage = ""
     @State private var didLoad = false
+    @State private var maker = WorktreeMaker.git(include: false)
+    /// The worktree's branch. It follows the name (`viber/<slug>`) until it is edited.
+    @State private var branch = ""
+    @State private var branchEdited = false
+    @State private var branchProblem: String?
+    @State private var base = WorktreeBase.originDefault
+    @State private var baseChoices = BaseChoices(hasOrigin: false, originDefault: nil, current: nil)
+
+    /// What makes the worktree for this folder: git, or the project's WorktreeCreate hook.
+    enum WorktreeMaker: Equatable {
+        case git(include: Bool)
+        case hooks([HookCommand])
+        case unsupported(String)
+
+        var note: String {
+            switch self {
+            case .git(let include):
+                return "Creates .claude/worktrees/<name> on a new branch, so parallel sessions don't collide"
+                    + (include ? ". Copies the gitignored files .worktreeinclude lists." : "")
+            case .hooks:
+                return "The project's WorktreeCreate hook makes it and chooses where its branch starts, as in Claude Code. Its output shows in the sidebar while it runs."
+            case .unsupported(let message):
+                return message
+            }
+        }
+
+        var blocksWorktree: Bool { if case .unsupported = self { return true }; return false }
+        var usesHook: Bool { if case .hooks = self { return true }; return false }
+
+        /// Looks up the folder's Claude Code settings. Blocking: run it off the main thread.
+        static func find(folder: String, root: String) -> WorktreeMaker {
+            do {
+                let hooks = try WorktreeHooks.hooks(.create, folder: folder)
+                if !hooks.isEmpty { return .hooks(hooks) }
+            } catch {
+                return .unsupported(error.localizedDescription)
+            }
+            return .git(include: FileManager.default.fileExists(atPath: (root as NSString).appendingPathComponent(WorktreeInclude.fileName)))
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -105,11 +145,32 @@ struct NewSessionSheet: View {
                     } else {
                         Toggle(isOn: $useWorktree) {
                             Text("Run in a new git worktree")
-                            worktreeNote("Creates .claude/worktrees/<name> on branch viber/<name>, so parallel sessions don't collide")
+                            worktreeNote(maker.note)
                         }
                         .disabled(repoRoot == nil)
+                        if useWorktree, case .hooks(let hooks) = maker {
+                            LabeledContent("Setup") {
+                                VStack(alignment: .trailing, spacing: 2) {
+                                    ForEach(hooks, id: \.display) { hook in
+                                        Text(hook.display).font(.callout.monospaced()).lineLimit(2).truncationMode(.middle)
+                                            .textSelection(.enabled).help("From \(hook.source)")
+                                    }
+                                }
+                            }
+                        }
                     }
                     TextField("Name", text: $name, prompt: Text("Session name (used for the branch)"))
+                    if useWorktree && repoRoot != nil {
+                        VStack(alignment: .leading, spacing: 4) {
+                            TextField("Branch", text: Binding(get: { branch }, set: { branch = $0; branchEdited = !$0.isEmpty }),
+                                      prompt: Text(defaultBranch))
+                                .font(.body.monospaced())
+                            if let branchProblem {
+                                Text(branchProblem).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        if !maker.usesHook { basePicker }
+                    }
                     Picker("Mode", selection: $permissionMode) {
                         ForEach(PermissionMode.offered, id: \.self) { Text($0.label).tag($0.rawValue) }
                     }
@@ -131,7 +192,7 @@ struct NewSessionSheet: View {
                     .keyboardShortcut(.cancelAction)
                 Button("Start", action: start)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(folder.isEmpty)
+                    .disabled(folder.isEmpty || (useWorktree && repoRoot != nil && (maker.blocksWorktree || branchProblem != nil)))
             }
             .padding(16)
         }
@@ -139,6 +200,52 @@ struct NewSessionSheet: View {
         .fixedSize(horizontal: false, vertical: true)
         .onAppear(perform: load)
         .task(id: folder) { await checkRepo() }
+        .onChange(of: defaultBranch) { if !branchEdited { branch = defaultBranch } }
+        .task(id: "\(folder)|\(branch)|\(branchEdited)|\(useWorktree)|\(maker.usesHook)") { await checkBranch() }
+    }
+
+    /// Where a git worktree's branch starts: origin's default branch (fetched first) or what is checked out here.
+    /// A WorktreeCreate hook decides that itself, so this isn't shown then.
+    @ViewBuilder private var basePicker: some View {
+        let origin = baseChoices.originDefault ?? "origin's default branch"
+        if baseChoices.hasOrigin, let current = baseChoices.current {
+            Picker("Start from", selection: $base) {
+                Text("\(origin) (fetched first)").tag(WorktreeBase.originDefault)
+                Text("\(current) (checked out here)").tag(WorktreeBase.current)
+            }
+        } else if baseChoices.hasOrigin {
+            LabeledContent("Start from") { Text("\(origin) (fetched first)") }
+        } else if let current = baseChoices.current {
+            LabeledContent("Start from") { Text(current) }
+        }
+    }
+
+    /// `viber/<slug>` of the name the session will get, as the session's title is chosen.
+    private var defaultBranch: String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = !trimmed.isEmpty ? trimmed
+            : firstMessage.isEmpty ? URL(fileURLWithPath: folder).lastPathComponent : String(firstMessage.prefix(50))
+        return Worktree.defaultBranch(forName: title)
+    }
+
+    private var chosenBranch: String? {
+        let typed = branch.trimmingCharacters(in: .whitespaces)
+        return branchEdited && !typed.isEmpty ? typed : nil
+    }
+
+    /// `git check-ref-format --branch`, that it doesn't exist yet, and what a hook can take, after a short pause in typing.
+    private func checkBranch() async {
+        guard useWorktree, let root = repoRoot else { branchProblem = nil; return }
+        try? await Task.sleep(for: .milliseconds(250))
+        guard !Task.isCancelled else { return }
+        let name = chosenBranch ?? defaultBranch, typed = chosenBranch != nil, hook = maker.usesHook
+        let problem = await Task.detached { () -> String? in
+            // An untouched default is numbered if taken, so only a typed name has to be new.
+            if typed, case .problem(let problem) = Worktree.checkBranch(name, repo: root) { return problem }
+            return hook ? Worktree.hookNameProblem(name) : nil
+        }.value
+        guard !Task.isCancelled else { return }
+        branchProblem = problem
     }
 
     private func load() {
@@ -147,21 +254,30 @@ struct NewSessionSheet: View {
         folder = model.selectedPane?.worktree?.repo ?? model.selectedPane?.spec.cwd ?? model.recentFolders.first ?? ""
         profile = AccountPicker.usableDefault(model)
         permissionMode = Prefs.string(Prefs.newSessionMode)
+        branch = defaultBranch
     }
 
     /// The worktree row's subtitle, or the error from creating a repository.
     private func worktreeNote(_ text: String) -> Text {
-        guard let repoError else { return Text(text) }
-        return Text(repoError).foregroundStyle(.red)
+        if let repoError { return Text(repoError).foregroundStyle(.red) }
+        if case .unsupported = maker { return Text(text).foregroundStyle(.red) }
+        return Text(text)
     }
 
     private func checkRepo() async {
         let dir = folder
         repoError = nil
         guard !dir.isEmpty else { repoRoot = nil; useWorktree = false; return }
-        let root = await Task.detached { Worktree.repoRoot(dir) }.value
+        let none = BaseChoices(hasOrigin: false, originDefault: nil, current: nil)
+        let (root, found, choices) = await Task.detached { () -> (String?, WorktreeMaker, BaseChoices) in
+            guard let root = Worktree.repoRoot(dir) else { return (nil, .git(include: false), none) }
+            return (root, WorktreeMaker.find(folder: dir, root: root), Worktree.baseChoices(root))
+        }.value
         guard !Task.isCancelled, dir == folder else { return }
         repoRoot = root
+        maker = found
+        baseChoices = choices
+        base = choices.available(.originDefault)
         guard let root else { useWorktree = false; return }
         // Default to a worktree when another open session already works in this repo.
         useWorktree = model.panes.contains { pane in
@@ -200,6 +316,8 @@ struct NewSessionSheet: View {
             profile: profile,
             useWorktree: useWorktree && repoRoot != nil,
             name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+            branch: useWorktree ? chosenBranch : nil,
+            base: baseChoices.available(base),
             permissionMode: permissionMode,
             firstMessage: firstMessage
         ))
@@ -472,6 +590,9 @@ struct CloseSheet: View {
     let pane: Pane
 
     @State private var hasChanges = false
+    /// The project's WorktreeRemove hooks, for a worktree a WorktreeCreate hook made.
+    @State private var teardown: [HookCommand] = []
+    @State private var teardownProblem: String?
 
     private var busy: Bool { pane.state == .working || pane.state.needsYou }
 
@@ -488,8 +609,12 @@ struct CloseSheet: View {
             }
 
             if let worktree = pane.worktree {
+                let branchNote = Worktree.branchDeletionNote(recorded: worktree.branch, live: pane.liveBranch)
                 VStack(alignment: .leading, spacing: 4) {
-                    LabeledContent("Branch") { Text(worktree.branch).font(.callout.monospaced()).textSelection(.enabled) }
+                    LabeledContent("Branch") { Text(pane.branchName ?? "none").font(.callout.monospaced()).textSelection(.enabled) }
+                    if branchNote != nil, !worktree.branch.isEmpty {
+                        LabeledContent("Created on") { Text(worktree.branch).font(.callout.monospaced()).textSelection(.enabled) }
+                    }
                     LabeledContent("Worktree") {
                         Text((worktree.path as NSString).abbreviatingWithTildeInPath)
                             .font(.callout.monospaced())
@@ -498,12 +623,32 @@ struct CloseSheet: View {
                             .textSelection(.enabled)
                             .help(worktree.path)
                     }
+                    if !teardown.isEmpty {
+                        LabeledContent("Teardown") {
+                            VStack(alignment: .trailing, spacing: 2) {
+                                ForEach(teardown, id: \.display) { hook in
+                                    Text(hook.display).font(.callout.monospaced()).lineLimit(2).truncationMode(.middle)
+                                        .textSelection(.enabled).help("The project's WorktreeRemove hook, from \(hook.source)")
+                                }
+                            }
+                        }
+                    }
                 }
                 if hasChanges {
                     Label("Has uncommitted changes", systemImage: "exclamationmark.circle.fill")
                         .foregroundStyle(.red)
                 }
-                Text("Removal is refused if there are uncommitted changes, and the branch is only deleted if it is merged.")
+                if let teardownProblem {
+                    Label(teardownProblem, systemImage: "exclamationmark.circle.fill")
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let branchNote {
+                    Label(branchNote, systemImage: "arrow.triangle.branch")
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Text(removalNote(worktree))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -513,6 +658,9 @@ struct CloseSheet: View {
                         .keyboardShortcut(.cancelAction)
                     Spacer()
                     Button("Remove worktree and branch") { close(removeWorktree: true, deleteBranch: true) }
+                        .disabled(worktree.branch.isEmpty)
+                        .help(worktree.branch.isEmpty ? "Viber recorded no branch for this worktree"
+                              : "Also delete \(worktree.branch) with git branch -d, if it is merged")
                     Button("Remove worktree") { close(removeWorktree: true) }
                     Button("Keep worktree") { close() }
                         .keyboardShortcut(.defaultAction)
@@ -530,9 +678,29 @@ struct CloseSheet: View {
         .padding(20)
         .frame(width: 520)
         .task {
-            guard let path = pane.worktree?.path else { return }
-            hasChanges = await Task.detached { Worktree.hasUncommittedChanges(path) }.value
+            guard let worktree = pane.worktree else { return }
+            let (changes, head, hooks, problem) = await Task.detached { () -> (Bool, String?, [HookCommand], String?) in
+                let changes = Worktree.hasUncommittedChanges(worktree.path)
+                let head = Worktree.headName(worktree.path)
+                guard worktree.madeByHook else { return (changes, head, [], nil) }
+                do { return (changes, head, try WorktreeHooks.hooks(.remove, folder: worktree.folder ?? worktree.repo), nil) }
+                catch { return (changes, head, [], error.localizedDescription) }
+            }.value
+            hasChanges = changes
+            if let head { pane.liveBranch = head }
+            teardown = hooks
+            teardownProblem = problem
         }
+    }
+
+    private func removalNote(_ worktree: WorktreeInfo) -> String {
+        var note = "Removal is refused if there are uncommitted changes, and the branch is only deleted if it is merged."
+        if !teardown.isEmpty {
+            note += " The project's WorktreeRemove hook removes the worktree; if it fails, the worktree is kept and its output shows in the sidebar."
+        } else if worktree.madeByHook {
+            note += " The project's WorktreeCreate hook made this worktree and there is no WorktreeRemove hook, so git removes it."
+        }
+        return note
     }
 
     private func close(removeWorktree: Bool = false, deleteBranch: Bool = false) {

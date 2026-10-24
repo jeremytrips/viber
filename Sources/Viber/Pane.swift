@@ -47,6 +47,8 @@ final class Pane: Identifiable {
     var worktree: WorktreeInfo?
     var chat = ChatTranscript()
     var diffStat: String?
+    /// What the worktree has checked out, read from its HEAD whenever the diff stat is refreshed.
+    var liveBranch: String?
     var lastActivity = Date()
     var pendingClose: ViberRequest?
     /// `//` messages this session has yet to answer, by the chat item each arrived as.
@@ -121,6 +123,11 @@ final class Pane: Identifiable {
     /// What ideas are filed under: the repo root for worktree sessions, else the session's folder.
     var projectPath: String { worktree?.repo ?? spec.cwd }
     var projectName: String { URL(fileURLWithPath: projectPath).lastPathComponent }
+    /// The worktree's branch as shown: what it has checked out now, else the branch it was created on.
+    var branchName: String? {
+        guard let worktree else { return nil }
+        return liveBranch ?? (worktree.branch.isEmpty ? nil : worktree.branch)
+    }
     var isRunning: Bool { process?.isRunning == true }
 
     func start(binDir: String?, pluginDir: String?) {
