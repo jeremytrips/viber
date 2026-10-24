@@ -10,6 +10,7 @@ Viber is a native macOS app that runs Claude Code sessions as chats. It drives t
 - Optional: `clauth` for multiple profiles and the usage bar. Run `clauth daemon` to keep usage fresh.
 - Optional: `gh` for the `ship` and `cleanup` skills
 - Optional: Xcode with an iOS simulator runtime for the device panel
+- Optional: the Android SDK (Android Studio, or Homebrew's `android-commandlinetools` with platform-tools and the emulator) for Android emulators and USB phones in the device panel. Viber looks in `ANDROID_HOME`, `~/Library/Android/sdk` and Homebrew's location. Google's [Android CLI](https://developer.android.com/tools/agents) is optional; Viber uses its `android layout` for screens uiautomator can't read
 
 ## Build and install
 
@@ -74,17 +75,18 @@ Launch Viber from /Applications and allow notifications when asked. Notification
     - When a command prints a local URL (a dev server starting), its row offers *Open in preview*.
     - The console button shows errors since the last load.
     - The page keeps running while you look at other sessions, and the URL is restored after a relaunch.
-- **Device panel** (the iPhone button in the session header, ⇧⌘D): an iOS simulator beside the chat that you and Claude share, so Claude can check its own app work.
-  - **It runs inside Viber.** The simulator's screen streams into the panel. Click and drag to touch, scroll to swipe, and type when the screen has focus (⌘V pastes your Mac clipboard). Simulator.app doesn't need to be open. Pick a simulator from the menu at the top left; it boots if it is off. Simulators are shared, so two sessions can show the same one.
+- **Device panel** (the iPhone button in the session header, ⇧⌘D): an iOS simulator, an Android emulator or a USB Android phone beside the chat that you and Claude share, so Claude can check its own app work.
+  - **It runs inside Viber.** The device's screen streams into the panel. Click and drag to touch, scroll to swipe, and type when the screen has focus (⌘V pastes your Mac clipboard). Simulator.app doesn't need to be open, and emulators run without their own window. Pick a device from the menu at the top left; it boots if it is off. Devices are shared, so two sessions can show the same one.
   - **The tools:**
-    - `device_open` boots and shows a simulator; `device_list` lists them.
-    - `device_install` and `device_launch` run a `.app` built for the simulator. `device_open_url` opens deep links and `exp://` URLs for Expo Go.
-    - `device_screenshot` captures the screen, one pixel per point. `device_snapshot` gives an outline of the screen's accessibility tree with element refs.
-    - `device_tap`, `device_swipe`, `device_type` and `device_press` (home, lock, Siri, volume) act on it. `device_wait` waits for text, and `device_logs` reads the log.
-  - **Permissions:** looking never asks. Tapping, typing, installing and launching are approved automatically on simulators. Both are configurable under Settings → General.
+    - `device_open` boots and shows a device ("iPhone 17", "Pixel 8"); `device_list` lists them.
+    - `device_install` and `device_launch` run a `.app` built for the simulator or an `.apk`. `device_open_url` opens deep links and `exp://` URLs for Expo Go; on Android it forwards `localhost` ports to the Mac first.
+    - `device_screenshot` captures the screen, one pixel per point (per dp on Android). `device_snapshot` gives an outline of the screen's accessibility tree with element refs.
+    - `device_tap`, `device_swipe`, `device_type` and `device_press` (home, lock, volume; Siri on iOS; back and recent apps on Android) act on it. `device_wait` waits for text, and `device_logs` reads the log.
+  - **Permissions:** looking at a simulator or emulator never asks, and tapping, typing, installing and launching are approved automatically there (both configurable under Settings → General). A USB phone holds real data: Claude's tools only use one you chose in the panel or that Claude names, looking at it asks unless you chose it, and acting on it always asks.
   - **Pick an element** (the arrow button) attaches what you click to your next message, with its label, accessibility identifier and frame. The camera button attaches a screenshot.
-  - **Run on device**: when a command's output shows a simulator build (`…-iphonesimulator/MyApp.app`) or an Expo URL, its row offers to run it in the panel.
-  - **How it works:** the live screen, touches, keys and the accessibility tree use Apple's private CoreSimulator and SimulatorKit frameworks, loaded at runtime, in the way [idb](https://github.com/facebook/idb) (MIT) and [serve-sim](https://github.com/EvanBacon/serve-sim) (Apache-2.0) do; Viber's bridge follows their code. Everything else goes through `xcrun simctl`. If an Xcode update breaks the private part, the panel says so and Claude's tools fall back to `simctl` where they can. Xcode 27's simulators no longer accept this kind of input, so on Xcode 27 the screen shows but clicks and keys don't reach it yet.
+  - **Run on device**: when a command's output shows a simulator build (`…-iphonesimulator/MyApp.app`), an Android build (`…/build/outputs/apk/…/app-debug.apk`) or an Expo URL, its row offers to run it in the panel.
+  - **How it works on Android:** the live screen and input use the server of [scrcpy](https://github.com/Genymobile/scrcpy) (Apache-2.0, license in `ThirdParty/scrcpy`), version 5.0.1, which `Scripts/build-app.sh` downloads and checks against a pinned SHA-256. Viber pushes it to the device over adb, decodes its H.264 stream with VideoToolbox and sends touches and keys over its control socket. Everything else goes through adb: `screencap`, `uiautomator dump`, `am start`, `adb install`, `logcat`. Emulators boot with `emulator -no-window`. When running from the repo (`swift run`), run `Scripts/fetch-scrcpy-server.sh` once for the live screen.
+  - **How it works on iOS:** the live screen, touches, keys and the accessibility tree use Apple's private CoreSimulator and SimulatorKit frameworks, loaded at runtime, in the way [idb](https://github.com/facebook/idb) (MIT) and [serve-sim](https://github.com/EvanBacon/serve-sim) (Apache-2.0) do; Viber's bridge follows their code. Everything else goes through `xcrun simctl`. If an Xcode update breaks the private part, the panel says so and Claude's tools fall back to `simctl` where they can. Xcode 27's simulators no longer accept this kind of input, so on Xcode 27 the screen shows but clicks and keys don't reach it yet.
 - **Worktrees**: start a session in a new git worktree at `<repo>/.claude/worktrees/<slug>` on branch `viber/<slug>`. If the folder isn't a git repository yet, **Create One** in the New Session sheet runs `git init` and commits a README titled after the folder. Closing can remove the worktree (refused if it has uncommitted changes) and delete the branch (`git branch -d` only, so unmerged branches are kept).
 - **Cache ring**: time left on the prompt cache per session; Viber can warn before it expires.
 - **Usage bar**: plan usage from `clauth` (start `clauth daemon` to keep it current).

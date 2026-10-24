@@ -1,5 +1,6 @@
 #!/bin/bash
-# Builds dist/Viber.app: the app, the `viber` helper CLI, and the Claude Code plugin with Viber's skills.
+# Builds dist/Viber.app: the app, the `viber` helper CLI, the Claude Code plugin with Viber's skills, and the scrcpy
+# server that gives Android devices their live screen.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -19,6 +20,14 @@ cp "$BIN/Viber" "$APP/Contents/MacOS/Viber"
 cp "$BIN/viber-ctl" "$APP/Contents/Resources/bin/viber"
 chmod +x "$APP/Contents/Resources/bin/viber"
 cp -R plugin "$APP/Contents/Resources/plugin"
+# scrcpy's server (Apache-2.0), pinned and checked against its SHA-256. Without it Android devices still work through adb,
+# but with no live screen.
+if SERVER="$(Scripts/fetch-scrcpy-server.sh)"; then
+    cp "$SERVER" "$APP/Contents/Resources/scrcpy-server"
+    cp ThirdParty/scrcpy/LICENSE "$APP/Contents/Resources/scrcpy-LICENSE"
+else
+    echo "warning: could not get scrcpy-server; Android devices will have no live screen" >&2
+fi
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

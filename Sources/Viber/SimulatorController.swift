@@ -8,7 +8,7 @@ import ViberCore
 /// One iOS simulator shown in Viber: its live screen, the user's mouse and keys, and the device tools' driver.
 /// Simulators are machine-wide, so one controller serves every session that shows or drives the same device.
 @MainActor @Observable
-final class SimulatorController: DeviceDriver {
+final class SimulatorController: DeviceController {
     private(set) var device: DeviceInfo
     /// The screen in points, once the stream has a surface.
     private(set) var screenSize: CGSize?
@@ -30,9 +30,9 @@ final class SimulatorController: DeviceDriver {
     @ObservationIgnored private var screen: SimScreen?
     @ObservationIgnored private var input: SimInput?
     @ObservationIgnored private var lastSeed: UInt32 = 0
-    @ObservationIgnored private var lastChange = Date.distantPast
+    @ObservationIgnored private let changes = ScreenChanges()
     @ObservationIgnored private(set) var lastUsed = Date()
-    @ObservationIgnored private var scroll: ScrollDrag?
+    @ObservationIgnored private var scroller = TouchScroller()
     @ObservationIgnored private var starting = false
 
     init(device: DeviceInfo) {
@@ -48,7 +48,16 @@ final class SimulatorController: DeviceDriver {
         if !wasBooted && info.isBooted && screenView.window != nil { startStream() }
     }
 
-    var isAttached: Bool { screenView.window != nil }
+    var busyNote: String? { nil }
+    let toolbarButtons: [DeviceButton] = [.home, .lock]
+    let canPowerCycle = true
+    let externalApp: String? = "Open in Simulator"
+    let homeApp: String? = "SpringBoard"
+
+    func openExternally() {
+        let udid = device.id
+        Task.detached { Shell.run("open", ["-a", "Simulator", "--args", "-CurrentDeviceUDID", udid]) }
+    }
 
     // MARK: Stream
 
@@ -76,15 +85,14 @@ final class SimulatorController: DeviceDriver {
         screen = nil
         isStreaming = false
         screenView.show(nil)
-        if let scroll { try? input?.touch(.up, x: scroll.finger.x, y: scroll.finger.y) }
-        scroll = nil
+        scroller.lift { phase, r in try? input?.touch(Self.phase(phase), x: r.x, y: r.y) }
     }
 
     private func surfaceChanged(_ surface: IOSurface) {
         let scale = screen?.native?.scale ?? 3
         screenSize = CGSize(width: Double(IOSurfaceGetWidth(surface)) / scale, height: Double(IOSurfaceGetHeight(surface)) / scale)
         screenView.show(surface)
-        lastChange = Date()
+        changes.lastChange = Date()
     }
 
     private func frameDrawn() {
@@ -93,7 +101,7 @@ final class SimulatorController: DeviceDriver {
         let seed = IOSurfaceGetSeed(surface)
         if seed != lastSeed {
             lastSeed = seed
-            lastChange = Date()
+            changes.lastChange = Date()
         }
         screenView.redraw()
     }
@@ -272,38 +280,32 @@ final class SimulatorController: DeviceDriver {
         try await Simctl.logs(device.id, process: process, seconds: seconds)
     }
 
-    /// Waits until the screen has not changed for 300 ms, at most 3 s. After an action, first waits up to 600 ms for
-    /// the screen to start changing, so a slow response is not mistaken for none.
     func settle(afterAction: Bool) async {
         readyStream()
         guard isStreaming else {
             try? await Task.sleep(nanoseconds: 300_000_000)
             return
         }
-        let start = Date()
-        try? await Task.sleep(nanoseconds: 100_000_000)
-        while !Task.isCancelled {
-            let elapsed = Date().timeIntervalSince(start)
-            if elapsed >= 3 { break }
-            let changedSince = lastChange > start
-            if afterAction && !changedSince && elapsed < 0.6 {
-                // Nothing yet: keep waiting for the first change.
-            } else if Date().timeIntervalSince(lastChange) >= 0.3 {
-                break
-            }
-            try? await Task.sleep(nanoseconds: 50_000_000)
-        }
+        await changes.settle(afterAction: afterAction)
     }
 
     // MARK: The user's mouse and keyboard
 
-    func userTouch(_ phase: SimTouchPhase, at ratio: CGPoint) {
-        lastUsed = Date()
-        do { try readyInput().touch(phase, x: ratio.x, y: ratio.y) } catch {}
+    static func phase(_ phase: TouchPhase) -> SimTouchPhase {
+        switch phase {
+        case .down: return .down
+        case .move: return .move
+        case .up: return .up
+        }
     }
 
-    func userKey(macKeyCode: UInt16, down: Bool) {
-        guard let usage = HIDKeyboard.usage(macKeyCode: macKeyCode) else { return }
+    func userTouch(_ phase: TouchPhase, at ratio: CGPoint) {
+        lastUsed = Date()
+        do { try readyInput().touch(Self.phase(phase), x: ratio.x, y: ratio.y) } catch {}
+    }
+
+    func userKey(_ event: NSEvent, down: Bool) {
+        guard let usage = HIDKeyboard.usage(macKeyCode: event.keyCode) else { return }
         do { try readyInput().key(usage: usage, down: down) } catch {}
     }
 
@@ -319,29 +321,11 @@ final class SimulatorController: DeviceDriver {
         }
     }
 
-    /// A scroll wheel or trackpad pan becomes a finger drag, since iOS has no scroll wheel. Re-anchors near the edges.
     func userScroll(dx: CGFloat, dy: CGFloat, at ratio: CGPoint, ended: Bool) {
         guard let size = screenSize, let input = try? readyInput() else { return }
-        if ended {
-            if let scroll { try? input.touch(.up, x: scroll.finger.x, y: scroll.finger.y) }
-            scroll = nil
-            return
+        scroller.scroll(dx: dx, dy: dy, at: ratio, ended: ended, screen: size) { phase, r in
+            try? input.touch(Self.phase(phase), x: r.x, y: r.y)
         }
-        guard dx != 0 || dy != 0 else { return }
-        var drag = scroll ?? {
-            try? input.touch(.down, x: ratio.x, y: ratio.y)
-            return ScrollDrag(anchor: ratio, finger: ratio)
-        }()
-        var next = CGPoint(x: drag.finger.x + dx / size.width, y: drag.finger.y + dy / size.height)
-        if next.x < 0.05 || next.x > 0.95 || next.y < 0.05 || next.y > 0.95 {
-            try? input.touch(.up, x: drag.finger.x, y: drag.finger.y)
-            drag.finger = drag.anchor
-            try? input.touch(.down, x: drag.finger.x, y: drag.finger.y)
-            next = CGPoint(x: drag.finger.x + dx / size.width, y: drag.finger.y + dy / size.height)
-        }
-        drag.finger = CGPoint(x: min(max(next.x, 0.05), 0.95), y: min(max(next.y, 0.05), 0.95))
-        try? input.touch(.move, x: drag.finger.x, y: drag.finger.y)
-        scroll = drag
     }
 
     /// The element under a click while picking.
@@ -373,10 +357,5 @@ final class SimulatorController: DeviceDriver {
         let ci = CIImage(ioSurface: surface)
         guard let cg = Self.imageContext.createCGImage(ci, from: ci.extent) else { return nil }
         return NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])
-    }
-
-    private struct ScrollDrag {
-        var anchor: CGPoint
-        var finger: CGPoint
     }
 }

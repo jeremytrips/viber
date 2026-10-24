@@ -76,9 +76,10 @@ public struct ShellResult {
 
 public enum Shell {
     /// Run a command to completion. Blocking: call it off the main thread. `input` is written to its standard input.
+    /// With a `timeout` (seconds), the command is stopped when it runs longer and the result has status 124.
     @discardableResult
     public static func run(_ tool: String, _ arguments: [String], cwd: String? = nil, environment: [String: String]? = nil,
-                           input: Data? = nil) -> ShellResult {
+                           input: Data? = nil, timeout: TimeInterval? = nil) -> ShellResult {
         guard let path = tool.hasPrefix("/") ? tool : Executables.find(tool) else {
             return ShellResult(status: 127, stdout: "", stderr: "\(tool) not found")
         }
@@ -101,6 +102,16 @@ public enum Shell {
                 try? stdin.fileHandleForWriting.close()
             }
         }
+        let timedOut = Flag()
+        let stopper = timeout.map { seconds in
+            let item = DispatchWorkItem {
+                guard process.isRunning else { return }
+                timedOut.set()
+                process.terminate()
+            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + seconds, execute: item)
+            return item
+        }
         // Read both pipes before waiting so a full pipe buffer cannot deadlock the child.
         var outData = Data(), errData = Data()
         let group = DispatchGroup()
@@ -109,9 +120,62 @@ public enum Shell {
         outData = out.fileHandleForReading.readDataToEndOfFile()
         group.wait()
         process.waitUntilExit()
+        stopper?.cancel()
+        if timedOut.isSet, let timeout {
+            return ShellResult(status: 124, stdout: String(decoding: outData, as: UTF8.self),
+                               stderr: "\(tool) did not finish within \(Int(timeout)) s", stdoutData: outData)
+        }
         return ShellResult(status: process.terminationStatus,
                            stdout: String(decoding: outData, as: UTF8.self),
                            stderr: String(decoding: errData, as: UTF8.self), stdoutData: outData)
+    }
+
+    /// `run` on a global queue, so slow commands don't hold a thread of Swift's cooperative pool.
+    public static func runAsync(_ tool: String, _ arguments: [String], environment: [String: String]? = nil,
+                                input: Data? = nil, timeout: TimeInterval? = nil) async -> ShellResult {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global().async {
+                continuation.resume(returning: run(tool, arguments, environment: environment, input: input, timeout: timeout))
+            }
+        }
+    }
+
+    /// Starts a long-running command without waiting for it. Its output goes to `output`, a file rather than a pipe,
+    /// so it never blocks on a full pipe or dies of SIGPIPE when Viber quits.
+    public static func spawn(_ tool: String, _ arguments: [String], environment: [String: String]? = nil, output: URL) throws -> Process {
+        guard let path = tool.hasPrefix("/") ? tool : Executables.find(tool) else { throw ShellError.notFound(tool) }
+        FileManager.default.createFile(atPath: output.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: output)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: path)
+        process.arguments = arguments
+        process.environment = environment ?? Executables.environment()
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = handle
+        process.standardError = handle
+        try process.run()
+        try? handle.close()
+        return process
+    }
+
+    /// The end of a log file, for error messages.
+    public static func tail(_ file: URL, lines: Int = 15) -> String {
+        guard let data = try? Data(contentsOf: file) else { return "" }
+        return String(decoding: data, as: UTF8.self).split(separator: "\n").suffix(lines).joined(separator: "\n")
+    }
+
+    private final class Flag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+        func set() { lock.lock(); value = true; lock.unlock() }
+        var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
+    }
+}
+
+public enum ShellError: Error, LocalizedError {
+    case notFound(String)
+    public var errorDescription: String? {
+        switch self { case .notFound(let tool): return "\(tool) was not found." }
     }
 }
 

@@ -102,7 +102,7 @@ struct PaneHeader: View {
             Button { pane.toggleDevice() } label: {
                 Image(systemName: "iphone").foregroundStyle(pane.showDevice ? Color.accentColor : Color.primary)
             }
-            .help(pane.showDevice ? "Hide the device (⇧⌘D)" : "Show a simulator beside the chat (⇧⌘D)")
+            .help(pane.showDevice ? "Hide the device (⇧⌘D)" : "Show a simulator or emulator beside the chat (⇧⌘D)")
             Button { model.openSettings(.model, in: pane) } label: { Image(systemName: "slider.horizontal.3") }
                 .help("Session settings: MCP, context, permissions, hooks, model (⌥⌘,)")
             Button("Open in VS Code") { model.openInVSCode(pane.cwd) }
@@ -374,7 +374,7 @@ struct ToolRow: View {
                 if let artifact, let pane {
                     Button { pane.runOnDevice(artifact) } label: { Label(artifact.label, systemImage: "iphone") }
                         .buttonStyle(.borderless).font(.caption)
-                        .help("Show the simulator beside the chat and run this there")
+                        .help("Show the device beside the chat and run this there")
                 }
             }
             if !call.done, let progress = call.progress, !progress.isEmpty {

@@ -98,6 +98,16 @@ public struct UITree: Equatable, Sendable {
             }?.0
     }
 
+    /// The innermost element at a point that has a name or can be acted on: the smallest such frame, the later one among equals.
+    public func element(at point: CGPoint) -> UIElement? {
+        elements.dropFirst().filter { ($0.hasContent || $0.isInteractive) && $0.frame.contains(point) }
+            .enumerated()
+            .min { a, b in
+                let areaA = a.element.frame.width * a.element.frame.height, areaB = b.element.frame.width * b.element.frame.height
+                return areaA != areaB ? areaA < areaB : a.offset > b.offset
+            }?.element
+    }
+
     public func isOnScreen(_ e: UIElement) -> Bool {
         screen.intersects(e.frame) && screen.contains(e.center)
     }

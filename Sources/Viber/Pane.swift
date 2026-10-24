@@ -24,6 +24,8 @@ struct PreviewRecord: Codable {
 struct DeviceRecord: Codable {
     var id: String?
     var open: Bool
+    /// The user picked this device in the panel (rather than Claude opening it).
+    var chosen: Bool?
 }
 
 /// A `//` message, or the reply to one, on its way to a session.
@@ -60,8 +62,10 @@ final class Pane: Identifiable {
     var pickedElements: [ElementReference] = []
     /// Whether the device panel shows beside the chat.
     var showDevice = false { didSet { if showDevice != oldValue { onPersist?() } } }
-    /// The simulator this session shows and its device tools drive, kept across relaunches.
+    /// The simulator or emulator this session shows and its device tools drive, kept across relaunches.
     var deviceID: String? { didSet { if deviceID != oldValue { onPersist?() } } }
+    /// The user picked the session's device in the panel. Looking at a USB phone needs this, else Claude's tools ask.
+    var userChoseDevice = false { didSet { if userChoseDevice != oldValue { onPersist?() } } }
     /// The device tool Claude is running, for the device panel.
     var deviceActivity: String?
     /// Images the device panel attached, picked up by the composer.
@@ -80,6 +84,8 @@ final class Pane: Identifiable {
     /// Viber's MCP server as this process was told about it.
     @ObservationIgnored private var mcpServer: SdkMcpServer?
     @ObservationIgnored weak var deviceHub: DeviceHub?
+    /// The device a tool call of this session is using.
+    @ObservationIgnored private weak var busyController: (any DeviceController)?
     /// Something worth saving in panes.json changed.
     @ObservationIgnored var onPersist: (() -> Void)?
     @ObservationIgnored var onStateChange: ((Pane, PaneState) -> Void)?
@@ -100,11 +106,12 @@ final class Pane: Identifiable {
         showPreview = record.preview?.open ?? false
         deviceID = record.device?.id
         showDevice = record.device?.open ?? false
+        userChoseDevice = record.device?.chosen ?? false
     }
 
     var record: PaneRecord {
         let preview = previewURL != nil || showPreview ? PreviewRecord(url: previewURL?.absoluteString, open: showPreview) : nil
-        let device = deviceID != nil || showDevice ? DeviceRecord(id: deviceID, open: showDevice) : nil
+        let device = deviceID != nil || showDevice ? DeviceRecord(id: deviceID, open: showDevice, chosen: userChoseDevice ? true : nil) : nil
         return PaneRecord(id: id, title: title, spec: spec, worktree: worktree, sessionRules: sessionRules.isEmpty ? nil : sessionRules,
                           extraDirs: extraDirs.isEmpty ? nil : extraDirs, preview: preview, device: device)
     }
@@ -307,7 +314,7 @@ final class Pane: Identifiable {
 
     // MARK: Device
 
-    var deviceController: SimulatorController? { deviceID.flatMap { deviceHub?.controllers[$0] } }
+    var deviceController: (any DeviceController)? { deviceID.flatMap { deviceHub?.controllers[$0] } }
 
     func toggleDevice() {
         showDevice.toggle()
@@ -317,6 +324,7 @@ final class Pane: Identifiable {
     func chooseDevice(_ device: DeviceInfo, boot: Bool) {
         guard let hub = deviceHub else { return }
         deviceID = device.id
+        userChoseDevice = true
         showDevice = true
         let controller = hub.controller(for: device)
         if boot, !device.isBooted {
@@ -339,19 +347,24 @@ final class Pane: Identifiable {
         controller.screenView.window?.makeFirstResponder(controller.screenView)
     }
 
-    /// Runs a build or an Expo URL on this session's device, or on a running (else the newest) simulator.
+    /// Runs a build or an Expo URL on this session's device when it can, else on a running (else the newest) simulator
+    /// or emulator of the build's platform.
     func runOnDevice(_ artifact: DeviceArtifact) {
         guard let hub = deviceHub else { return }
         Task {
             do {
                 let devices = try await hub.refresh(maxAge: 2)
-                guard let device = deviceID.flatMap({ id in devices.first { $0.id == id } }) ?? DeviceCatalog.preferred(devices) else {
-                    throw DeviceError.failed("No simulators found. Install an iOS simulator runtime in Xcode → Settings → Components.")
+                let fits = { (d: DeviceInfo) in artifact.platform.map { d.platform == $0 } ?? true }
+                let mine = deviceID.flatMap { id in devices.first { $0.id == id } }.flatMap { fits($0) ? $0 : nil }
+                guard let device = mine ?? DeviceCatalog.preferred(devices.filter(fits)) else {
+                    throw DeviceError.failed(artifact.platform == .android
+                        ? "No Android emulators found. Create one in Android Studio's Device Manager."
+                        : "No simulators found. Install an iOS simulator runtime in Xcode → Settings → Components.")
                 }
                 let driver = try use(device, reveal: true)
                 try await driver.boot()
                 switch artifact {
-                case .app(let path):
+                case .app(let path), .apk(let path):
                     let id = try await driver.install(path)
                     try await driver.launch(id, arguments: [], terminateRunning: true)
                 case .expo(let url):
@@ -391,7 +404,11 @@ final class Pane: Identifiable {
             let reply = await server.handle(call.message) { name, args in
                 if name.hasPrefix("device_") {
                     self.deviceActivity = DeviceToolbox.activity(name)
-                    defer { self.deviceActivity = nil }
+                    defer {
+                        self.deviceActivity = nil
+                        self.busyController?.activity = nil
+                        self.busyController = nil
+                    }
                     return await DeviceToolbox.call(name, args, host: self)
                 }
                 let preview = self.ensurePreview()
@@ -411,14 +428,19 @@ final class Pane: Identifiable {
               request["subtype"]?.string == "can_use_tool", let requestID = message["request_id"]?.string,
               let tool = request["tool_name"]?.string, tool.hasPrefix(PreviewToolbox.toolPrefix) else { return nil }
         let allowed = tool.hasPrefix(DeviceToolbox.toolPrefix)
-            ? DevicePolicy.autoAllow(tool: tool, device: deviceID.flatMap { deviceHub?.device($0) },
-                                     actionsOnVirtualDevices: Prefs.bool(Prefs.deviceActions))
+            ? devicePermission(tool: tool, input: request["input"] ?? [:])
             : PreviewPolicy.autoAllow(tool: tool, pageURL: preview?.pageURL ?? previewURL,
                                       actionsOnLocalPages: Prefs.bool(Prefs.previewLocalActions))
         guard allowed else { return nil }
         var response: [String: JSON] = ["behavior": "allow", "updatedInput": request["input"] ?? [:]]
         if let toolUseID = request["tool_use_id"]?.string { response["toolUseID"] = .string(toolUseID) }
         return ChatTranscript.controlSuccess(requestID, .object(response))
+    }
+
+    private func devicePermission(tool: String, input: JSON) -> Bool {
+        let target = DeviceToolbox.target(tool: tool, input: input, devices: deviceHub?.devices ?? [], sessionDeviceID: deviceID)
+        return DevicePolicy.autoAllow(tool: tool, target: target, userChose: userChoseDevice && target?.id == deviceID,
+                                      actionsOnVirtualDevices: Prefs.bool(Prefs.deviceActions))
     }
 
     private func cancelToolCalls() {
@@ -457,8 +479,16 @@ extension Pane: DeviceHost {
 
     func use(_ device: DeviceInfo, reveal: Bool) throws -> DeviceDriver {
         guard let deviceHub else { throw DeviceError.failed("Devices are not available.") }
+        if deviceID != device.id { userChoseDevice = false }
         deviceID = device.id
         if reveal { showDevice = true }
-        return deviceHub.controller(for: device)
+        let controller = deviceHub.controller(for: device)
+        // Marks the stream as in use for the whole call, which can outlast the hub's idle limit (booting, waiting).
+        if let activity = deviceActivity {
+            if busyController !== controller { busyController?.activity = nil }
+            controller.activity = activity
+            busyController = controller
+        }
+        return controller
     }
 }

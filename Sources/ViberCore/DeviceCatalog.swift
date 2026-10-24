@@ -4,8 +4,9 @@ public enum DevicePlatform: String, Codable, Sendable { case ios, android }
 public enum DeviceKind: String, Codable, Sendable { case simulator, emulator, physical }
 public enum DeviceState: String, Sendable { case booted, booting, shutdown, shuttingDown, unknown }
 
-/// A phone or tablet Viber can show and Claude can drive: a simulator, an emulator or (later) a USB device.
+/// A phone or tablet Viber can show and Claude can drive: an iOS simulator, an Android emulator or a USB phone.
 public struct DeviceInfo: Equatable, Identifiable, Sendable {
+    /// A simulator's UDID, an emulator's AVD name (stable across boots) or a phone's adb serial.
     public var id: String
     public var name: String
     public var platform: DevicePlatform
@@ -13,17 +14,25 @@ public struct DeviceInfo: Equatable, Identifiable, Sendable {
     /// "iOS 26.5"
     public var os: String
     public var state: DeviceState
-    /// e.g. com.apple.CoreSimulator.SimDeviceType.iPhone-17
+    /// e.g. com.apple.CoreSimulator.SimDeviceType.iPhone-17, or an AVD's hardware profile (pixel_8)
     public var typeIdentifier: String
+    /// Android: the adb serial while it is connected (emulator-5554).
+    public var serial: String?
 
-    public init(id: String, name: String, platform: DevicePlatform, kind: DeviceKind, os: String, state: DeviceState, typeIdentifier: String = "") {
+    public init(id: String, name: String, platform: DevicePlatform, kind: DeviceKind, os: String, state: DeviceState,
+                typeIdentifier: String = "", serial: String? = nil) {
         self.id = id; self.name = name; self.platform = platform; self.kind = kind; self.os = os; self.state = state
-        self.typeIdentifier = typeIdentifier
+        self.typeIdentifier = typeIdentifier; self.serial = serial
     }
 
     public var isBooted: Bool { state == .booted }
     public var isVirtual: Bool { kind != .physical }
-    public var isPhone: Bool { name.hasPrefix("iPhone") || typeIdentifier.contains("iPhone") || platform == .android }
+    public var isPhone: Bool {
+        switch platform {
+        case .ios: return name.hasPrefix("iPhone") || typeIdentifier.contains("iPhone")
+        case .android: return !name.lowercased().contains("tablet") && !typeIdentifier.lowercased().contains("tablet")
+        }
+    }
     /// "iPhone 17 · iOS 26.5"
     public var label: String { "\(name) · \(os)" }
     /// OS version as numbers, for "newest first".
@@ -66,19 +75,23 @@ public enum DeviceCatalog {
         }
     }
 
-    /// Booted first, then phones before tablets, newest OS first, then by name.
+    /// Running simulators and emulators first, then running USB phones, then iOS before Android, phones before tablets,
+    /// newest OS first, then by name.
     public static func sorted(_ devices: [DeviceInfo]) -> [DeviceInfo] {
-        devices.sorted { a, b in
-            if a.isBooted != b.isBooted { return a.isBooted }
+        func rank(_ d: DeviceInfo) -> Int { d.isBooted ? (d.isVirtual ? 0 : 1) : 2 }
+        return devices.sorted { a, b in
+            if rank(a) != rank(b) { return rank(a) < rank(b) }
+            if a.platform != b.platform { return a.platform == .ios }
             if a.isPhone != b.isPhone { return a.isPhone }
             if a.osVersion != b.osVersion { return a.osVersion.lexicographicallyPrecedes(b.osVersion) == false }
             return a.name.localizedStandardCompare(b.name) == .orderedAscending
         }
     }
 
-    /// What to open when nothing was asked for: a booted device, else the newest iPhone.
+    /// What to open when nothing was asked for: a running simulator or emulator, else the newest iPhone.
+    /// Never a USB phone: those hold someone's real data, so they are only used when named.
     public static func preferred(_ devices: [DeviceInfo]) -> DeviceInfo? {
-        sorted(devices).first
+        sorted(devices).first(where: \.isVirtual)
     }
 
     /// A device by id or name ("iPhone 17", "iphone 17 pro", "iPhone 16 iOS 18.6"). Booted and newest win ties.
@@ -96,21 +109,32 @@ public enum DeviceCatalog {
     }
 }
 
-/// Something in a command's output that can run on a device: a simulator build or an Expo dev server.
+/// Something in a command's output that can run on a device: a simulator build, an Android build or an Expo dev server.
 public enum DeviceArtifact: Equatable, Sendable {
     /// A `.app` built for the iOS simulator.
     case app(String)
+    /// An `.apk` from a Gradle build.
+    case apk(String)
     /// An `exp://` URL that opens the project in Expo Go.
     case expo(String)
 
     public var label: String {
         switch self {
-        case .app(let path): return "Run \((path as NSString).lastPathComponent) on device"
+        case .app(let path), .apk(let path): return "Run \((path as NSString).lastPathComponent) on device"
         case .expo: return "Open in Expo Go on device"
         }
     }
 
-    /// The last simulator app or Expo URL the output mentions.
+    /// The platform it runs on; nil when either will do.
+    public var platform: DevicePlatform? {
+        switch self {
+        case .app: return .ios
+        case .apk: return .android
+        case .expo: return nil
+        }
+    }
+
+    /// The last simulator app, Android build or Expo URL the output mentions.
     public static func detect(in text: String) -> DeviceArtifact? {
         let plain = text.replacingOccurrences(of: "\u{1B}\\[[0-9;]*[A-Za-z]", with: "", options: .regularExpression)
         if let range = plain.range(of: #"exp://[A-Za-z0-9.\-]+(?::\d{2,5})?(?:/[^\s"'`<>)\]]*)?"#, options: [.regularExpression, .backwards]) {
@@ -118,6 +142,9 @@ public enum DeviceArtifact: Equatable, Sendable {
         }
         if let range = plain.range(of: #"/[^\s"'`<>]*-iphonesimulator/[^\s"'`<>/]+\.app(?=[\s"'`<>/]|$)"#, options: [.regularExpression, .backwards]) {
             return .app(String(plain[range]))
+        }
+        if let range = plain.range(of: #"/[^\s"'`<>]*/build/outputs/apk/[^\s"'`<>]*?\.apk(?=[\s"'`<>]|$)"#, options: [.regularExpression, .backwards]) {
+            return .apk(String(plain[range]))
         }
         return nil
     }

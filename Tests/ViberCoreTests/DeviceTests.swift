@@ -107,6 +107,7 @@ final class FakeDevice: DeviceDriver {
     var device: DeviceInfo
     var screenSize: CGSize? = CGSize(width: 402, height: 874)
     var lastTree: UITree?
+    var homeApp: String? = "SpringBoard"
     var tree = UITreeTests.settings()
     var gestures: [([CGPoint], TimeInterval)] = []
     var typed: [String] = []
@@ -127,7 +128,8 @@ final class FakeDevice: DeviceDriver {
     func install(_ path: String) async throws -> String { "com.example.app" }
     func launch(_ app: String, arguments: [String], terminateRunning: Bool) async throws { launched.append(app) }
     func openURL(_ url: String) async throws {}
-    func logs(process: String?, seconds: Int) async throws -> String { "Timestamp Ty Process\nline one\nline two" }
+    var logText = "Timestamp Ty Process\nline one\nline two"
+    func logs(process: String?, seconds: Int) async throws -> String { logText }
     func settle(afterAction: Bool) async {}
 }
 
@@ -258,12 +260,43 @@ final class DeviceToolboxTests: XCTestCase {
     func testPolicy() {
         let sim = DeviceInfo(id: "P", name: "iPhone", platform: .ios, kind: .simulator, os: "iOS 26.5", state: .booted)
         let phone = DeviceInfo(id: "X", name: "Pixel", platform: .android, kind: .physical, os: "Android 15", state: .booted)
-        XCTAssertTrue(DevicePolicy.autoAllow(tool: "mcp__viber__device_screenshot", device: phone, actionsOnVirtualDevices: false))
-        XCTAssertTrue(DevicePolicy.autoAllow(tool: "mcp__viber__device_tap", device: sim, actionsOnVirtualDevices: true))
-        XCTAssertTrue(DevicePolicy.autoAllow(tool: "mcp__viber__device_tap", device: nil, actionsOnVirtualDevices: true))
-        XCTAssertFalse(DevicePolicy.autoAllow(tool: "mcp__viber__device_tap", device: sim, actionsOnVirtualDevices: false))
-        XCTAssertFalse(DevicePolicy.autoAllow(tool: "mcp__viber__device_tap", device: phone, actionsOnVirtualDevices: true))
-        XCTAssertFalse(DevicePolicy.autoAllow(tool: "mcp__viber__preview_click", device: sim, actionsOnVirtualDevices: true))
+        func allow(_ tool: String, _ target: DeviceInfo?, chose: Bool = false, actions: Bool = true) -> Bool {
+            DevicePolicy.autoAllow(tool: "mcp__viber__" + tool, target: target, userChose: chose, actionsOnVirtualDevices: actions)
+        }
+        XCTAssertTrue(allow("device_screenshot", sim, actions: false))
+        XCTAssertTrue(allow("device_tap", sim))
+        XCTAssertTrue(allow("device_tap", nil))
+        XCTAssertFalse(allow("device_tap", sim, actions: false))
+        XCTAssertFalse(allow("preview_click", sim))
+        // A phone: looking needs the user's choice, acting always asks.
+        XCTAssertTrue(allow("device_screenshot", phone, chose: true))
+        XCTAssertFalse(allow("device_screenshot", phone))
+        XCTAssertFalse(allow("device_open", phone))
+        XCTAssertFalse(allow("device_tap", phone, chose: true))
+        XCTAssertTrue(allow("device_list", phone))
+    }
+
+    func testTargetMirrorsOpenAndResolve() {
+        let phone = DeviceInfo(id: "X", name: "Pixel 9", platform: .android, kind: .physical, os: "Android 16", state: .booted, serial: "X")
+        let devices = host().devices + [phone]
+        func target(_ tool: String, _ input: JSON = [:], session: String? = nil) -> String? {
+            DeviceToolbox.target(tool: "mcp__viber__" + tool, input: input, devices: devices, sessionDeviceID: session)?.id
+        }
+        XCTAssertEqual(target("device_open", ["device": "pixel"]), "X")
+        XCTAssertEqual(target("device_open"), "P", "never a phone unless named")
+        XCTAssertEqual(target("device_tap"), "P")
+        XCTAssertEqual(target("device_tap", session: "X"), "X")
+        XCTAssertNil(target("device_tap", session: "gone"))
+        XCTAssertNil(target("device_list"))
+    }
+
+    func testToolsNeverFallBackToAPhone() async {
+        let host = FakeHost([DeviceInfo(id: "X", name: "Pixel 9", platform: .android, kind: .physical, os: "Android 16", state: .booted)])
+        let tap = await DeviceToolbox.call("device_tap", ["x": 1, "y": 1], host: host)
+        XCTAssertEqual(tap.text, "No simulator or emulator is running. Call device_open to boot one.")
+        host.sessionDeviceID = "gone"
+        let gone = await DeviceToolbox.call("device_screenshot", [:], host: host)
+        XCTAssertTrue(gone.text.contains("not available any more"), gone.text)
     }
 
     func testTheViberServerCombinesToolSets() {

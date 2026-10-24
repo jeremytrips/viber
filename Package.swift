@@ -14,6 +14,6 @@ let package = Package(
         .target(name: "SimulatorBridge"),
         .executableTarget(name: "Viber", dependencies: ["ViberCore", "SimulatorBridge"]),
         .executableTarget(name: "ViberCtl", dependencies: ["ViberCore"]),
-        .testTarget(name: "ViberCoreTests", dependencies: ["ViberCore"])
+        .testTarget(name: "ViberCoreTests", dependencies: ["ViberCore"], resources: [.copy("Fixtures")])
     ]
 )

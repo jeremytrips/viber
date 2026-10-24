@@ -4,12 +4,12 @@ import SimulatorBridge
 import SwiftUI
 import ViberCore
 
-/// The device panel beside a session's chat: the user and Claude look at and use the same simulator.
+/// The device panel beside a session's chat: the user and Claude look at and use the same simulator or emulator.
 struct DevicePanel: View {
     let pane: Pane
     let hub: DeviceHub
 
-    private var controller: SimulatorController? { pane.deviceID.flatMap { hub.controllers[$0] } }
+    private var controller: (any DeviceController)? { pane.deviceID.flatMap { hub.controllers[$0] } }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -36,10 +36,10 @@ struct DevicePanel: View {
             devicePicker
             Spacer(minLength: 4)
             if let controller, controller.device.isBooted {
-                Button { Task { try? await controller.press(.home) } } label: { Image(systemName: "house") }
-                    .help("Home (⇧⌘H)")
-                Button { Task { try? await controller.press(.lock) } } label: { Image(systemName: "lock") }
-                    .help("Lock")
+                ForEach(controller.toolbarButtons, id: \.self) { button in
+                    Button { Task { try? await controller.press(button) } } label: { Image(systemName: Self.icon(button)) }
+                        .help(Self.help(button))
+                }
                 Button { pane.attachDeviceScreenshot() } label: { Image(systemName: "camera") }
                     .disabled(!controller.isStreaming)
                     .help("Attach a screenshot to your message")
@@ -51,13 +51,15 @@ struct DevicePanel: View {
             }
             Menu {
                 if let controller {
-                    Button("Open in Simulator") { DevicePanel.openInSimulator(controller.device.id) }
+                    if let title = controller.externalApp { Button(title) { controller.openExternally() } }
                     Button("Copy Screenshot") { controller.copyScreenshot() }.disabled(!controller.isStreaming)
-                    Divider()
-                    if controller.device.isBooted {
-                        Button("Shut Down \(controller.device.name)") { Task { await controller.shutdown(); _ = try? await hub.refresh() } }
-                    } else {
-                        Button("Boot \(controller.device.name)") { Task { try? await controller.boot(); _ = try? await hub.refresh() } }
+                    if controller.canPowerCycle {
+                        Divider()
+                        if controller.device.isBooted {
+                            Button("Shut Down \(controller.device.name)") { Task { await controller.shutdown(); _ = try? await hub.refresh() } }
+                        } else {
+                            Button("Boot \(controller.device.name)") { Task { try? await controller.boot(); _ = try? await hub.refresh() } }
+                        }
                     }
                 }
                 Button("Refresh Device List") { Task { _ = try? await hub.refresh() } }
@@ -83,7 +85,7 @@ struct DevicePanel: View {
             }
         } label: {
             HStack(spacing: 5) {
-                Image(systemName: "iphone")
+                Image(systemName: Self.icon(controller?.device))
                 Text(controller?.device.name ?? "Choose a device").lineLimit(1)
                 if let controller, !controller.device.isBooted { Text("off").foregroundStyle(.secondary) }
             }
@@ -94,7 +96,37 @@ struct DevicePanel: View {
     }
 
     private func pickButton(_ device: DeviceInfo) -> some View {
-        Button(device.label) { pane.chooseDevice(device, boot: true) }
+        Button { pane.chooseDevice(device, boot: true) } label: { Label(device.label, systemImage: Self.icon(device)) }
+    }
+
+    static func icon(_ device: DeviceInfo?) -> String {
+        guard let device else { return "iphone" }
+        if device.platform == .ios { return device.isPhone ? "iphone" : "ipad" }
+        return device.kind == .physical ? "cable.connector" : "smartphone"
+    }
+
+    static func icon(_ button: DeviceButton) -> String {
+        switch button {
+        case .home: return "house"
+        case .lock: return "lock"
+        case .back: return "chevron.backward"
+        case .app_switch: return "square.on.square"
+        case .siri: return "mic"
+        case .volume_up: return "speaker.plus"
+        case .volume_down: return "speaker.minus"
+        }
+    }
+
+    static func help(_ button: DeviceButton) -> String {
+        switch button {
+        case .home: return "Home (⇧⌘H)"
+        case .lock: return "Lock"
+        case .back: return "Back"
+        case .app_switch: return "Recent apps"
+        case .siri: return "Siri"
+        case .volume_up: return "Volume up"
+        case .volume_down: return "Volume down"
+        }
     }
 
     // MARK: Content
@@ -102,29 +134,39 @@ struct DevicePanel: View {
     @ViewBuilder
     private var content: some View {
         if let controller {
+            let device = controller.device
             if controller.booting {
-                PreviewMessage(icon: "iphone", title: "Booting \(controller.device.name)…", detail: "This takes a few seconds, longer the first time.") {
+                PreviewMessage(icon: Self.icon(device), title: "Booting \(device.name)…",
+                               detail: device.platform == .android ? "Android emulators take up to a minute." : "This takes a few seconds, longer the first time.") {
                     ProgressView().controlSize(.small)
                 }
-            } else if !controller.device.isBooted {
-                PreviewMessage(icon: "iphone.slash", title: "\(controller.device.name) is off", detail: controller.failure ?? "\(controller.device.os). Boot it to see it here, or ask Claude to open it.") {
-                    Button("Boot") { Task { try? await controller.boot(); _ = try? await hub.refresh() } }.keyboardShortcut(.defaultAction)
+            } else if !device.isBooted {
+                if controller.canPowerCycle {
+                    PreviewMessage(icon: "iphone.slash", title: "\(device.name) is off", detail: controller.failure ?? "\(device.os). Boot it to see it here, or ask Claude to open it.") {
+                        Button("Boot") { Task { try? await controller.boot(); _ = try? await hub.refresh() } }.keyboardShortcut(.defaultAction)
+                    }
+                } else {
+                    PreviewMessage(icon: "cable.connector.slash", title: "\(device.name) is not ready",
+                                   detail: controller.failure ?? "Connect it with USB, unlock it and allow USB debugging.") {
+                        Button("Retry") { Task { try? await controller.boot(); _ = try? await hub.refresh() } }.keyboardShortcut(.defaultAction)
+                    }
                 }
             } else if let failure = controller.failure, !controller.isStreaming {
-                PreviewMessage(icon: "exclamationmark.triangle", title: "The live screen is not available", detail: failure + "\n\nClaude's device tools still work through simctl where they can.") {
+                PreviewMessage(icon: "exclamationmark.triangle", title: "The live screen is not available",
+                               detail: failure + "\n\nClaude's device tools still work through \(device.platform == .android ? "adb" : "simctl") where they can.") {
                     Button("Retry") { controller.startStream() }
-                    Button("Open in Simulator") { DevicePanel.openInSimulator(controller.device.id) }
+                    if let title = controller.externalApp { Button(title) { controller.openExternally() } }
                 }
             } else {
                 DeviceScreenHost(controller: controller)
             }
         } else if let error = hub.listError, hub.devices.isEmpty {
-            PreviewMessage(icon: "exclamationmark.triangle", title: "No simulators", detail: error) {
+            PreviewMessage(icon: "exclamationmark.triangle", title: "No devices", detail: error) {
                 Button("Retry") { Task { _ = try? await hub.refresh() } }
             }
         } else {
             PreviewMessage(icon: "iphone", title: "Device",
-                           detail: "Choose a simulator to show here, or ask Claude to open one. Claude can install and launch your app, take screenshots, read the screen and tap through it, on the screen you see.") {
+                           detail: "Choose a simulator or emulator to show here, or ask Claude to open one. Claude can install and launch your app, take screenshots, read the screen and tap through it, on the screen you see.") {
                 ForEach(hub.devices.prefix(3)) { device in
                     Button(device.isBooted ? "Show \(device.name)" : "Boot \(device.name)") { pane.chooseDevice(device, boot: true) }
                 }
@@ -134,27 +176,26 @@ struct DevicePanel: View {
 
     @ViewBuilder
     private var overlay: some View {
-        Group {
-            if let activity = pane.deviceActivity {
-                Label("Claude: \(activity)", systemImage: "sparkles")
-            } else if controller?.picking == true {
-                Text("Click an element to attach it to your message.")
-            } else if let note = controller?.inputFailure {
-                Label(note, systemImage: "hand.raised").lineLimit(3)
-            }
+        // Only with something to say: padding and a capsule around nothing still draw an empty pill.
+        if let (text, icon) = overlayNote {
+            Label { Text(text).lineLimit(3) } icon: { if let icon { Image(systemName: icon) } }
+                .font(.caption).padding(.horizontal, 10).padding(.vertical, 5)
+                .background(Capsule().fill(.regularMaterial)).padding(10)
         }
-        .font(.caption).padding(.horizontal, 10).padding(.vertical, 5)
-        .background(Capsule().fill(.regularMaterial)).padding(10)
     }
 
-    static func openInSimulator(_ udid: String) {
-        Task.detached { Shell.run("open", ["-a", "Simulator", "--args", "-CurrentDeviceUDID", udid]) }
+    private var overlayNote: (String, String?)? {
+        if let activity = pane.deviceActivity { return ("Claude: \(activity)", "sparkles") }
+        if let note = controller?.busyNote { return (note, "hourglass") }
+        if controller?.picking == true { return ("Click an element to attach it to your message.", nil) }
+        if let note = controller?.inputFailure { return (note, "hand.raised") }
+        return nil
     }
 }
 
 /// Puts the controller's long-lived screen view into whichever container is on screen.
 struct DeviceScreenHost: NSViewRepresentable {
-    let controller: SimulatorController
+    let controller: any DeviceController
 
     func makeNSView(context: Context) -> DeviceScreenContainer {
         let container = DeviceScreenContainer()
@@ -170,10 +211,12 @@ struct DeviceScreenHost: NSViewRepresentable {
 }
 
 final class DeviceScreenContainer: NSView {
-    weak var controller: SimulatorController?
+    weak var controller: (any DeviceController)?
 
     func adopt() {
         guard let view = controller?.screenView, view.superview !== self else { return }
+        // Another device's screen shown here before: let it go, so its stream counts as unwatched.
+        for old in subviews where old !== view { old.removeFromSuperview() }
         view.removeFromSuperview()
         view.frame = bounds
         view.autoresizingMask = [.width, .height]
@@ -192,9 +235,9 @@ final class DeviceScreenContainer: NSView {
     }
 }
 
-/// The simulator's screen: its IOSurface as layer contents, redrawn on every frame, and the user's mouse and keys as touches.
+/// The device's screen: an IOSurface as layer contents, redrawn on every frame, and the user's mouse and keys as touches.
 final class DeviceScreenView: NSView {
-    weak var controller: SimulatorController?
+    weak var controller: (any DeviceController)?
     private let content = CALayer()
     private var pixelSize = CGSize(width: 1206, height: 2622)
     private var scrollEnd: DispatchWorkItem?
@@ -216,14 +259,20 @@ final class DeviceScreenView: NSView {
     override var acceptsFirstResponder: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
+    /// Shows a surface (a new one per frame for decoded video). Lays out again only when the size changes.
     func show(_ surface: IOSurface?) {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         content.contents = surface
-        if let surface { pixelSize = CGSize(width: IOSurfaceGetWidth(surface), height: IOSurfaceGetHeight(surface)) }
         content.isHidden = surface == nil
         CATransaction.commit()
-        needsLayout = true
+        if let surface {
+            let size = CGSize(width: IOSurfaceGetWidth(surface), height: IOSurfaceGetHeight(surface))
+            if size != pixelSize {
+                pixelSize = size
+                needsLayout = true
+            }
+        }
     }
 
     /// The simulator drew into the same surface: tell Core Animation the contents changed.
@@ -256,8 +305,10 @@ final class DeviceScreenView: NSView {
         CATransaction.setDisableActions(true)
         let rect = screenRect
         content.frame = rect
-        // Roughly the corner radius of current iPhones (about 55 pt on a 402 pt wide screen).
-        content.cornerRadius = rect.width * (pixelSize.width < pixelSize.height ? 0.135 : 0.06)
+        // Roughly the corner radius of current iPhones (about 55 pt on a 402 pt wide screen); Pixel corners are smaller.
+        let portrait = pixelSize.width < pixelSize.height
+        content.cornerRadius = controller?.device.platform == .android
+            ? min(rect.width, rect.height) * 0.08 : rect.width * (portrait ? 0.135 : 0.06)
         CATransaction.commit()
     }
 
@@ -309,12 +360,12 @@ final class DeviceScreenView: NSView {
         // ⌘ shortcuts stay Viber's (paste arrives as paste(_:)).
         if event.modifierFlags.contains(.command) { super.keyDown(with: event); return }
         if event.keyCode == 0x35, controller?.picking == true { controller?.picking = false; return }
-        controller?.userKey(macKeyCode: event.keyCode, down: true)
+        controller?.userKey(event, down: true)
     }
 
     override func keyUp(with event: NSEvent) {
         if event.modifierFlags.contains(.command) { return }
-        controller?.userKey(macKeyCode: event.keyCode, down: false)
+        controller?.userKey(event, down: false)
     }
 
     override func flagsChanged(with event: NSEvent) {
@@ -326,7 +377,7 @@ final class DeviceScreenView: NSView {
         default: flag = nil
         }
         guard let flag else { return }
-        controller?.userKey(macKeyCode: event.keyCode, down: event.modifierFlags.contains(flag))
+        controller?.userKey(event, down: event.modifierFlags.contains(flag))
     }
 
     @objc func paste(_ sender: Any?) { controller?.pasteFromMac() }
@@ -335,13 +386,19 @@ final class DeviceScreenView: NSView {
 
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = NSMenu()
-        menu.addItem(withTitle: "Home", action: #selector(home), keyEquivalent: "").target = self
-        menu.addItem(withTitle: "Lock", action: #selector(lock), keyEquivalent: "").target = self
-        menu.addItem(.separator())
+        for button in controller?.toolbarButtons ?? [] {
+            let item = menu.addItem(withTitle: DevicePanel.help(button).replacingOccurrences(of: " (⇧⌘H)", with: ""),
+                                    action: #selector(pressButton(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = button.rawValue
+        }
+        if menu.numberOfItems > 0 { menu.addItem(.separator()) }
         menu.addItem(withTitle: "Copy Screenshot", action: #selector(copy(_:)), keyEquivalent: "").target = self
         return menu
     }
 
-    @objc private func home() { Task { @MainActor in try? await controller?.press(.home) } }
-    @objc private func lock() { Task { @MainActor in try? await controller?.press(.lock) } }
+    @objc private func pressButton(_ item: NSMenuItem) {
+        guard let raw = item.representedObject as? String, let button = DeviceButton(rawValue: raw) else { return }
+        Task { @MainActor in try? await controller?.press(button) }
+    }
 }
