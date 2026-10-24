@@ -5,16 +5,21 @@ import ViberCore
 struct SidebarView: View {
     @Environment(AppModel.self) private var model
 
-    private var groups: [(path: String, name: String, panes: [Pane])] {
+    private var groups: [(path: String, name: String, panes: [Pane], jobs: [WorktreeJob])] {
         var order: [String] = []
         var byProject: [String: [Pane]] = [:]
+        var jobsByProject: [String: [WorktreeJob]] = [:]
         for pane in model.panes {
             if byProject[pane.projectPath] == nil { order.append(pane.projectPath) }
             byProject[pane.projectPath, default: []].append(pane)
         }
+        for job in model.jobs {
+            if byProject[job.project] == nil && jobsByProject[job.project] == nil { order.append(job.project) }
+            jobsByProject[job.project, default: []].append(job)
+        }
         return order.map { path in
             let panes = byProject[path] ?? []
-            return (path, panes.first?.projectName ?? path, panes)
+            return (path, panes.first?.projectName ?? AppModel.projectName(path), panes, jobsByProject[path] ?? [])
         }
     }
 
@@ -30,6 +35,11 @@ struct SidebarView: View {
                         PaneRow(pane: pane, index: model.panes.firstIndex { $0.id == pane.id } ?? 0)
                             .tag(Target.pane(pane.id))
                             .contextMenu { PaneRowMenu(pane: pane) }
+                    }
+                    ForEach(group.jobs) { job in
+                        WorktreeJobRow(job: job)
+                            .tag(Target.job(job.id))
+                            .contextMenu { WorktreeJobMenu(job: job) }
                     }
                 } header: {
                     ProjectHeader(name: group.name, path: group.path)
@@ -148,10 +158,12 @@ struct PaneRow: View {
                 Text(pane.title).lineLimit(1).fontWeight(.medium)
                 HStack(spacing: 5) {
                     Chip(text: pane.profileLabel)
-                    if let worktree = pane.worktree, let branch = pane.branch {
-                        // The last part, so "feat/NEX-705-…" shows its ticket in the narrow chip.
-                        Chip(text: "⑂ " + (branch.split(separator: "/").last.map(String.init) ?? branch))
-                            .help(branch == worktree.branch ? branch : "\(branch), created as \(worktree.branch)")
+                    if let worktree = pane.worktree {
+                        if let branch = pane.branch {
+                            // The last part, so "feat/NEX-705-…" shows its ticket in the narrow chip.
+                            Chip(text: "⑂ " + (branch.split(separator: "/").last.map(String.init) ?? branch))
+                                .help(worktree.branch.isEmpty || branch == worktree.branch ? branch : "\(branch), created as \(worktree.branch)")
+                        }
                         if let diff = pane.diffStat { Text(diff).font(.caption2.monospaced()).foregroundStyle(.secondary) }
                     } else {
                         Text(pane.state.label).font(.caption).foregroundStyle(.secondary)

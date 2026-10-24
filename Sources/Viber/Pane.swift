@@ -123,8 +123,13 @@ final class Pane: Identifiable {
     /// What ideas are filed under: the repo root for worktree sessions, else the session's folder.
     var projectPath: String { worktree?.repo ?? spec.cwd }
     var projectName: String { URL(fileURLWithPath: projectPath).lastPathComponent }
-    /// The worktree's branch as it is now, or the one Viber created until it is read (and while HEAD is detached).
-    var branch: String? { worktree.map { liveBranch ?? $0.branch } }
+    /// The worktree's branch as it is now, or the one it was created on until it is read (and while HEAD is detached).
+    /// Nil when there is neither: a hook can make a worktree on a detached HEAD.
+    var branch: String? {
+        guard let worktree else { return nil }
+        let branch = liveBranch ?? worktree.branch
+        return branch.isEmpty ? nil : branch
+    }
     var isRunning: Bool { process?.isRunning == true }
 
     func start(binDir: String?, pluginDir: String?) {
