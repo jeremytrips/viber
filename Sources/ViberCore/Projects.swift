@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 
-/// What Viber groups sessions, ideas and settings under. In a git repository it is the main checkout's root, so
+/// What Viber groups sessions, issues and settings under. In a git repository it is the main checkout's root, so
 /// sessions in subfolders and in worktrees (made by Viber, by a hook or by hand) all belong to it.
 public struct Project: Codable, Equatable, Identifiable, Sendable {
     public var path: String
@@ -40,7 +40,7 @@ public struct ProjectList: Codable, Equatable {
         return true
     }
 
-    /// Takes a project out of the sidebar. Its folder, ideas and settings are left alone.
+    /// Takes a project out of the sidebar. Its folder, issues and settings are left alone.
     public mutating func remove(_ path: String) { projects.removeAll { $0.path == path } }
 
     /// An empty name, or the folder's own, goes back to showing the folder's name.

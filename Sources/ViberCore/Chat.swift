@@ -197,6 +197,8 @@ public struct ChatTranscript {
     public var rewindPreview: RewindPreview?
     /// Claude's checklist for the work at hand, as its todo or task list tools last left it.
     public private(set) var todos: [TodoItem] = []
+    /// The last turn stopped at the account's usage limit. The next message clears it.
+    public var usageLimit: UsageLimit?
 
     private struct PendingRequest {
         var subtype: String
@@ -224,6 +226,13 @@ public struct ChatTranscript {
     /// and whether it arrived while Claude was busy, so Claude reads it inside the turn already running.
     private var unanswered: [String: (readAt: Int?, inline: Bool)] = [:]
     private var relayUpdates: [RelayUpdate] = []
+    /// The last `rate_limit_event` that turned requests away, until a turn gets through.
+    private var rejection: (resetsAt: Date?, kind: String?)?
+    /// The text of the CLI's rate-limit error, when the turn's last message was one.
+    private var limitError: String?
+    /// Times in a row a usage limit outlasted the reset time it gave, counting the first stop; and that reset time.
+    private var limitHits = 0
+    private var limitResetsAt: Date?
 
     public init() {}
 
@@ -256,6 +265,8 @@ public struct ChatTranscript {
         awaitingEcho.append((items[items.count - 1].id, text, nil))
         state = .working
         turnStartedByUser = true
+        usageLimit = nil
+        limitError = nil
         let content: JSON = images.isEmpty ? .string(text)
             : .array(images.map(\.block) + (text.isEmpty ? [] : [["type": "text", "text": .string(text)]]))
         return ["type": "user", "message": ["role": "user", "content": content]]
@@ -690,10 +701,11 @@ public struct ChatTranscript {
         case "assistant": applyAssistant(message, now: history ? (Dates.parse(message["timestamp"]?.any) ?? now) : now)
         case "user": applyUser(message, history: history, now: now)
         case "stream_event": applyStreamEvent(message)
-        case "result": applyResult(message)
+        case "result": applyResult(message, now: now)
         case "control_request": return applyControlRequest(message)
         case "control_cancel_request": cancelPrompt(requestID: message["request_id"]?.string ?? "")
         case "control_response": return applyControlResponse(message, now: now)
+        case "rate_limit_event": rejection = UsageLimit.rejected(message["rate_limit_info"])
         case "attachment":
             // In transcripts, a task notification that came in mid-turn is stored as a queued command.
             if let prompt = message["attachment"]?["prompt"]?.string, let note = TaskNotification.parse(prompt) { applyNotification(note) }
@@ -716,6 +728,9 @@ public struct ChatTranscript {
         }
         streamingText = ""
         state = .idle
+        // A limit the transcript ran into is long gone, or comes back with the next turn.
+        limitError = nil
+        rejection = nil
     }
 
     /// Each `agent-<id>.jsonl` holds what one subagent did; its `.meta.json` names the Agent call.
@@ -785,6 +800,10 @@ public struct ChatTranscript {
         guard let body = message["message"] else { return }
         let messageID = body["id"]?.string ?? UUID().uuidString
         if let parent = message["parent_tool_use_id"]?.string { return applyAgentAssistant(body, messageID: messageID, parent: parent) }
+        // A turn turned away by a limit ends with a made-up message from the CLI, "You've hit your session limit · resets 11:30pm".
+        // Transcripts keep the limit's details beside it.
+        limitError = message["error"]?.string == "rate_limit" ? Self.userText(body["content"]) : nil
+        if let info = UsageLimit.rejected(message["apiErrorParams"]?["rate_limit_info"]) { rejection = info }
         for block in body["content"]?.array ?? [] {
             let n = blockCounts[messageID, default: 0]
             blockCounts[messageID] = n + 1
@@ -1026,20 +1045,38 @@ public struct ChatTranscript {
         }
     }
 
-    private mutating func applyResult(_ message: JSON) {
+    private mutating func applyResult(_ message: JSON, now: Date) {
         streamingText = ""
         isThinking = false
         if let cost = message["total_cost_usd"]?.double { costUSD = cost }
         if let ms = message["duration_ms"]?.double { lastTurnSeconds = ms / 1000 }
         let isError = message["is_error"]?.bool ?? false
         let subtype = message["subtype"]?.string ?? "success"
-        if isError || subtype != "success" {
+        // A limit's error is already in the chat, as the CLI's message.
+        if isError || subtype != "success", limitError == nil || message["result"]?.string != limitError {
             let detail = message["result"]?.string ?? (message["errors"]?.array?.compactMap(\.string).joined(separator: "\n"))
             append(.notice(detail.flatMap { $0.isEmpty ? nil : $0 } ?? "The turn ended with \(subtype).", isError: true))
         }
+        noteLimit(isError: isError, text: message["result"]?.string, now: now)
         answerRelays(turnEnded: true)
         guard pendingPromptCount == 0 else { return }
-        state = isError ? .failed : .finished
+        state = isError || usageLimit != nil ? .failed : .finished
+    }
+
+    /// Whether the turn ended at a usage limit: on the CLI's rate-limit error, or failing while a limit turns requests away.
+    private mutating func noteLimit(isError: Bool, text: String?, now: Date) {
+        defer { limitError = nil }
+        guard limitError != nil || (isError && rejection != nil) else {
+            if !isError { rejection = nil }
+            limitHits = 0
+            limitResetsAt = nil
+            usageLimit = nil
+            return
+        }
+        // A turn turned away before the last reset time, like one a background task started, is the same wait.
+        if limitHits == 0 || (limitResetsAt ?? .distantPast) <= now { limitHits += 1 }
+        limitResetsAt = rejection?.resetsAt ?? UsageLimit.resetTime(in: limitError ?? text ?? "", now: now)
+        usageLimit = UsageLimit(resetsAt: limitResetsAt, kind: rejection?.kind, hits: limitHits)
     }
 
     private mutating func applyControlRequest(_ message: JSON) -> [JSON] {

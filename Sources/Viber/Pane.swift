@@ -14,6 +14,9 @@ struct PaneRecord: Codable {
     var extraDirs: [String]?
     var preview: PreviewRecord?
     var device: DeviceRecord?
+    /// A usage limit the session is waiting out, and when Viber sends it on.
+    var usageLimit: UsageLimit?
+    var continueAt: Date?
 }
 
 struct PreviewRecord: Codable {
@@ -51,6 +54,8 @@ final class Pane: Identifiable {
     var liveBranch: String?
     var lastActivity = Date()
     var pendingClose: ViberRequest?
+    /// When Viber tells the session to carry on after the usage limit stopped it: once the limit resets.
+    var continueAt: Date? { didSet { if continueAt != oldValue { onPersist?() } } }
     /// When Stop was last pressed, so an autopilot run can tell your stop from Claude ending its turn.
     @ObservationIgnored var interruptedAt: Date?
     /// `//` messages this session has yet to answer, by the chat item each arrived as.
@@ -112,13 +117,18 @@ final class Pane: Identifiable {
         deviceID = record.device?.id
         showDevice = record.device?.open ?? false
         userChoseDevice = record.device?.chosen ?? false
+        if let limit = record.usageLimit, let at = record.continueAt {
+            chat.usageLimit = limit
+            continueAt = at
+        }
     }
 
     var record: PaneRecord {
         let preview = previewURL != nil || showPreview ? PreviewRecord(url: previewURL?.absoluteString, open: showPreview) : nil
         let device = deviceID != nil || showDevice ? DeviceRecord(id: deviceID, open: showDevice, chosen: userChoseDevice ? true : nil) : nil
         return PaneRecord(id: id, title: title, spec: spec, worktree: worktree, sessionRules: sessionRules.isEmpty ? nil : sessionRules,
-                          extraDirs: extraDirs.isEmpty ? nil : extraDirs, preview: preview, device: device)
+                          extraDirs: extraDirs.isEmpty ? nil : extraDirs, preview: preview, device: device,
+                          usageLimit: continueAt == nil ? nil : chat.usageLimit, continueAt: continueAt)
     }
     var state: PaneState { chat.state }
     var profileLabel: String { spec.profile ?? "Default login" }

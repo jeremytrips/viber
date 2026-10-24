@@ -35,6 +35,7 @@ private struct GeneralSettings: View {
     @AppStorage(Prefs.previewLocalActions) private var previewLocalActions = true
     @AppStorage(Prefs.deviceTools) private var deviceTools = true
     @AppStorage(Prefs.deviceActions) private var deviceActions = true
+    @AppStorage(Prefs.continueAfterLimit) private var continueAfterLimit = true
 
     var body: some View {
         Form {
@@ -44,6 +45,14 @@ private struct GeneralSettings: View {
                 Toggle("Before a session's prompt cache expires", isOn: $notifyCache)
                 Stepper("Warn \(cacheWarningMinutes) min before it expires", value: $cacheWarningMinutes, in: 1...10)
                     .disabled(!notifyCache)
+            }
+            Section {
+                Toggle("Continue sessions when a usage limit resets", isOn: $continueAfterLimit)
+            } header: {
+                Text("Usage limits")
+            } footer: {
+                Text("When a session stops at your plan's session or weekly limit, Viber waits until the limit resets, then tells Claude to carry on. A running autopilot waits with it.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Section("New sessions") {
                 Picker("Permission mode", selection: $newSessionMode) {

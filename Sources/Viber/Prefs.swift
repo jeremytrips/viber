@@ -18,6 +18,8 @@ enum Prefs {
     static let deviceTools = "deviceTools"
     /// Approve taps, typing, installs and launches on simulators and emulators without a permission card.
     static let deviceActions = "deviceActions"
+    /// When a session stops at the account's usage limit, tell it to carry on once the limit resets.
+    static let continueAfterLimit = "continueAfterLimit"
 
     /// New worktrees' branch patterns, by the repository's main checkout. A missing one is Worktree.defaultBranchPattern.
     static let branchPatterns = "branchPatterns"
@@ -26,7 +28,7 @@ enum Prefs {
         UserDefaults.standard.register(defaults: [
             notifyFinished: true, notifyNeedsYou: true, notifyCache: true, cacheWarningMinutes: 2,
             newSessionMode: "auto", newSessionModel: "", previewTools: true, previewLocalActions: true,
-            deviceTools: true, deviceActions: true
+            deviceTools: true, deviceActions: true, continueAfterLimit: true
         ])
     }
 

@@ -14,6 +14,7 @@ struct PaneView: View {
                     ChatList(pane: pane, readOnly: false)
                     ChecklistPanel(pane: pane)
                     RunningAgentsPanel(pane: pane)
+                    UsageLimitPanel(pane: pane)
                     ComposerView(pane: pane)
                 }
                 .frame(minWidth: 320, maxWidth: .infinity)
@@ -682,6 +683,37 @@ struct ToolDetail: View {
         }
         .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.separator))
+    }
+}
+
+/// A session the usage limit stopped, pinned above the message box while Viber waits to send it on.
+struct UsageLimitPanel: View {
+    @Environment(AppModel.self) private var model
+    let pane: Pane
+
+    var body: some View {
+        if let limit = pane.chat.usageLimit, let at = pane.continueAt {
+            HStack(spacing: 10) {
+                Image(systemName: "hourglass").foregroundStyle(.orange)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("The \(limit.name) was reached").fontWeight(.semibold)
+                    Text("Viber tells Claude to carry on at \(AppModel.clock(at, now: model.now)), in \(AppModel.span(at.timeIntervalSince(model.now))).")
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 8)
+                Button("Continue Now") { model.continueAfterLimit(pane) }
+                    .help("Tell Claude to carry on now")
+                Button("Don't Continue") { model.cancelContinue(pane) }
+                    .help("Leave it stopped. Send a message when you want it to go on")
+            }
+            .font(.callout)
+            .padding(10)
+            .frame(maxWidth: 760, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.08)))
+            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.orange.opacity(0.35)))
+            .padding(.horizontal, 24).padding(.top, 6)
+            .frame(maxWidth: .infinity)
+        }
     }
 }
 
