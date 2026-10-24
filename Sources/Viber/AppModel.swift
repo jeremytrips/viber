@@ -42,10 +42,14 @@ struct NewSessionRequest {
     var profile: String?
     var useWorktree: Bool
     var name: String
+    /// The worktree's branch; nil for `branchPattern` filled in with the name.
+    var branch: String? = nil
     var permissionMode: String
     var firstMessage: String
     /// The idea this session is started for, linked to it once it opens.
     var ideaID: String?
+    /// The project's branch pattern, such as `viber/<slug>`.
+    var branchPattern = Worktree.defaultBranchPattern
 }
 
 @MainActor @Observable
@@ -61,6 +65,8 @@ final class AppModel {
     var now = Date()
     var errorMessage: String?
     var showNewSession = false
+    /// Starting values for the next New Session sheet.
+    var newSessionPrefill: NewSessionRequest?
     var showSwitcher = false
     var showResume = false
     var closing: Pane?
@@ -160,6 +166,8 @@ final class AppModel {
         let mode = request.permissionMode == "default" ? nil : request.permissionMode
         let model = Prefs.string(Prefs.newSessionModel)
         let launchModel = model.isEmpty ? nil : model
+        // Also for ideas started from the sheet, so Plan can't start a second session while the worktree is made.
+        if let id = request.ideaID { planningIdeas.insert(id) }
         if request.useWorktree {
             let job = WorktreeJob(creating: request, title: title)
             jobs.append(job)
@@ -224,6 +232,7 @@ final class AppModel {
         switch job.kind {
         case .create(let request):
             let worktreeRequest = WorktreeRequest(folder: request.folder, name: request.name.isEmpty ? job.title : request.name,
+                                                  branch: request.branch, branchPattern: request.branchPattern,
                                                   permissionMode: request.permissionMode)
             job.task = Task {
                 do {
@@ -552,11 +561,22 @@ final class AppModel {
         planningIdeas.insert(idea.id)
         let project = idea.project
         Task.detached {
-            let isRepo = Worktree.repoRoot(project) != nil
+            let root = Worktree.repoRoot(project)
+            let key = root.map { WorktreeHooks.mainCheckout($0) ?? $0 }
             await MainActor.run {
-                self.createSession(NewSessionRequest(folder: project, profile: AccountPicker.usableDefault(self), useWorktree: isRepo,
-                                                     name: idea.title, permissionMode: PermissionMode.plan.rawValue,
-                                                     firstMessage: idea.text, ideaID: idea.id))
+                let pattern = key.map { Prefs.branchPattern(project: $0) } ?? Worktree.defaultBranchPattern
+                let request = NewSessionRequest(folder: project, profile: AccountPicker.usableDefault(self), useWorktree: root != nil,
+                                                name: idea.title, permissionMode: PermissionMode.plan.rawValue,
+                                                firstMessage: idea.text, ideaID: idea.id, branchPattern: pattern)
+                guard root != nil, Worktree.needsInput(pattern) else { self.createSession(request); return }
+                // The branch needs a part only the user knows, such as a ticket number: ask in the sheet.
+                self.planningIdeas.remove(idea.id)
+                self.newSessionPrefill = request
+                Task {
+                    // The ideas popover closes in the same click.
+                    try? await Task.sleep(for: .milliseconds(200))
+                    self.showNewSession = true
+                }
             }
         }
     }

@@ -283,6 +283,8 @@ final class SimulatorController: DeviceController {
         try await Simctl.logs(device.id, process: process, seconds: seconds)
     }
 
+    func set(_ setting: DeviceSetting) async throws { try await Simctl.set(device.id, setting) }
+
     func settle(afterAction: Bool) async {
         readyStream()
         guard isStreaming else {

@@ -16,6 +16,16 @@ public enum ToolSummary {
         case "TodoWrite": if let todos = input["todos"]?.array { return "\(todos.count) items" }
         default: break
         }
+        if name == DeviceToolbox.toolPrefix + "set" {
+            var parts: [String] = []
+            if let appearance = input["appearance"]?.string { parts.append(appearance) }
+            if let latitude = input["latitude"]?.double, let longitude = input["longitude"]?.double { parts.append("\(latitude), \(longitude)") }
+            if let grant = input["grant"]?.array?.compactMap(\.string) ?? input["grant"]?.string.map({ [$0] }), !grant.isEmpty {
+                parts.append(grant.joined(separator: ", "))
+            }
+            if let bar = input["status_bar"]?.string { parts.append("\(bar) status bar") }
+            return parts.joined(separator: " · ")
+        }
         if name.hasPrefix(DeviceToolbox.toolPrefix) {
             if let device = input["device"]?.string { return device }
             if let button = input["button"]?.string { return button.replacingOccurrences(of: "_", with: " ") }
