@@ -28,9 +28,9 @@ struct DeviceRecord: Codable {
 
 /// A `//` message, or the reply to one, on its way to a session.
 struct IncomingRelay {
-    var recordID: String
     var sourcePaneID: String
     var sourceTitle: String
+    /// The "Sent to" line in the sender's chat, which shows how far the message got.
     var sentItemID: String?
     var text: String
     var isReply = false

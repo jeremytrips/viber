@@ -121,7 +121,6 @@ public enum ViberPaths {
     }
     public static var requests: URL { support.appendingPathComponent("requests") }
     public static var panes: URL { support.appendingPathComponent("panes.json") }
-    public static var relays: URL { support.appendingPathComponent("messages.json") }
     public static var ideas: URL { support.appendingPathComponent("ideas.json") }
     /// Project notes from before ideas, read once to turn them into ideas.
     public static var notes: URL { support.appendingPathComponent("notes.json") }

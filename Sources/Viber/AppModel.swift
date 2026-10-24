@@ -7,14 +7,11 @@ import ViberCore
 enum Target: Hashable {
     case pane(String)
     case external(String)
-    /// The timeline of `//` messages between sessions.
-    case messages
     /// Every project's ideas that are not planned yet.
     case ideas
 
     var key: String {
         switch self {
-        case .messages: return "messages"
         case .ideas: return "ideas"
         case .pane(let id): return "pane:\(id)"
         case .external(let id): return "ext:\(id)"
@@ -22,8 +19,7 @@ enum Target: Hashable {
     }
 
     init?(key: String) {
-        if key == "messages" { self = .messages }
-        else if key == "ideas" { self = .ideas }
+        if key == "ideas" { self = .ideas }
         else if key.hasPrefix("pane:") { self = .pane(String(key.dropFirst(5))) }
         else if key.hasPrefix("ext:") { self = .external(String(key.dropFirst(4))) }
         else { return nil }
@@ -65,7 +61,6 @@ final class AppModel {
     var showResume = false
     var closing: Pane?
     var settingsSheet: SettingsSheetRequest?
-    var relayLog = RelayLog()
     var cacheWarning: TimeInterval { TimeInterval(max(Prefs.int(Prefs.cacheWarningMinutes), 1) * 60) }
     var ideas = IdeaList()
     /// Simulators, shared by every session's device panel and device tools.
@@ -117,6 +112,8 @@ final class AppModel {
     var waitingCount: Int { panes.filter { $0.state.needsYou }.count + externals.filter { [.input, .plan, .permission].contains($0.state) }.count }
     var profiles: [ClauthStatus.Profile] { status?.profiles ?? [] }
     var defaultProfile: String? { status?.activeProfile }
+    /// The account the top bar shows: the selected chat's, else clauth's default. Nil means the plain `claude` login.
+    var shownProfileName: String? { selectedPane.map { $0.spec.profile } ?? defaultProfile }
 
     /// Folders seen in clauth's session list, most recent first.
     var recentFolders: [String] {
@@ -389,48 +386,35 @@ final class AppModel {
     func relay(_ text: String, from source: Pane, to targetID: String) {
         let message = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !message.isEmpty, let target = pane(targetID) else { return }
-        let sentID = source.chat.recordSent(to: target.title, text: message, queued: true)
-        let recordID = relayLog.add(source: (source.id, source.title), target: (target.id, target.title), text: message, queued: true)
-        target.deliver(IncomingRelay(recordID: recordID, sourcePaneID: source.id, sourceTitle: source.title, sentItemID: sentID, text: message),
+        let sentID = source.chat.recordSent(to: target.title, text: message)
+        target.deliver(IncomingRelay(sourcePaneID: source.id, sourceTitle: source.title, sentItemID: sentID, text: message),
                        binDir: binDir, pluginDir: pluginDir)
-        saveRelays()
     }
 
     /// The target's Claude read a `//` message, or answered it.
     private func relayUpdate(_ update: RelayUpdate, in target: Pane) {
         switch update {
         case .read(let item):
-            guard let relay = target.answering[item] else { return }
-            markRead(relay)
+            guard let relay = target.answering[item], let sent = relay.sentItemID else { return }
+            pane(relay.sourcePaneID)?.chat.setSentStatus(itemID: sent, .delivered)
         case .answered(let item, let text):
             guard let relay = target.answering.removeValue(forKey: item) else { return }
-            markRead(relay)
             returnReply(relay, from: target, text: text)
         }
-        saveRelays()
-    }
-
-    private func markRead(_ relay: IncomingRelay) {
-        if let sent = relay.sentItemID { pane(relay.sourcePaneID)?.chat.markDelivered(itemID: sent) }
-        relayLog.markDelivered(relay.recordID)
     }
 
     /// Posts what a session said in answer to a `//` message back to the sender, right away.
     private func returnReply(_ relay: IncomingRelay, from target: Pane, text: String) {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        relayLog.recordReply(relay.recordID, text: text)
-        guard !text.isEmpty, let source = pane(relay.sourcePaneID) else { return }
-        source.deliver(IncomingRelay(recordID: relay.recordID, sourcePaneID: target.id, sourceTitle: target.title, sentItemID: nil,
-                                     text: text, isReply: true), binDir: binDir, pluginDir: pluginDir)
+        guard let source = pane(relay.sourcePaneID) else { return }
+        if let sent = relay.sentItemID { source.chat.setSentStatus(itemID: sent, text.isEmpty ? .noReply : .replied) }
+        guard !text.isEmpty else { return }
+        source.deliver(IncomingRelay(sourcePaneID: target.id, sourceTitle: target.title, sentItemID: nil, text: text, isReply: true),
+                       binDir: binDir, pluginDir: pluginDir)
         if !(NSApp.isActive && selection == .pane(source.id)) {
-            notifier.post(id: "reply:\(relay.recordID)", title: "\(source.title) · reply from \(target.title)",
+            notifier.post(id: "reply:\(UUID().uuidString)", title: "\(source.title) · reply from \(target.title)",
                           body: String(text.prefix(180)), target: Target.pane(source.id).key, sound: false)
         }
-    }
-
-    func markMessagesSeen() {
-        relayLog.lastSeen = Date()
-        saveRelays()
     }
 
     // MARK: Ideas
@@ -735,6 +719,10 @@ final class AppModel {
                     let detail = (result.stderr.isEmpty ? result.stdout : result.stderr).trimmingCharacters(in: .whitespacesAndNewlines)
                     self.errorMessage = "Login for \(profile) failed." + (detail.isEmpty ? "" : "\n\n\(detail)")
                 }
+                // Chats that hit the dead login pick up the new one on a fresh process.
+                if result.ok {
+                    for pane in self.panes where pane.authFailed && pane.spec.profile == profile { self.restart(pane) }
+                }
                 // The daemon picks up the new login on its next pass; check back a few times.
                 self.reloadStatus()
                 for delay in [5.0, 15, 45] { self.reloadStatus(after: delay) }
@@ -762,17 +750,6 @@ final class AppModel {
         }
     }
 
-    func saveRelays() {
-        do {
-            try FileManager.default.createDirectory(at: ViberPaths.support, withIntermediateDirectories: true)
-            let encoder = JSONEncoder()
-            encoder.dateEncodingStrategy = .secondsSince1970
-            try encoder.encode(relayLog).write(to: ViberPaths.relays, options: .atomic)
-        } catch {
-            errorMessage = "Could not save messages: \(error.localizedDescription)"
-        }
-    }
-
     func saveIdeas() {
         do {
             try ideas.save()
@@ -783,11 +760,6 @@ final class AppModel {
 
     private func restore() {
         ideas = IdeaList.load()
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .secondsSince1970
-        if let data = try? Data(contentsOf: ViberPaths.relays), let log = try? decoder.decode(RelayLog.self, from: data) {
-            relayLog = log
-        }
         guard let data = try? Data(contentsOf: ViberPaths.panes),
               let records = try? JSONDecoder().decode([PaneRecord].self, from: data) else { return }
         panes = records.map(Pane.init(record:))

@@ -328,7 +328,7 @@ struct IdeaRow: View {
         HStack(spacing: 4) {
             Text(idea.createdBy == "you" ? "You" : idea.createdBy)
                 .help(idea.createdBy == "you" ? "Added by you" : "Added by the session “\(idea.createdBy)”")
-            Text("· \(RelayRow.relative(idea.createdAt, now: model.now))")
+            Text("· \(Self.relative(idea.createdAt, now: model.now))")
             if idea.status == .started, let id = idea.sessionID {
                 let pane = model.pane(id)
                 let title = pane?.title ?? idea.sessionTitle ?? "a session"
@@ -339,7 +339,7 @@ struct IdeaRow: View {
                     .disabled(pane == nil)
                     .help(pane != nil ? "Open \(title)" : "\(title) is no longer open")
             } else if idea.status == .done {
-                Text("· done \(RelayRow.relative(idea.updatedAt, now: model.now))")
+                Text("· done \(Self.relative(idea.updatedAt, now: model.now))")
             }
         }
         .font(.caption)
@@ -384,5 +384,10 @@ struct IdeaRow: View {
         guard !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         model.editIdea(idea.id, text: draft)
         editing = false
+    }
+
+    static func relative(_ date: Date, now: Date) -> String {
+        if now.timeIntervalSince(date) < 60 { return "just now" }
+        return RelativeDateTimeFormatter().localizedString(for: date, relativeTo: now)
     }
 }

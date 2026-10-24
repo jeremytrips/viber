@@ -1,124 +1,238 @@
 import SwiftUI
 import ViberCore
 
-/// clauth usage for every account: 5h / 7d windows and when they reset.
+/// The toolbar's account button: usage for the selected chat's account (clauth's default account when no
+/// chat is selected), with every account in a popover.
 struct UsageBar: View {
     @Environment(AppModel.self) private var model
+    @State private var showing = false
+
+    /// The chat's account; nil when the chat uses the plain `claude` login, which clauth has no usage for.
+    private var active: ClauthStatus.Profile? {
+        guard let name = model.shownProfileName else { return nil }
+        return model.profiles.first { $0.name == name }
+    }
+    private var brokenCount: Int { model.profiles.filter { $0.loginProblem != nil }.count }
 
     var body: some View {
+        Button { showing.toggle() } label: { label }
+            .buttonStyle(.plain)
+            .help(helpText)
+            .popover(isPresented: $showing, arrowEdge: .bottom) { AccountsPopover() }
+    }
+
+    @ViewBuilder private var label: some View {
         HStack(spacing: 8) {
-            if model.profiles.isEmpty {
-                Text(model.statusNote ?? "Loading usage…").font(.caption).foregroundStyle(.secondary)
+            if let active {
+                StatusDot(color: dotColor)
+                Text(active.name).font(.callout.weight(.medium))
+                if active.loginProblem != nil {
+                    Text(active.loginProblem!).font(.caption).foregroundStyle(.red)
+                } else {
+                    let windows = UsageWindows.main(active)
+                    if windows.isEmpty {
+                        Text(UsageWindows.emptyText(active)).font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        VStack(alignment: .leading, spacing: 3) {
+                            ForEach(windows, id: \.label) { MiniMeter(window: $0) }
+                        }
+                    }
+                }
+            } else if model.selectedPane != nil {
+                StatusDot(color: .secondary)
+                Text("Default login").font(.callout.weight(.medium))
+            } else {
+                Text(model.statusNote ?? "Loading accounts…").font(.caption).foregroundStyle(.secondary)
             }
-            ForEach(model.profiles) { profile in
-                ProfileUsage(profile: profile, active: profile.name == model.status?.activeProfile, now: model.now,
-                             loggingIn: model.loggingIn.contains(profile.name)) { model.login(profile.name) }
-            }
-            if let note = model.statusNote, !model.profiles.isEmpty {
-                Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange).help(note)
+            Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 8).padding(.vertical, 4)
+        .contentShape(Rectangle())
+    }
+
+    /// Red when this account needs a login, orange when its data is out of date.
+    private var dotColor: Color {
+        if active?.loginProblem != nil { return .red }
+        if model.statusNote != nil || active?.stale == true { return .orange }
+        return .green
+    }
+
+    private var helpText: String {
+        let subject = model.selectedPane == nil ? "Default account" : "This chat's account"
+        if brokenCount == 1 { return "\(subject). One account needs you to log in again" }
+        if brokenCount > 1 { return "\(subject). \(brokenCount) accounts need you to log in again" }
+        if active == nil, model.selectedPane != nil { return "This chat uses the plain claude login, which clauth has no usage for" }
+        return model.statusNote ?? subject
+    }
+}
+
+private struct StatusDot: View {
+    let color: Color
+    var body: some View { Circle().fill(color).frame(width: 7, height: 7) }
+}
+
+/// A label, a short bar and the percentage, sized for the toolbar.
+private struct MiniMeter: View {
+    let window: ClauthStatus.Window
+
+    var body: some View {
+        let pct = window.utilizationPct ?? 0
+        HStack(spacing: 5) {
+            Text(window.label).frame(width: 14, alignment: .leading).foregroundStyle(.secondary)
+            UsageBarShape(pct: pct).frame(width: 46, height: 4)
+            Text("\(Int(pct.rounded()))%").frame(width: 28, alignment: .trailing)
+        }
+        .font(.system(size: 9).monospacedDigit())
+    }
+}
+
+private struct UsageBarShape: View {
+    let pct: Double
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(.quaternary)
+                Capsule().fill(UsageWindows.color(pct)).frame(width: geo.size.width * min(1, pct / 100))
             }
         }
     }
 }
 
-struct ProfileUsage: View {
-    let profile: ClauthStatus.Profile
-    let active: Bool
-    let now: Date
-    let loggingIn: Bool
-    let login: () -> Void
-
-    private var windows: [ClauthStatus.Window] {
+enum UsageWindows {
+    /// The 5h and 7d windows, or the first two when clauth labels them differently.
+    static func main(_ profile: ClauthStatus.Profile) -> [ClauthStatus.Window] {
         let all = profile.windows ?? []
         let main = all.filter { ["5h", "7d"].contains($0.label) }
         return main.isEmpty ? Array(all.prefix(2)) : main
     }
 
-    var body: some View {
-        // A broken login makes the whole chip a button that starts the browser sign-in.
-        Button { if profile.loginProblem != nil, !loggingIn { login() } } label: { chip }
-            .buttonStyle(.plain)
-            .contextMenu {
-                Button(loggingIn ? "Waiting for browser sign-in…" : "Log In Again…", action: login).disabled(loggingIn)
-            }
-    }
-
-    private var chip: some View {
-        HStack(spacing: 8) {
-            VStack(alignment: .leading, spacing: 0) {
-                Text(profile.name).font(.caption.weight(.semibold))
-                Text(profile.tier ?? "").font(.caption2).foregroundStyle(.secondary)
-            }
-            if loggingIn {
-                HStack(spacing: 4) {
-                    ProgressView().controlSize(.mini)
-                    Text("Finish in browser…").font(.caption2).foregroundStyle(.secondary)
-                }
-            } else if let problem = profile.loginProblem {
-                VStack(alignment: .leading, spacing: 0) {
-                    Text(problem).font(.caption2).foregroundStyle(.red)
-                    Text("Click to log in").font(.caption2).foregroundStyle(Color.accentColor)
-                }
-            } else if windows.isEmpty {
-                if profile.fetchStatus == "Failed" {
-                    Text("Usage unavailable").font(.caption2).foregroundStyle(.orange)
-                } else if profile.fetchStatus == nil {
-                    Text("Fetching usage…").font(.caption2).foregroundStyle(.secondary)
-                } else {
-                    Text("No usage yet").font(.caption2).foregroundStyle(.secondary)
-                }
-            } else {
-                ForEach(windows, id: \.label) { window in
-                    Meter(window: window, now: now)
-                }
-            }
+    static func emptyText(_ profile: ClauthStatus.Profile) -> String {
+        switch profile.fetchStatus {
+        case "Failed": return "Usage unavailable"
+        case nil: return "Fetching usage…"
+        default: return "No usage yet"
         }
-        .padding(.horizontal, 8).padding(.vertical, 3)
-        .background(RoundedRectangle(cornerRadius: 6).fill(active ? Color.accentColor.opacity(0.1) : Color.clear))
-        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(active ? Color.accentColor.opacity(0.5) : Color(nsColor: .separatorColor)))
-        .contentShape(Rectangle())
-        .opacity(profile.stale == true ? 0.75 : 1)
-        .help(helpText)
     }
 
-    private var helpText: String {
-        if profile.loginProblem != nil { return "\(profile.name): click to log in again in your browser" }
-        if profile.fetchStatus == "Failed" { return "\(profile.name): clauth could not fetch usage for this account" }
-        if profile.stale == true { return "\(profile.name): usage data is stale" }
-        return profile.name + (active ? " (active)" : "")
+    static func color(_ pct: Double) -> Color {
+        pct >= 90 ? .red : pct >= 75 ? .orange : .accentColor
+    }
+
+    static func resetText(_ window: ClauthStatus.Window, now: Date) -> String {
+        guard let reset = window.resetDate else { return "" }
+        let seconds = max(0, reset.timeIntervalSince(now))
+        let hours = Int(seconds / 3600), minutes = Int(seconds.truncatingRemainder(dividingBy: 3600) / 60)
+        if hours >= 24 { return "resets in \(hours / 24)d \(hours % 24)h" }
+        return hours > 0 ? "resets in \(hours)h \(minutes)m" : "resets in \(minutes)m"
     }
 }
 
-struct Meter: View {
+/// Every clauth account: usage, reset times, and a way to log in again.
+private struct AccountsPopover: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Accounts").font(.headline).padding([.horizontal, .top], 14).padding(.bottom, 8)
+            if model.profiles.isEmpty {
+                Text(model.statusNote ?? "Loading accounts…").font(.callout).foregroundStyle(.secondary)
+                    .padding(.horizontal, 14).padding(.bottom, 14)
+            }
+            ForEach(Array(model.profiles.enumerated()), id: \.element.id) { index, profile in
+                if index > 0 { Divider().padding(.horizontal, 14) }
+                AccountRow(profile: profile, active: profile.name == model.shownProfileName,
+                           badge: profile.name == model.shownProfileName && model.selectedPane != nil ? "This chat"
+                               : profile.name == model.defaultProfile ? "Default" : nil,
+                           loggingIn: model.loggingIn.contains(profile.name), now: model.now) { model.login(profile.name) }
+            }
+            Divider()
+            footer.padding(.horizontal, 14).padding(.vertical, 10)
+        }
+        .frame(width: 320)
+    }
+
+    @ViewBuilder private var footer: some View {
+        if let note = model.statusNote {
+            Label(note, systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+        } else {
+            Text(updatedText).font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private var updatedText: String {
+        guard let date = Dates.parse(model.status?.generatedAt) else { return "Usage from clauth" }
+        let seconds = model.now.timeIntervalSince(date)
+        if seconds < 60 { return "Updated just now" }
+        return "Updated " + RelativeDateTimeFormatter().localizedString(for: date, relativeTo: model.now)
+    }
+}
+
+private struct AccountRow: View {
+    let profile: ClauthStatus.Profile
+    let active: Bool
+    let badge: String?
+    let loggingIn: Bool
+    let now: Date
+    let login: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "checkmark").font(.caption.weight(.bold))
+                    .foregroundStyle(Color.accentColor).opacity(active ? 1 : 0)
+                Text(profile.name).font(.callout.weight(.semibold))
+                if let tier = profile.tier { Text(tier).font(.caption).foregroundStyle(.secondary) }
+                Spacer()
+                if let badge { Text(badge).font(.caption).foregroundStyle(.secondary) }
+            }
+            Group {
+                if loggingIn {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text("Finish signing in in your browser…").font(.caption).foregroundStyle(.secondary)
+                    }
+                } else if let problem = profile.loginProblem {
+                    HStack {
+                        Label(problem, systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(.red)
+                        Spacer()
+                        Button("Log In…", action: login).controlSize(.small)
+                    }
+                } else if (profile.windows ?? []).isEmpty {
+                    Text(UsageWindows.emptyText(profile)).font(.caption).foregroundStyle(.secondary)
+                } else {
+                    VStack(spacing: 6) {
+                        ForEach(profile.windows ?? [], id: \.label) { window in
+                            WindowRow(window: window, now: now)
+                        }
+                    }
+                }
+            }
+            .padding(.leading, 18)
+        }
+        .padding(.horizontal, 14).padding(.vertical, 10)
+        .opacity(profile.stale == true ? 0.7 : 1)
+        .contextMenu {
+            if profile.loginProblem == nil { Button("Log In Again…", action: login).disabled(loggingIn) }
+        }
+    }
+}
+
+private struct WindowRow: View {
     let window: ClauthStatus.Window
     let now: Date
 
     var body: some View {
         let pct = window.utilizationPct ?? 0
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 6) {
-                Text("\(window.label) \(Int(pct.rounded()))%")
-                Spacer(minLength: 2)
-                Text(resetText).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 3) {
+            HStack {
+                Text(window.label)
+                Spacer()
+                Text("\(Int(pct.rounded()))%").fontWeight(.medium)
+                Text(UsageWindows.resetText(window, now: now)).foregroundStyle(.secondary)
             }
-            .font(.system(size: 10).monospacedDigit())
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(.quaternary)
-                    Capsule().fill(pct >= 75 ? Color.orange : Color.accentColor)
-                        .frame(width: geo.size.width * min(1, pct / 100))
-                }
-            }
-            .frame(height: 4)
+            .font(.caption.monospacedDigit())
+            UsageBarShape(pct: pct).frame(height: 5)
         }
-        .frame(width: 92)
-    }
-
-    private var resetText: String {
-        guard let reset = window.resetDate else { return "" }
-        let seconds = max(0, reset.timeIntervalSince(now))
-        let hours = Int(seconds / 3600), minutes = Int(seconds.truncatingRemainder(dividingBy: 3600) / 60)
-        if hours >= 24 { return "\(hours / 24)d \(hours % 24)h" }
-        return hours > 0 ? "\(hours)h \(minutes)m" : "\(minutes)m"
     }
 }

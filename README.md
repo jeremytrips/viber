@@ -58,8 +58,7 @@ Launch Viber from /Applications and allow notifications when asked. Notification
   - **Model**: the model new sessions start with, and the default effort per model.
 
   Changes to these files apply to sessions started afterwards.
-- **Messages between sessions**: start a message with `//` to send it to another open session instead of this one. A menu ranks the other sessions by what you typed (their title, project, branch and recent conversation), so `//the firmware endpoint is ready` goes to the session working on firmware. Start with a session's name (`//backend: …`) to pick it directly, or use ↑↓ to choose. The receiving session shows who it came from. If it is busy, the message waits until its current reply ends. When it finishes answering, its reply is posted back into the sender's chat (marked "Reply from …") so the sender's Claude can carry on; replies never ask for an answer, so sessions don't ping-pong.
-- **Messages panel** (top of the sidebar, ⇧⌘M): every message between sessions, newest first, with who sent it to whom, whether it is queued, waiting for a reply or answered, and the reply itself. Filter by status, search, and click a session name to jump to it. Unread messages show a badge.
+- **Messages between sessions**: start a message with `//` to send it to another open session instead of this one. A menu ranks the other sessions by what you typed (their title, project, branch and recent conversation), so `//the firmware endpoint is ready` goes to the session working on firmware. Start with a session's name (`//backend: …`) to pick it directly, or use ↑↓ to choose. The receiving session shows who it came from. If it is busy, Claude reads it after the tool call it is running, like a message typed while it works. Its answer is posted back into the sender's chat (marked "Reply from …") so the sender's Claude can carry on; replies never ask for an answer, so sessions don't ping-pong. Messages live only in the two chats they touch: the sender's "Sent to …" line shows whether the message is not read yet, waiting for a reply, replied or got no reply.
 - **Ideas**: a list per project of things to do later that nobody has planned yet. Click the lightbulb next to a project name in the sidebar to jot one down or see that project's list (the number is how many are still to plan). The **Ideas** panel (top of the sidebar, ⇧⌘I) shows every project's ideas, filtered by *To plan*, *Started* or *Done*, with search. **Plan** starts a new session for an idea in plan mode, in a new worktree when the project is a git repo, with the idea as the first message. The idea is then marked started and links to that session. Tick an idea off when it's done, or right-click to edit, copy or delete it. Sessions can add ideas with `viber idea add` (the `/idea` skill), and each idea shows who added it. Ideas are stored by Viber, not in the repo. Project notes from earlier versions were turned into one idea each.
 - **Browser preview** (the Safari button in the session header, ⇧⌘B): a browser beside the chat that you and Claude share, so Claude can check its own web work.
   - **Viber serves the tools itself.** They come from an MCP server built into Viber, over the same stdio channel, so there's nothing to install. Every session gets them.
@@ -97,7 +96,6 @@ Launch Viber from /Applications and allow notifications when asked. Notification
 | --- | --- |
 | ⌘N | New session |
 | ⌘K | Jump to session |
-| ⇧⌘M | Show messages between sessions |
 | ⇧⌘I | Show ideas |
 | ⌘J | Next session waiting for you |
 | ⌘1–⌘9 | Select session 1–9 |
