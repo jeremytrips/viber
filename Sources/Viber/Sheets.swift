@@ -68,10 +68,16 @@ struct NewSessionSheet: View {
     @State private var firstMessage = ""
     @State private var didLoad = false
     @State private var maker = WorktreeMaker.git(include: false)
-    /// The worktree's branch. It follows the name (`viber/<slug>`) until it is edited.
+    /// The worktree's branch. It follows the name (the project's pattern, `viber/<slug>` by default) until it is edited.
     @State private var branch = ""
     @State private var branchEdited = false
     @State private var branchProblem: String?
+    /// The project's branch pattern, and the main checkout it is saved for.
+    @State private var pattern = Worktree.defaultBranchPattern
+    @State private var patternProject: String?
+    @State private var editingPattern = false
+    /// The idea this session is started for, when planning it opened the sheet.
+    @State private var ideaID: String?
 
     /// What makes the worktree for this folder: git, or the project's WorktreeCreate hook.
     enum WorktreeMaker: Equatable {
@@ -160,11 +166,31 @@ struct NewSessionSheet: View {
                     TextField("Name", text: $name, prompt: Text("Session name (used for the branch)"))
                     if useWorktree && repoRoot != nil {
                         VStack(alignment: .leading, spacing: 4) {
-                            TextField("Branch", text: Binding(get: { branch }, set: { branch = $0; branchEdited = !$0.isEmpty }),
-                                      prompt: Text(defaultBranch))
-                                .font(.body.monospaced())
+                            LabeledContent("Branch") {
+                                HStack(spacing: 6) {
+                                    TextField("Branch", text: Binding(get: { branch }, set: { branch = $0; branchEdited = !$0.isEmpty && $0 != defaultBranch }),
+                                              prompt: Text(defaultBranch))
+                                        .labelsHidden()
+                                        .font(.body.monospaced())
+                                    Button("Pattern…") { editingPattern = true }
+                                        .disabled(patternProject == nil)
+                                        .help("The branch name new worktree sessions in this repository start with")
+                                        .popover(isPresented: $editingPattern, arrowEdge: .bottom) {
+                                            if let patternProject {
+                                                BranchPatternEditor(project: patternProject, draft: pattern, isPresented: $editingPattern) { saved in
+                                                    pattern = saved
+                                                    branchEdited = false
+                                                    branch = Worktree.defaultBranch(forName: sessionTitle, pattern: saved)
+                                                }
+                                            }
+                                        }
+                                }
+                            }
                             if let branchProblem {
-                                Text(branchProblem).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+                                // A part like <id> left to fill in is a step to take, not a mistake.
+                                Text(branchProblem).font(.caption)
+                                    .foregroundStyle(Worktree.placeholders(in: chosenBranch ?? defaultBranch).isEmpty ? .red : .secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
                             }
                         }
                     }
@@ -189,7 +215,8 @@ struct NewSessionSheet: View {
                     .keyboardShortcut(.cancelAction)
                 Button("Start", action: start)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(folder.isEmpty || (useWorktree && repoRoot != nil && (maker.blocksWorktree || branchProblem != nil)))
+                    .disabled(folder.isEmpty || (useWorktree && repoRoot != nil && (maker.blocksWorktree || branchProblem != nil
+                                                                                   || (!branchEdited && Worktree.needsInput(pattern)))))
             }
             .padding(16)
         }
@@ -198,16 +225,18 @@ struct NewSessionSheet: View {
         .onAppear(perform: load)
         .task(id: folder) { await checkRepo() }
         .onChange(of: defaultBranch) { if !branchEdited { branch = defaultBranch } }
-        .task(id: "\(folder)|\(branch)|\(branchEdited)|\(useWorktree)|\(maker.usesHook)") { await checkBranch() }
+        .task(id: "\(folder)|\(branch)|\(branchEdited)|\(useWorktree)|\(maker.usesHook)|\(pattern)") { await checkBranch() }
     }
 
-    /// `viber/<slug>` of the name the session will get, as the session's title is chosen.
-    private var defaultBranch: String {
+    /// The name the session will get, chosen as `createSession` chooses its title.
+    private var sessionTitle: String {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let title = !trimmed.isEmpty ? trimmed
+        return !trimmed.isEmpty ? trimmed
             : firstMessage.isEmpty ? URL(fileURLWithPath: folder).lastPathComponent : String(firstMessage.prefix(50))
-        return Worktree.defaultBranch(forName: title)
     }
+
+    /// The project's pattern filled in with the session's name.
+    private var defaultBranch: String { Worktree.defaultBranch(forName: sessionTitle, pattern: pattern) }
 
     private var chosenBranch: String? {
         let typed = branch.trimmingCharacters(in: .whitespaces)
@@ -219,10 +248,12 @@ struct NewSessionSheet: View {
         guard useWorktree, let root = repoRoot else { branchProblem = nil; return }
         try? await Task.sleep(for: .milliseconds(250))
         guard !Task.isCancelled else { return }
-        let name = chosenBranch ?? defaultBranch, typed = chosenBranch != nil, hook = maker.usesHook
+        let name = chosenBranch ?? defaultBranch, hook = maker.usesHook
+        // An untouched default is numbered if taken, so only a typed name has to be new. A default with a part
+        // like <id> left still has to be filled in.
+        let check = chosenBranch != nil || Worktree.needsInput(pattern)
         let problem = await Task.detached { () -> String? in
-            // An untouched default is numbered if taken, so only a typed name has to be new.
-            if typed, case .problem(let problem) = Worktree.checkBranch(name, repo: root) { return problem }
+            if check, case .problem(let problem) = Worktree.checkBranch(name, repo: root) { return problem }
             return hook ? Worktree.hookNameProblem(name) : nil
         }.value
         guard !Task.isCancelled else { return }
@@ -232,9 +263,20 @@ struct NewSessionSheet: View {
     private func load() {
         guard !didLoad else { return }
         didLoad = true
-        folder = model.selectedPane?.worktree?.repo ?? model.selectedPane?.spec.cwd ?? model.recentFolders.first ?? ""
-        profile = AccountPicker.usableDefault(model)
-        permissionMode = Prefs.string(Prefs.newSessionMode)
+        if let prefill = model.newSessionPrefill {
+            model.newSessionPrefill = nil
+            folder = prefill.folder
+            profile = prefill.profile
+            name = prefill.name
+            permissionMode = prefill.permissionMode
+            firstMessage = prefill.firstMessage
+            ideaID = prefill.ideaID
+            pattern = prefill.branchPattern
+        } else {
+            folder = model.selectedPane?.worktree?.repo ?? model.selectedPane?.spec.cwd ?? model.recentFolders.first ?? ""
+            profile = AccountPicker.usableDefault(model)
+            permissionMode = Prefs.string(Prefs.newSessionMode)
+        }
         branch = defaultBranch
     }
 
@@ -249,16 +291,22 @@ struct NewSessionSheet: View {
         let dir = folder
         repoError = nil
         guard !dir.isEmpty else { repoRoot = nil; useWorktree = false; return }
-        let (root, found) = await Task.detached { () -> (String?, WorktreeMaker) in
-            guard let root = Worktree.repoRoot(dir) else { return (nil, .git(include: false)) }
-            return (root, WorktreeMaker.find(folder: dir, root: root))
+        let (root, found, project) = await Task.detached { () -> (String?, WorktreeMaker, String?) in
+            guard let root = Worktree.repoRoot(dir) else { return (nil, .git(include: false), nil) }
+            return (root, WorktreeMaker.find(folder: dir, root: root), WorktreeHooks.mainCheckout(dir) ?? root)
         }.value
         guard !Task.isCancelled, dir == folder else { return }
         repoRoot = root
         maker = found
+        if project != patternProject {
+            patternProject = project
+            pattern = project.map { Prefs.branchPattern(project: $0) } ?? Worktree.defaultBranchPattern
+            branchEdited = false
+            branch = Worktree.defaultBranch(forName: sessionTitle, pattern: pattern)
+        }
         guard let root else { useWorktree = false; return }
-        // Default to a worktree when another open session already works in this repo.
-        useWorktree = model.panes.contains { pane in
+        // Default to a worktree when another open session already works in this repo. Planning an idea always uses one.
+        useWorktree = ideaID != nil || model.panes.contains { pane in
             let paneRepo = pane.worktree?.repo ?? pane.spec.cwd
             return paneRepo == root || paneRepo.hasPrefix(root + "/") || paneRepo == dir
         }
@@ -296,9 +344,58 @@ struct NewSessionSheet: View {
             name: name.trimmingCharacters(in: .whitespacesAndNewlines),
             branch: useWorktree ? chosenBranch : nil,
             permissionMode: permissionMode,
-            firstMessage: firstMessage
+            firstMessage: firstMessage,
+            ideaID: ideaID,
+            branchPattern: pattern
         ))
         dismiss()
+    }
+}
+
+/// Edits the branch pattern a repository's new worktree sessions start with.
+private struct BranchPatternEditor: View {
+    let project: String
+    @State var draft: String
+    @Binding var isPresented: Bool
+    var onSave: (String) -> Void
+
+    private var trimmed: String { draft.trimmingCharacters(in: .whitespaces) }
+    /// Without a part to fill in, every session would get the same branch.
+    private var canSave: Bool { !Worktree.placeholders(in: trimmed).isEmpty }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Branch pattern for \(URL(fileURLWithPath: project).lastPathComponent)").font(.headline)
+            TextField("Pattern", text: $draft, prompt: Text(Worktree.defaultBranchPattern))
+                .labelsHidden()
+                .font(.body.monospaced())
+            Text(trimmed.isEmpty || canSave
+                 ? "<slug> becomes the session name. Leave parts like <id> to fill in for each session. Saved in Viber, not in the repository."
+                 : "Add <slug> or a part like <id>, so each session gets its own branch.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Button("Use Default") { draft = Worktree.defaultBranchPattern }
+                Spacer()
+                Button("Cancel", role: .cancel) { isPresented = false }
+                    .keyboardShortcut(.cancelAction)
+                Button("Save", action: save)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!canSave)
+            }
+        }
+        // The Form row it opens from right-aligns text fields.
+        .multilineTextAlignment(.leading)
+        .padding(14)
+        .frame(width: 360)
+    }
+
+    private func save() {
+        guard canSave else { return }
+        Prefs.setBranchPattern(trimmed, project: project)
+        onSave(trimmed)
+        isPresented = false
     }
 }
 

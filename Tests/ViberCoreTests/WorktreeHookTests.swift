@@ -295,6 +295,23 @@ final class WorktreeCreateHookTests: XCTestCase {
         }
     }
 
+    func testHookGetsThePatternBranch() async throws {
+        let repo = try temporaryRepo()
+        let target = repo.deletingLastPathComponent().appendingPathComponent("hooked-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: target) }
+        try writeHook(.create, """
+        name=$(sed -n 's/.*"name":"\\([^"]*\\)".*/\\1/p'); git worktree add -q -b "$name" '\(target.path)' >&2 && echo '\(target.path)'
+        """, in: repo)
+        let info = try await Worktree.create(WorktreeRequest(folder: repo.path, name: "Login", branchPattern: "team/<slug>")) { _ in }
+        XCTAssertEqual(info.branch, "team/login")
+        do {
+            _ = try await Worktree.create(WorktreeRequest(folder: repo.path, name: "x", branchPattern: "feat/NEX-<id>-<slug>")) { _ in }
+            XCTFail("a pattern part nobody filled in never reaches the hook")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, "Replace <id> in the branch name.")
+        }
+    }
+
     func testHookFailureAndMissingPath() async throws {
         let repo = try temporaryRepo()
         try writeHook(.create, "echo 'all slots are in use' >&2; exit 1", in: repo)
@@ -329,6 +346,33 @@ final class BranchNameTests: XCTestCase {
             XCTAssertNotEqual(Worktree.checkBranch(bad, repo: repo.path), .ok, bad)
         }
         XCTAssertEqual(Worktree.checkBranch("main", repo: repo.path), .problem("A branch named main already exists."))
+        XCTAssertEqual(Worktree.checkBranch("feat/NEX-<id>-login", repo: repo.path), .problem("Replace <id> in the branch name."),
+                       "git accepts < and >, so a pattern's leftover part is caught first")
+        XCTAssertEqual(Worktree.checkBranch("<team>/<id>-x", repo: nil), .problem("Replace <team> and <id> in the branch name."))
+    }
+
+    func testPatterns() {
+        XCTAssertEqual(Worktree.placeholders(in: "feat/NEX-<id>-<slug>"), ["<id>", "<slug>"])
+        XCTAssertEqual(Worktree.placeholders(in: "viber/login"), [])
+        XCTAssertEqual(Worktree.placeholders(in: "a<>b<<id>c>"), ["<id>"], "empty and nested brackets aren't parts")
+        XCTAssertFalse(Worktree.needsInput(Worktree.defaultBranchPattern))
+        XCTAssertFalse(Worktree.needsInput("feat/<slug>"))
+        XCTAssertTrue(Worktree.needsInput("feat/NEX-<id>-<slug>"))
+        XCTAssertEqual(Worktree.defaultBranch(forName: "Login", pattern: "feat/NEX-<id>-<slug>"), "feat/NEX-<id>-login")
+        XCTAssertEqual(Worktree.defaultBranch(forName: "!!", pattern: "jt/<slug>"), "jt/session")
+    }
+
+    func testGitWorktreeWithAPattern() throws {
+        let repo = try temporaryRepo()
+        XCTAssertEqual(try Worktree.create(repoDir: repo.path, name: "Login", pattern: "jt/<slug>").branch, "jt/login")
+        XCTAssertEqual(try Worktree.create(repoDir: repo.path, name: "Login", pattern: "jt/<slug>").branch, "jt/login-2",
+                       "the number goes with the folder's")
+        XCTAssertTrue(Shell.run("git", ["-C", repo.path, "branch", "feat/page-wip"]).ok)
+        XCTAssertEqual(try Worktree.create(repoDir: repo.path, name: "Page", pattern: "feat/<slug>-wip").branch, "feat/page-2-wip",
+                       "a taken branch is numbered after the slug")
+        XCTAssertThrowsError(try Worktree.create(repoDir: repo.path, name: "Other", pattern: "feat/NEX-<id>-<slug>"))
+        XCTAssertEqual(try Worktree.create(repoDir: repo.path, name: "Other", branch: "feat/NEX-5-other",
+                                           pattern: "feat/NEX-<id>-<slug>").branch, "feat/NEX-5-other")
     }
 
     func testHookNames() {
