@@ -114,7 +114,6 @@ final class WorktreeHookParsingTests: XCTestCase {
         let home = try temporaryFolder()
         let linked = repo.deletingLastPathComponent().appendingPathComponent("linked-\(UUID().uuidString)")
         XCTAssertTrue(Shell.run("git", ["-C", repo.path, "worktree", "add", "-q", "-b", "x", linked.path]).ok)
-        defer { try? FileManager.default.removeItem(at: linked) }
         func std(_ path: String) -> String { URL(fileURLWithPath: path).standardizedFileURL.path }
         let realRepo = std(try XCTUnwrap(WorktreeHooks.mainCheckout(repo.path)))
         let realLinked = std(try XCTUnwrap(Worktree.repoRoot(linked.path)))
@@ -259,7 +258,6 @@ final class WorktreeCreateHookTests: XCTestCase {
     func testHookReplacesGitWorktreeAdd() async throws {
         let repo = try temporaryRepo()
         let target = repo.deletingLastPathComponent().appendingPathComponent("hooked-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: target) }
         // Reads the name from stdin, makes the worktree on that branch, prints noise to stderr and the path last.
         try writeHook(.create, """
         name=$(sed -n 's/.*"name":"\\([^"]*\\)".*/\\1/p'); echo "setting up $name" >&2; \
@@ -280,7 +278,6 @@ final class WorktreeCreateHookTests: XCTestCase {
     func testHookGetsTheDefaultBranchAndNamesItCanTake() async throws {
         let repo = try temporaryRepo()
         let target = repo.deletingLastPathComponent().appendingPathComponent("hooked-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: target) }
         XCTAssertTrue(Shell.run("git", ["-C", repo.path, "branch", "viber/login"]).ok)
         try writeHook(.create, """
         name=$(sed -n 's/.*"name":"\\([^"]*\\)".*/\\1/p'); git worktree add -q -b "$name" '\(target.path)' >&2 && echo '\(target.path)'
@@ -411,6 +408,90 @@ final class RecordedSessionsTests: XCTestCase {
     }
 }
 
+final class BaseBranchTests: XCTestCase {
+    var upstream: URL!
+    var clone: URL!
+
+    override func setUpWithError() throws {
+        upstream = try temporaryRepo()
+        clone = try temporaryFolder().appendingPathComponent("clone")
+        XCTAssertTrue(Shell.run("git", ["clone", "-q", upstream.path, clone.path]).ok)
+        for args in [["config", "user.email", "t@t"], ["config", "user.name", "t"]] {
+            XCTAssertTrue(Shell.run("git", ["-C", clone.path] + args).ok)
+        }
+        // The clone's own feature branch, and an upstream that has moved on since the clone.
+        XCTAssertTrue(Shell.run("git", ["-C", clone.path, "checkout", "-q", "-b", "feature"]).ok)
+        try commit("feature.txt", in: clone)
+        try commit("upstream.txt", in: upstream)
+    }
+
+    private func commit(_ file: String, in repo: URL) throws {
+        try "\(file)\n".write(to: repo.appendingPathComponent(file), atomically: true, encoding: .utf8)
+        XCTAssertTrue(Shell.run("git", ["-C", repo.path, "add", file]).ok)
+        XCTAssertTrue(Shell.run("git", ["-C", repo.path, "commit", "-qm", file]).ok)
+    }
+
+    private func create(_ base: WorktreeBase, name: String) async throws -> (WorktreeInfo, String) {
+        let output = Collector()
+        let info = try await Worktree.create(WorktreeRequest(folder: clone.path, name: name, base: base)) {
+            if case .output(let text) = $0 { output.add(text) }
+        }
+        return (info, output.text)
+    }
+
+    func testStartsFromAFreshlyFetchedDefaultBranch() async throws {
+        XCTAssertEqual(Worktree.originDefaultBranch(clone.path), "origin/main")
+        XCTAssertEqual(Worktree.baseChoices(clone.path), BaseChoices(hasOrigin: true, originDefault: "origin/main", current: "feature"))
+        let (info, _) = try await create(.originDefault, name: "Fresh")
+        XCTAssertEqual(info.base, "origin/main", "the base used is recorded, so the diff stat compares with it")
+        let worktree = URL(fileURLWithPath: info.path)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: worktree.appendingPathComponent("upstream.txt").path), "origin was fetched first")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: worktree.appendingPathComponent("feature.txt").path))
+        XCTAssertFalse(Shell.run("git", ["-C", info.path, "rev-parse", "--abbrev-ref", "@{u}"]).ok, "the new branch doesn't track origin/main")
+        XCTAssertEqual(Worktree.diffStat(info), "+0 −0")
+    }
+
+    func testStartsFromTheCurrentBranchWhenAsked() async throws {
+        let (info, _) = try await create(.current, name: "Local")
+        XCTAssertEqual(info.base, "feature")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: URL(fileURLWithPath: info.path).appendingPathComponent("feature.txt").path))
+    }
+
+    func testCarriesOnOffline() async throws {
+        XCTAssertTrue(Shell.run("git", ["-C", clone.path, "remote", "set-url", "origin", clone.path + "/no-such-remote"]).ok)
+        let (info, output) = try await create(.originDefault, name: "Offline")
+        XCTAssertEqual(info.base, "origin/main", "the cached ref is used")
+        XCTAssertTrue(output.contains("Couldn't fetch origin"), output)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: URL(fileURLWithPath: info.path).appendingPathComponent("upstream.txt").path))
+    }
+
+    func testAFetchThatHangsTimesOut() async throws {
+        // A remote whose transport never answers.
+        XCTAssertTrue(Shell.run("git", ["-C", clone.path, "config", "protocol.ext.allow", "always"]).ok)
+        XCTAssertTrue(Shell.run("git", ["-C", clone.path, "remote", "set-url", "origin", "ext::sleep 30"]).ok)
+        let started = Date()
+        let fetched = await Worktree.fetchOriginDefault(clone.path, timeout: 1)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 10)
+        XCTAssertEqual(fetched.ref, "origin/main")
+        XCTAssertTrue(fetched.note?.contains("longer than 1 seconds") == true, fetched.note ?? "")
+    }
+
+    func testFallbacks() async throws {
+        XCTAssertTrue(Shell.run("git", ["-C", clone.path, "remote", "set-head", "origin", "-d"]).ok)
+        XCTAssertEqual(Worktree.originDefaultBranch(clone.path), "origin/main", "without origin/HEAD, origin/main")
+        XCTAssertTrue(Shell.run("git", ["-C", clone.path, "remote", "remove", "origin"]).ok)
+        XCTAssertNil(Worktree.originDefaultBranch(clone.path))
+        let (info, output) = try await create(.originDefault, name: "No origin")
+        XCTAssertEqual(info.base, "feature")
+        XCTAssertTrue(output.contains("no origin remote"), output)
+
+        let choices = BaseChoices(hasOrigin: true, originDefault: nil, current: nil)
+        XCTAssertEqual(choices.available(.current), .originDefault, "a detached HEAD can only start from origin")
+        XCTAssertEqual(BaseChoices(hasOrigin: false, originDefault: nil, current: "x").available(.originDefault), .current)
+        XCTAssertEqual(BaseChoices(hasOrigin: true, originDefault: "origin/main", current: "x").available(.current), .current)
+    }
+}
+
 final class WorktreeRemoveHookTests: XCTestCase {
     var home: URL!
     var savedHome: URL!
@@ -510,15 +591,25 @@ final class WorktreeRemoveHookTests: XCTestCase {
     }
 }
 
-func temporaryFolder() throws -> URL {
-    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("viber-test-\(UUID().uuidString)")
-    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-    return dir
+extension XCTestCase {
+    /// A new empty folder, removed when the test ends.
+    func temporaryFolder() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("viber-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        return dir
+    }
+
+    /// A repository with one commit on `main`, in a folder of its own, so worktrees the tests put beside it
+    /// are removed with it when the test ends.
+    func temporaryRepo() throws -> URL {
+        let repo = try temporaryFolder().appendingPathComponent("repo")
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        return try commitOnce(repo)
+    }
 }
 
-/// A repository with one commit on `main`.
-func temporaryRepo() throws -> URL {
-    let repo = try temporaryFolder()
+private func commitOnce(_ repo: URL) throws -> URL {
     for args in [["init", "-q", "-b", "main"], ["config", "user.email", "t@t"], ["config", "user.name", "t"]] {
         XCTAssertTrue(Shell.run("git", ["-C", repo.path] + args).ok)
     }

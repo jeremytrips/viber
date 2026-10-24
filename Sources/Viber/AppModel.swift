@@ -44,6 +44,8 @@ struct NewSessionRequest {
     var name: String
     /// The worktree's branch; nil for `branchPattern` filled in with the name.
     var branch: String? = nil
+    /// Where a git worktree's branch starts.
+    var base: WorktreeBase = .originDefault
     var permissionMode: String
     var firstMessage: String
     /// The idea this session is started for, linked to it once it opens.
@@ -233,7 +235,7 @@ final class AppModel {
         case .create(let request):
             let worktreeRequest = WorktreeRequest(folder: request.folder, name: request.name.isEmpty ? job.title : request.name,
                                                   branch: request.branch, branchPattern: request.branchPattern,
-                                                  permissionMode: request.permissionMode)
+                                                  base: request.base, permissionMode: request.permissionMode)
             job.task = Task {
                 do {
                     let info = try await Worktree.create(worktreeRequest, progress: report)
