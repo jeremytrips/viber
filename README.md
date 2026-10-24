@@ -8,7 +8,7 @@ Viber is a native macOS app that runs Claude Code sessions as chats. It drives t
 - Swift toolchain (Xcode 15.3+ or matching command line tools) to build
 - The `claude` CLI on your PATH (`~/.local/bin`, Homebrew, npm and bun locations are searched too)
 - Optional: `clauth` for multiple profiles and the usage bar. Run `clauth daemon` to keep usage fresh.
-- Optional: `gh` for the `ship` and `cleanup` skills
+- Optional: `gh` for the `ship` and `cleanup` skills on GitHub. Without it, and on Bitbucket or GitLab, `/ship` gives the link that opens the pull request.
 - Optional: Xcode with an iOS simulator runtime for the device panel
 
 ## Build and install
@@ -126,7 +126,7 @@ Outside a Viber session it exits with status 2.
 Skills in `plugin/skills`:
 
 - `/cleanup`: checks that the branch is merged (including squash merges via `gh`), with no uncommitted changes, unpushed commits, or stashes, then asks Viber to remove the worktree and branch. It never deletes anything itself.
-- `/ship`: reviews the diff, commits, pushes, and opens a PR.
+- `/ship`: reviews the diff, runs the project's required checks, commits, asks before pushing, then opens a PR with `gh` on GitHub, or gives the pull or merge request link on Bitbucket and GitLab. Commit format, checks and push rules from the project's `CLAUDE.md`, `AGENT.md` or skills come first.
 - `/sync`: rebases onto the latest base branch and resolves conflicts carefully; never force-pushes without asking.
 - `/handoff`: writes a status note (goal, done, in progress, next steps, open questions, files touched).
 - `/idea`: saves an idea, follow-up or out-of-scope task to the project's idea list, written so a later session can plan it without this conversation. Claude also uses it on its own when it notices work outside the current task.
