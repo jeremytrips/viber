@@ -123,6 +123,7 @@ Viber puts a small `viber` command on the PATH of every session it starts (with 
 
 ```sh
 viber close [--remove-worktree] [--delete-branch]   # close this session after the current reply
+viber worktree                                      # print the worktree Viber made for this session (path, branch, repo)
 viber notify <text…>                                # post a notification
 viber rename <title…>                               # rename the session in the sidebar
 viber idea [list]                                   # print this project's ideas that are not done
@@ -133,7 +134,7 @@ Outside a Viber session it exits with status 2.
 
 Skills in `plugin/skills`:
 
-- `/cleanup`: checks that the branch is merged (including squash merges via `gh`), with no uncommitted changes, unpushed commits, or stashes, then asks Viber to remove the worktree and branch. It never deletes anything itself.
+- `/cleanup`: checks that the branch is merged (including squash merges via `gh`), with no uncommitted changes, unpushed commits, or stashes, then asks Viber to remove the worktree and branch. It only does so for the worktree Viber made for this session (`viber worktree`), wherever it is and whatever its branch is called. It never deletes anything itself.
 - `/ship`: reviews the diff, commits, pushes, and opens a PR.
 - `/sync`: rebases onto the latest base branch and resolves conflicts carefully; never force-pushes without asking.
 - `/handoff`: writes a status note (goal, done, in progress, next steps, open questions, files touched).

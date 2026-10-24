@@ -297,6 +297,22 @@ final class WorktreeCreateHookTests: XCTestCase {
     }
 }
 
+final class RecordedSessionsTests: XCTestCase {
+    func testRecordedWorktree() throws {
+        let file = try temporaryFolder().appendingPathComponent("panes.json")
+        let info = WorktreeInfo(repo: "/r", path: "/w", branch: "feat/x", base: "main", createdByHook: true, folder: "/r")
+        let records: [[String: Any]] = [
+            ["id": "a", "title": "A", "spec": ["cwd": "/r"]],
+            ["id": "b", "title": "B", "spec": ["cwd": "/w"],
+             "worktree": try JSONSerialization.jsonObject(with: JSONEncoder().encode(info))]
+        ]
+        try JSONSerialization.data(withJSONObject: records).write(to: file)
+        XCTAssertEqual(RecordedSessions.worktree(paneID: "b", file: file), info)
+        XCTAssertNil(RecordedSessions.worktree(paneID: "a", file: file))
+        XCTAssertNil(RecordedSessions.worktree(paneID: "zz", file: file))
+    }
+}
+
 final class WorktreeRemoveHookTests: XCTestCase {
     var home: URL!
     var savedHome: URL!
