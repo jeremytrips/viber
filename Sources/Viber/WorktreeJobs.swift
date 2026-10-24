@@ -173,7 +173,8 @@ struct WorktreeJobView: View {
                     Label(job.step, systemImage: "gearshape.2").foregroundStyle(.secondary)
                 case .failed(let message):
                     Label {
-                        Text(message).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                        // No fixedSize: with it, a long message blanked the whole window.
+                        Text(message).textSelection(.enabled)
                     } icon: {
                         Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
                     }
