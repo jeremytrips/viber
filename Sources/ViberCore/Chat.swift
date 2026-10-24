@@ -177,6 +177,8 @@ public struct ChatTranscript {
     public var model: String?
     /// As reported by the CLI.
     public var permissionMode: String?
+    /// The CLI's auto-memory folder, as its init message names it.
+    public var memoryFolder: String?
     public var streamingText = ""
     /// Claude is thinking right now (thinking deltas are streaming).
     public var isThinking = false
@@ -743,6 +745,7 @@ public struct ChatTranscript {
             sessionID = message["session_id"]?.string ?? sessionID
             cwd = message["cwd"]?.string ?? cwd
             model = message["model"]?.string ?? model
+            memoryFolder = message["memory_paths"]?["auto"]?.string ?? memoryFolder
             applyMode(message["permissionMode"]?.string)
             if let servers = message["mcp_servers"] { mergeServerStatus(McpServer.parse(servers)) }
             if state == .starting { state = .idle }
@@ -1053,6 +1056,11 @@ public struct ChatTranscript {
         let toolName = request["tool_name"]?.string ?? "Tool"
         let input = request["input"] ?? .null
         let toolUseID = request["tool_use_id"]?.string
+        if let memoryFolder, MemoryWrite.allows(toolName: toolName, input: input, folder: memoryFolder) {
+            var response: [String: JSON] = ["behavior": "allow", "updatedInput": input]
+            if let toolUseID { response["toolUseID"] = .string(toolUseID) }
+            return [Self.controlSuccess(requestID, .object(response))]
+        }
         let existing = toolUseID.flatMap { toolIndex[$0] }
         streamingText = ""
         switch toolName {

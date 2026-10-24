@@ -43,6 +43,37 @@ final class LiveCLITests: XCTestCase {
         XCTAssertTrue(chat.items.contains { if case .assistant(let t) = $0.kind { return t.contains("DONE") }; return false })
     }
 
+    /// Through clauth (set VIBER_LIVE_PROFILE) the memory folder sits behind a symlink and the CLI asks; Viber answers.
+    func testMemoryWriteNeedsNoCardAgainstRealCLI() throws {
+        let env = ProcessInfo.processInfo.environment
+        try XCTSkipUnless(env["VIBER_LIVE_TEST"] == "1", "set VIBER_LIVE_TEST=1 to run")
+        let id = UUID().uuidString
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("viber-live-\(id)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        var chat = ChatTranscript()
+        let process = try ClaudeProcess(spec: LaunchSpec(profile: env["VIBER_LIVE_PROFILE"], cwd: dir.path, model: "haiku"),
+                                        paneID: "live-memory", binDir: nil)
+        let finished = expectation(description: "turn finished")
+        process.onMessage = { message in
+            for reply in chat.apply(message) { process.send(reply) }
+            if chat.state == .permission { finished.fulfill() }
+            if message["type"]?.string == "result" { finished.fulfill() }
+        }
+        process.send(chat.request("initialize"))
+        process.send(chat.userMessage("Use the Write tool to create live-test.md in your auto-memory directory (the one your "
+            + "system prompt names), containing the single word ok. Don't touch any other file. Then reply with the single word DONE."))
+        wait(for: [finished], timeout: 120)
+        process.terminate()
+
+        let folder = try XCTUnwrap(chat.memoryFolder)
+        let real = try XCTUnwrap(WorktreeInclude.realpath(folder))
+        defer { if real.contains(id) { try? FileManager.default.removeItem(atPath: real) } }
+        XCTAssertNotEqual(chat.state, .permission, "the memory write came back as a card")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: real + "/live-test.md"))
+    }
+
     /// The settings sheet's requests against the real CLI. No model turn, so this one costs nothing.
     func testSettingsRequestsAgainstRealCLI() throws {
         let env = ProcessInfo.processInfo.environment

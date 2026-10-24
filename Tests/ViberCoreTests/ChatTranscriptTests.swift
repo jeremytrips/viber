@@ -146,6 +146,59 @@ final class ChatTranscriptTests: XCTestCase {
         XCTAssertEqual(chat.state, .working)
     }
 
+    /// Like clauth's runtime folder: `runtime/projects` links to `real/projects`, where the memory folder is.
+    private func linkedMemoryFolder() throws -> (base: URL, folder: String) {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory.appendingPathComponent("viber-memory-\(UUID().uuidString)")
+        try fm.createDirectory(at: base.appendingPathComponent("real/projects/-repo/memory"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: base.appendingPathComponent("runtime"), withIntermediateDirectories: true)
+        try fm.createSymbolicLink(at: base.appendingPathComponent("runtime/projects"),
+                                  withDestinationURL: base.appendingPathComponent("real/projects"))
+        return (base, base.path + "/runtime/projects/-repo/memory/")
+    }
+
+    func testMemoryWritesAreAllowedWithoutACard() throws {
+        let (base, folder) = try linkedMemoryFolder()
+        defer { try? FileManager.default.removeItem(at: base) }
+        var chat = ChatTranscript()
+        chat.apply(["type": "system", "subtype": "init", "session_id": "s", "memory_paths": ["auto": .string(folder)]])
+        XCTAssertEqual(chat.memoryFolder, folder)
+        let out = chat.apply(["type": "control_request", "request_id": "r1", "request": [
+            "subtype": "can_use_tool", "tool_name": "Write", "input": ["file_path": .string(folder + "notes.md"), "content": "x"],
+            "tool_use_id": "t1"]])
+        XCTAssertEqual(out.first?["response"]?["request_id"]?.string, "r1")
+        XCTAssertEqual(out.first?["response"]?["response"]?["behavior"]?.string, "allow")
+        XCTAssertEqual(out.first?["response"]?["response"]?["toolUseID"]?.string, "t1")
+        XCTAssertTrue(chat.items.isEmpty)
+
+        let other = chat.apply(["type": "control_request", "request_id": "r2", "request": [
+            "subtype": "can_use_tool", "tool_name": "Edit", "input": ["file_path": .string(base.path + "/real/projects/-other/memory/x.md")]]])
+        XCTAssertTrue(other.isEmpty)
+        XCTAssertEqual(chat.state, .permission)
+    }
+
+    func testOnlyMarkdownThatStaysInTheMemoryFolderIsAllowed() throws {
+        let (base, folder) = try linkedMemoryFolder()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let real = base.appendingPathComponent("real/projects/-repo/memory")
+        try FileManager.default.createDirectory(at: base.appendingPathComponent("outside"), withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: real.appendingPathComponent("away"), withDestinationURL: base.appendingPathComponent("outside"))
+        try FileManager.default.createSymbolicLink(at: real.appendingPathComponent("link.md"),
+                                                   withDestinationURL: base.appendingPathComponent("outside/x.md"))
+        func allows(_ tool: String, _ path: String) -> Bool {
+            MemoryWrite.allows(toolName: tool, input: ["file_path": .string(path)], folder: folder)
+        }
+        XCTAssertTrue(allows("Edit", folder + "MEMORY.md"))
+        XCTAssertTrue(allows("Write", folder + "logs/2026-10-24.md"), "a new subfolder of the memory folder")
+        XCTAssertFalse(allows("Bash", folder + "MEMORY.md"))
+        XCTAssertFalse(allows("Write", folder + "notes.txt"))
+        XCTAssertFalse(allows("Write", folder + ".hidden.md"))
+        XCTAssertFalse(allows("Write", folder + "../escape.md"))
+        XCTAssertFalse(allows("Write", folder + "away/x.md"), "a folder that links out")
+        XCTAssertFalse(allows("Edit", folder + "link.md"), "a file that links out")
+        XCTAssertFalse(allows("Write", base.path + "/runtime/projects/-repo/memory-two/x.md"))
+    }
+
     func testUnsupportedControlRequestGetsAnError() {
         var chat = ChatTranscript()
         let out = chat.apply(["type": "control_request", "request_id": "h1", "request": ["subtype": "hook_callback"]])
