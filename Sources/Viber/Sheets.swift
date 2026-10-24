@@ -79,8 +79,9 @@ struct NewSessionSheet: View {
     @State private var pattern = Worktree.defaultBranchPattern
     @State private var patternProject: String?
     @State private var editingPattern = false
-    /// The idea this session is started for, when planning it opened the sheet.
-    @State private var ideaID: String?
+    /// The issue this session is started for, when planning it opened the sheet.
+    @State private var issueID: String?
+    @State private var issueKey: String?
     @State private var base = WorktreeBase.originDefault
     @State private var baseChoices = BaseChoices(hasOrigin: false, originDefault: nil, current: nil)
 
@@ -179,7 +180,7 @@ struct NewSessionSheet: View {
                                                 BranchPatternEditor(project: patternProject, draft: pattern, isPresented: $editingPattern) { saved in
                                                     pattern = saved
                                                     branchEdited = false
-                                                    branch = Worktree.defaultBranch(forName: sessionTitle, pattern: saved)
+                                                    branch = Worktree.defaultBranch(forName: sessionTitle, pattern: saved, key: issueKey)
                                                 }
                                             }
                                         }
@@ -216,7 +217,7 @@ struct NewSessionSheet: View {
                 Button("Start", action: start)
                     .keyboardShortcut(.defaultAction)
                     .disabled(folder.isEmpty || (useWorktree && repoRoot != nil && (maker.blocksWorktree || branchProblem != nil
-                                                                                   || (!branchEdited && Worktree.needsInput(pattern)))))
+                                                                                   || (!branchEdited && Worktree.needsInput(pattern, key: issueKey)))))
             }
             .padding(16)
         }
@@ -285,7 +286,7 @@ struct NewSessionSheet: View {
     }
 
     /// The project's pattern filled in with the session's name.
-    private var defaultBranch: String { Worktree.defaultBranch(forName: sessionTitle, pattern: pattern) }
+    private var defaultBranch: String { Worktree.defaultBranch(forName: sessionTitle, pattern: pattern, key: issueKey) }
 
     private var chosenBranch: String? {
         let typed = branch.trimmingCharacters(in: .whitespaces)
@@ -300,7 +301,7 @@ struct NewSessionSheet: View {
         let name = chosenBranch ?? defaultBranch, hook = maker.usesHook
         // An untouched default is numbered if taken, so only a typed name has to be new. A default with a part
         // like <id> left still has to be filled in.
-        let check = chosenBranch != nil || Worktree.needsInput(pattern)
+        let check = chosenBranch != nil || Worktree.needsInput(pattern, key: issueKey)
         let problem = await Task.detached { () -> String? in
             if check, case .problem(let problem) = Worktree.checkBranch(name, repo: root) { return problem }
             return hook ? Worktree.hookNameProblem(name) : nil
@@ -319,7 +320,8 @@ struct NewSessionSheet: View {
             name = prefill.name
             permissionMode = prefill.permissionMode
             firstMessage = prefill.firstMessage
-            ideaID = prefill.ideaID
+            issueID = prefill.issueID
+            issueKey = prefill.issueKey
             pattern = prefill.branchPattern
         } else {
             let asked = model.newSessionFolder ?? ""
@@ -357,13 +359,13 @@ struct NewSessionSheet: View {
             patternProject = project
             pattern = project.map { Prefs.branchPattern(project: $0) } ?? Worktree.defaultBranchPattern
             branchEdited = false
-            branch = Worktree.defaultBranch(forName: sessionTitle, pattern: pattern)
+            branch = Worktree.defaultBranch(forName: sessionTitle, pattern: pattern, key: issueKey)
         }
         baseChoices = choices
         base = choices.available(.originDefault)
         guard let root else { useWorktree = false; return }
-        // Default to a worktree when another open session already works in this repo. Planning an idea always uses one.
-        useWorktree = ideaID != nil || model.panes.contains { pane in
+        // Default to a worktree when another open session already works in this repo. Planning an issue always uses one.
+        useWorktree = issueID != nil || model.panes.contains { pane in
             let paneRepo = pane.worktree?.repo ?? pane.spec.cwd
             return paneRepo == root || paneRepo.hasPrefix(root + "/") || paneRepo == dir
         }
@@ -403,7 +405,8 @@ struct NewSessionSheet: View {
             base: baseChoices.available(base),
             permissionMode: permissionMode,
             firstMessage: firstMessage,
-            ideaID: ideaID,
+            issueID: issueID,
+            issueKey: issueKey,
             branchPattern: pattern
         ))
         dismiss()

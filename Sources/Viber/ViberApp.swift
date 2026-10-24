@@ -40,7 +40,7 @@ struct ViberApp: App {
             CommandMenu("Session") {
                 Button("Jump to Session…") { model.showSwitcher = true }.keyboardShortcut("k")
                 Button("Next Session Waiting for You") { model.selectNextWaiting() }.keyboardShortcut("j")
-                Button("Show Ideas") { model.select(.ideas) }.keyboardShortcut("i", modifiers: [.command, .shift])
+                Button("Show Issues") { model.select(.issues) }.keyboardShortcut("i", modifiers: [.command, .shift])
                 Button("Show Project") { if let path = model.selectedProject { model.select(.project(path)) } }
                     .keyboardShortcut("p", modifiers: [.command, .shift])
                     .disabled(model.selectedProject == nil || model.selectedProjectPage != nil)
@@ -103,8 +103,8 @@ struct ContentView: View {
                 .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 380)
         } detail: {
             Group {
-                if model.selection == .ideas {
-                    IdeasView()
+                if model.selection == .issues {
+                    IssuesView()
                 } else if let path = model.selectedProjectPage {
                     ProjectView(path: path).id(path)
                 } else if let pane = model.selectedPane {
@@ -142,6 +142,15 @@ struct ContentView: View {
         .onChange(of: model.renamingProject) { _, path in
             if let path { renameDraft = model.projectName(path) }
         }
+        .alert("Still blocked", isPresented: Binding(get: { model.blockedStart != nil }, set: { if !$0 { model.blockedStart = nil } }),
+               presenting: model.blockedStart) { issue in
+            Button("Start Anyway") { model.plan(issue); model.blockedStart = nil }
+            Button("Cancel", role: .cancel) { model.blockedStart = nil }
+        } message: { issue in
+            let blockers = model.issues.blockers(of: issue)
+            Text("\(issue.key) is blocked by " + blockers.map { "\($0.key) (\($0.status.label.lowercased()))" }.joined(separator: ", ")
+                 + ". The session will know, but it can't build on work that isn't there.")
+        }
         .alert("Viber", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
             Button("OK") { model.errorMessage = nil }
         } message: {
@@ -159,7 +168,7 @@ struct EmptyStateView: View {
                 Image(systemName: "folder.badge.plus")
                     .font(.system(size: 40)).foregroundStyle(.secondary)
                 Text("Add your first project").font(.title3.weight(.semibold))
-                Text("A project is a folder or git repository. Its sessions, worktrees and ideas stay together in the sidebar.")
+                Text("A project is a folder or git repository. Its sessions, worktrees and issues stay together in the sidebar.")
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 420)

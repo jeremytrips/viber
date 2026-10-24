@@ -204,9 +204,9 @@ final class RequestTests: XCTestCase {
     func testIdeaRequest() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("viber-req-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: dir) }
-        try ViberRequest(paneID: "p1", command: .idea, text: "line one\nline two").write(to: dir)
+        try ViberRequest(paneID: "p1", command: .issueAdd, text: "line one\nline two").write(to: dir)
         let drained = ViberRequest.drain(dir)
-        XCTAssertEqual(drained.first?.command, .idea)
+        XCTAssertEqual(drained.first?.command, .issueAdd)
         XCTAssertEqual(drained.first?.text, "line one\nline two")
     }
 }
@@ -215,56 +215,56 @@ final class IdeaListTests: XCTestCase {
     let at = Date(timeIntervalSince1970: 1_790_000_000)
 
     func testAddEditAndPersist() throws {
-        var list = IdeaList()
-        let idea = try XCTUnwrap(list.add("  Retry failed MCP servers\nWith backoff.\n", project: "/repo", by: "you", at: at))
-        XCTAssertEqual(idea.text, "Retry failed MCP servers\nWith backoff.")
-        XCTAssertEqual(idea.title, "Retry failed MCP servers")
-        XCTAssertEqual(idea.status, .open)
+        var list = IssueList()
+        let issue = try XCTUnwrap(list.add("  Retry failed MCP servers\nWith backoff.\n", project: "/repo", by: "you", at: at))
+        XCTAssertEqual(issue.text, "Retry failed MCP servers\nWith backoff.")
+        XCTAssertEqual(issue.title, "Retry failed MCP servers")
+        XCTAssertEqual(issue.status, .open)
         XCTAssertNil(list.add(" \n", project: "/repo", by: "you"), "empty text adds nothing")
 
-        list.edit(idea.id, text: "Retry MCP servers", at: at)
-        XCTAssertEqual(list.idea(idea.id)?.text, "Retry MCP servers")
-        list.edit(idea.id, text: "  ")
-        XCTAssertEqual(list.idea(idea.id)?.text, "Retry MCP servers", "empty edits are ignored")
+        list.edit(issue.id, text: "Retry MCP servers", at: at)
+        XCTAssertEqual(list.issue(issue.id)?.text, "Retry MCP servers")
+        list.edit(issue.id, text: "  ")
+        XCTAssertEqual(list.issue(issue.id)?.text, "Retry MCP servers", "empty edits are ignored")
 
-        let file = FileManager.default.temporaryDirectory.appendingPathComponent("viber-ideas-\(UUID().uuidString)/ideas.json")
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("viber-issues-\(UUID().uuidString)/issues.json")
         defer { try? FileManager.default.removeItem(at: file.deletingLastPathComponent()) }
         try list.save(to: file)
-        XCTAssertEqual(IdeaList.load(from: file, legacyNotes: file.appendingPathExtension("missing")), list)
-        XCTAssertEqual(IdeaList.load(from: file.appendingPathExtension("missing"), legacyNotes: file.appendingPathExtension("missing")),
-                       IdeaList())
+        let missing = file.appendingPathExtension("missing")
+        XCTAssertEqual(IssueList.load(from: file, legacyIdeas: missing, legacyNotes: missing), list)
+        XCTAssertEqual(IssueList.load(from: missing, legacyIdeas: missing, legacyNotes: missing), IssueList())
 
-        list.remove(idea.id)
-        XCTAssertTrue(list.ideas.isEmpty)
+        list.remove(issue.id)
+        XCTAssertTrue(list.issues.isEmpty)
     }
 
     func testLongIdeasAreCut() {
-        var list = IdeaList()
-        list.add(String(repeating: "x", count: IdeaList.maxLength + 10), project: "/repo", by: "you")
-        XCTAssertEqual(list.ideas.first?.text.count, IdeaList.maxLength)
+        var list = IssueList()
+        list.add(String(repeating: "x", count: IssueList.maxLength + 10), project: "/repo", by: "you")
+        XCTAssertEqual(list.issues.first?.text.count, IssueList.maxLength)
     }
 
     func testTitleSkipsMarkdownAndStaysShort() {
-        XCTAssertEqual(Idea(project: "/r", text: "\n## Add search\nto messages", createdAt: at, createdBy: "you").title, "Add search")
-        XCTAssertEqual(Idea(project: "/r", text: String(repeating: "a", count: 80), createdAt: at, createdBy: "you").title.count, 50)
+        XCTAssertEqual(Issue(project: "/r", text: "\n## Add search\nto messages", createdAt: at, createdBy: "you").title, "Add search")
+        XCTAssertEqual(Issue(project: "/r", text: String(repeating: "a", count: 80), createdAt: at, createdBy: "you").title.count, 50)
     }
 
     func testStartedIdeasLinkTheirSessionUntilReopened() throws {
-        var list = IdeaList()
-        let idea = try XCTUnwrap(list.add("Login screen", project: "/repo", by: "you", at: at))
-        list.start(idea.id, sessionID: "pane-1", sessionTitle: "Login screen")
-        XCTAssertEqual(list.idea(idea.id)?.status, .started)
-        XCTAssertEqual(list.idea(idea.id)?.sessionID, "pane-1")
+        var list = IssueList()
+        let issue = try XCTUnwrap(list.add("Login screen", project: "/repo", by: "you", at: at))
+        list.start(issue.id, sessionID: "pane-1", sessionTitle: "Login screen")
+        XCTAssertEqual(list.issue(issue.id)?.status, .started)
+        XCTAssertEqual(list.issue(issue.id)?.sessionID, "pane-1")
 
-        list.setStatus(idea.id, .done)
-        XCTAssertEqual(list.idea(idea.id)?.sessionID, "pane-1", "done keeps where it was worked on")
-        list.setStatus(idea.id, .open)
-        XCTAssertNil(list.idea(idea.id)?.sessionID, "back to open forgets the session")
-        XCTAssertNil(list.idea(idea.id)?.sessionTitle)
+        list.setStatus(issue.id, .done)
+        XCTAssertEqual(list.issue(issue.id)?.sessionID, "pane-1", "done keeps where it was worked on")
+        list.setStatus(issue.id, .open)
+        XCTAssertNil(list.issue(issue.id)?.sessionID, "back to open forgets the session")
+        XCTAssertNil(list.issue(issue.id)?.sessionTitle)
     }
 
     func testPendingListsOpenIdeasNewestFirstThenStarted() throws {
-        var list = IdeaList()
+        var list = IssueList()
         let first = try XCTUnwrap(list.add("first", project: "/repo", by: "you", at: at))
         list.add("second", project: "/repo", by: "you", at: at.addingTimeInterval(1))
         list.add("third", project: "/repo", by: "Backend", at: at.addingTimeInterval(2))
@@ -280,36 +280,36 @@ final class IdeaListTests: XCTestCase {
     }
 
     func testOldProjectNotesBecomeIdeas() throws {
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("viber-ideas-\(UUID().uuidString)")
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("viber-issues-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: dir) }
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let notes = dir.appendingPathComponent("notes.json")
         try Data(#"{"notes":{"/repo":{"text":"Don't touch the firmware API.","updatedAt":1790000000,"updatedBy":"Login screen"}}}"#.utf8)
             .write(to: notes)
 
-        let list = IdeaList.load(from: dir.appendingPathComponent("ideas.json"), legacyNotes: notes)
-        XCTAssertEqual(list.ideas.count, 1)
-        XCTAssertEqual(list.ideas.first?.project, "/repo")
-        XCTAssertEqual(list.ideas.first?.text, "Don't touch the firmware API.")
-        XCTAssertEqual(list.ideas.first?.createdBy, "Login screen")
-        XCTAssertEqual(list.ideas.first?.createdAt, at)
-        XCTAssertEqual(list.ideas.first?.status, .open)
+        let list = IssueList.load(from: dir.appendingPathComponent("issues.json"), legacyIdeas: dir.appendingPathComponent("ideas.json"), legacyNotes: notes)
+        XCTAssertEqual(list.issues.count, 1)
+        XCTAssertEqual(list.issues.first?.project, "/repo")
+        XCTAssertEqual(list.issues.first?.text, "Don't touch the firmware API.")
+        XCTAssertEqual(list.issues.first?.createdBy, "Login screen")
+        XCTAssertEqual(list.issues.first?.createdAt, at)
+        XCTAssertEqual(list.issues.first?.status, .open)
 
-        try IdeaList().save(to: dir.appendingPathComponent("ideas.json"))
-        XCTAssertTrue(IdeaList.load(from: dir.appendingPathComponent("ideas.json"), legacyNotes: notes).ideas.isEmpty,
-                      "once ideas are saved, old notes are not read again")
+        try IssueList().save(to: dir.appendingPathComponent("issues.json"))
+        XCTAssertTrue(IssueList.load(from: dir.appendingPathComponent("issues.json"), legacyIdeas: dir.appendingPathComponent("ideas.json"), legacyNotes: notes).issues.isEmpty,
+                      "once issues are saved, old notes are not read again")
     }
 
     func testListingForTheCLI() throws {
-        var list = IdeaList()
+        var list = IssueList()
         list.add("Add search\nTo the Messages panel.", project: "/repo", by: "you", at: at)
         let started = try XCTUnwrap(list.add("Retry MCP", project: "/repo", by: "Backend", at: at))
         list.start(started.id, sessionID: "p1", sessionTitle: "MCP retry")
-        let text = IdeaList.listing(list.pending(in: "/repo"), projectName: "viber")
-        XCTAssertTrue(text.hasPrefix("Ideas for viber"))
-        XCTAssertTrue(text.contains("- Add search\n  To the Messages panel.\n  (added by the user, 2026-09-21)"))
-        XCTAssertTrue(text.contains("added by session “Backend”"))
-        XCTAssertTrue(text.contains("started in session “MCP retry”"))
-        XCTAssertEqual(IdeaList.listing([], projectName: "viber"), "No ideas for viber yet.")
+        let text = IssueList.listing(list.pending(in: "/repo"), in: list, projectName: "viber")
+        XCTAssertTrue(text.hasPrefix("Issues for viber"))
+        XCTAssertTrue(text.contains("- REP-1: Add search\n  To the Messages panel.\n  (to do; added by the user 2026-09-21)"))
+        XCTAssertTrue(text.contains("in progress; added by session “Backend”"))
+        XCTAssertTrue(text.contains("session “MCP retry”"))
+        XCTAssertEqual(IssueList.listing([], in: list, projectName: "viber"), "No issues for viber that are not done.")
     }
 }

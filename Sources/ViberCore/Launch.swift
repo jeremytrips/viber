@@ -181,10 +181,12 @@ public enum ShellError: Error, LocalizedError {
 
 public enum ViberPaths {
     public static var support: URL {
-        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Viber")
+        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Viber")
     }
     public static var requests: URL { support.appendingPathComponent("requests") }
     public static var panes: URL { support.appendingPathComponent("panes.json") }
+    public static var issues: URL { support.appendingPathComponent("issues.json") }
+    /// Issues were ideas; read once to turn them into issues.
     public static var ideas: URL { support.appendingPathComponent("ideas.json") }
     public static var projects: URL { support.appendingPathComponent("projects.json") }
     /// Project notes from before ideas, read once to turn them into ideas.

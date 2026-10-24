@@ -9,14 +9,14 @@ enum Target: Hashable {
     case external(String)
     /// A project's page, by its path.
     case project(String)
-    /// Every project's ideas that are not planned yet.
-    case ideas
+    /// Every project's issues that are not planned yet.
+    case issues
     /// A worktree being set up for a new session.
     case job(String)
 
     var key: String {
         switch self {
-        case .ideas: return "ideas"
+        case .issues: return "issues"
         case .pane(let id): return "pane:\(id)"
         case .external(let id): return "ext:\(id)"
         case .job(let id): return "job:\(id)"
@@ -25,7 +25,7 @@ enum Target: Hashable {
     }
 
     init?(key: String) {
-        if key == "ideas" { self = .ideas }
+        if key == "issues" || key == "ideas" { self = .issues }
         else if key.hasPrefix("pane:") { self = .pane(String(key.dropFirst(5))) }
         else if key.hasPrefix("ext:") { self = .external(String(key.dropFirst(4))) }
         else if key.hasPrefix("job:") { self = .job(String(key.dropFirst(4))) }
@@ -34,12 +34,12 @@ enum Target: Hashable {
     }
 }
 
-/// The Autopilot sheet, on a project's ideas to plan or on one of them.
+/// The Autopilot sheet, on a project's issues to plan or on one of them.
 struct AutopilotSheetRequest: Identifiable {
     var project: String
-    /// Just this idea; nil for every idea still to plan.
-    var ideaID: String?
-    var id: String { project + "|" + (ideaID ?? "") }
+    /// Just this issue; nil for every issue still to plan.
+    var issueID: String?
+    var id: String { project + "|" + (issueID ?? "") }
 }
 
 /// The settings sheet of one session, opened on a tab.
@@ -60,8 +60,10 @@ struct NewSessionRequest {
     var base: WorktreeBase = .originDefault
     var permissionMode: String
     var firstMessage: String
-    /// The idea this session is started for, linked to it once it opens.
-    var ideaID: String?
+    /// The issue this session is started for, linked to it once it opens.
+    var issueID: String?
+    /// Its key, such as `EST-12`, which `<key>` in the branch pattern becomes.
+    var issueKey: String? = nil
     /// The project's branch pattern, such as `viber/<slug>`.
     var branchPattern = Worktree.defaultBranchPattern
 }
@@ -94,14 +96,16 @@ final class AppModel {
     var closing: Pane?
     var settingsSheet: SettingsSheetRequest?
     var cacheWarning: TimeInterval { TimeInterval(max(Prefs.int(Prefs.cacheWarningMinutes), 1) * 60) }
-    var ideas = IdeaList()
+    var issues = IssueList()
     /// Simulators, shared by every session's device panel and device tools.
     let deviceHub = DeviceHub()
-    /// Ideas whose session is being created, so Plan can't start two.
-    var planningIdeas: Set<String> = []
+    /// Issues whose session is being created, so Plan can't start two.
+    var planningIssues: Set<String> = []
+    /// An issue Start was pressed on while something still blocks it; an alert asks whether to start it anyway.
+    var blockedStart: Issue?
     /// Worktrees being set up for new sessions, shown in the sidebar until their session opens.
     var jobs: [WorktreeJob] = []
-    /// Projects whose ideas are being implemented one after another, by path.
+    /// Projects whose issues are being implemented one after another, by path.
     var autopilots: [String: Autopilot] = [:]
     /// Runs that ended, kept on the project's page until dismissed so you can see what they did.
     var finishedAutopilots: [String: Autopilot] = [:]
@@ -202,8 +206,8 @@ final class AppModel {
         let mode = request.permissionMode == "default" ? nil : request.permissionMode
         let model = Prefs.string(Prefs.newSessionModel)
         let launchModel = model.isEmpty ? nil : model
-        // Also for ideas started from the sheet, so Plan can't start a second session while the worktree is made.
-        if let id = request.ideaID { planningIdeas.insert(id) }
+        // Also for issues started from the sheet, so Plan can't start a second session while the worktree is made.
+        if let id = request.issueID { planningIssues.insert(id) }
         if request.useWorktree {
             let job = WorktreeJob(creating: request, title: title)
             jobs.append(job)
@@ -211,7 +215,7 @@ final class AppModel {
             run(job)
         } else {
             open(title: title, spec: LaunchSpec(profile: request.profile, cwd: request.folder, permissionMode: mode, model: launchModel),
-                 worktree: nil, firstMessage: request.firstMessage, ideaID: request.ideaID, selecting: selecting)
+                 worktree: nil, firstMessage: request.firstMessage, issueID: request.issueID, selecting: selecting)
         }
     }
 
@@ -238,17 +242,17 @@ final class AppModel {
     }
 
     @discardableResult
-    private func open(title: String, spec: LaunchSpec, worktree: WorktreeInfo?, firstMessage: String, ideaID: String? = nil,
+    private func open(title: String, spec: LaunchSpec, worktree: WorktreeInfo?, firstMessage: String, issueID: String? = nil,
                       selecting: Bool = true) -> Pane {
         let pane = Pane(title: title, spec: spec, worktree: worktree)
         wire(pane)
         panes.append(pane)
         ensureProject(pane.projectPath)
         save()
-        if let ideaID {
-            planningIdeas.remove(ideaID)
-            ideas.start(ideaID, sessionID: pane.id, sessionTitle: title)
-            saveIdeas()
+        if let issueID {
+            planningIssues.remove(issueID)
+            issues.start(issueID, sessionID: pane.id, sessionTitle: title)
+            saveIssues()
         }
         if selecting { select(.pane(pane.id)) }
         let text = firstMessage.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -269,7 +273,7 @@ final class AppModel {
         switch job.kind {
         case .create(let request):
             let worktreeRequest = WorktreeRequest(folder: request.folder, name: request.name.isEmpty ? job.title : request.name,
-                                                  branch: request.branch, branchPattern: request.branchPattern,
+                                                  branch: request.branch, branchPattern: request.branchPattern, issueKey: request.issueKey,
                                                   base: request.base, permissionMode: request.permissionMode)
             job.task = Task {
                 do {
@@ -278,9 +282,9 @@ final class AppModel {
                     guard jobs.contains(where: { $0.id == job.id }) else { return }
                     finish(job, request: request, info: info)
                 } catch {
-                    if let id = request.ideaID { planningIdeas.remove(id) }
+                    if let id = request.issueID { planningIssues.remove(id) }
                     fail(job, error, title: "worktree setup failed")
-                    if let id = request.ideaID { autopilotSetupFailed(id, error) }
+                    if let id = request.issueID { autopilotSetupFailed(id, error) }
                 }
             }
         case .remove(let info, let deleteBranch):
@@ -311,9 +315,9 @@ final class AppModel {
         jobs.removeAll { $0.id == job.id }
         let pane = open(title: job.title, spec: LaunchSpec(profile: request.profile, cwd: info.path, permissionMode: mode,
                                                            model: model.isEmpty ? nil : model),
-                        worktree: info, firstMessage: request.firstMessage, ideaID: request.ideaID, selecting: watching)
+                        worktree: info, firstMessage: request.firstMessage, issueID: request.issueID, selecting: watching)
         // An autopilot's sessions start unwatched by design.
-        if !(NSApp.isActive && watching), request.ideaID.flatMap(autopilotProject(working:)) == nil {
+        if !(NSApp.isActive && watching), request.issueID.flatMap(autopilotProject(working:)) == nil {
             notifier.post(id: "job:\(job.id):ready", title: "\(job.title) · worktree ready",
                           body: "The session has started in \((info.path as NSString).abbreviatingWithTildeInPath).",
                           target: Target.pane(pane.id).key, sound: false)
@@ -338,7 +342,7 @@ final class AppModel {
 
     func retry(_ job: WorktreeJob) {
         guard !job.isRunning else { return }
-        if let id = job.ideaID { planningIdeas.insert(id) }
+        if let id = job.issueID { planningIssues.insert(id) }
         run(job)
     }
 
@@ -560,13 +564,13 @@ final class AppModel {
         }
     }
 
-    // MARK: Ideas
+    // MARK: Issues
 
-    /// Projects an idea can be filed under: the sidebar's, then others that have ideas.
-    var ideaProjects: [String] {
+    /// Projects an issue can be filed under: the sidebar's, then others that have issues.
+    var issueProjects: [String] {
         var seen = Set<String>()
         let listed = sidebarProjects.map(\.path).filter { seen.insert($0).inserted }
-        let others = ideas.ideas.map(\.project).filter { seen.insert($0).inserted }
+        let others = issues.issues.map(\.project).filter { seen.insert($0).inserted }
             .sorted { Self.projectName($0).localizedStandardCompare(Self.projectName($1)) == .orderedAscending }
         return listed + others
     }
@@ -622,7 +626,7 @@ final class AppModel {
         !panes.contains { $0.projectPath == path } && !jobs.contains { $0.project == path }
     }
 
-    /// Takes a project out of the sidebar. Its folder, ideas and settings stay; adding it again brings them back.
+    /// Takes a project out of the sidebar. Its folder, issues and settings stay; adding it again brings them back.
     func removeProject(_ path: String) {
         guard canRemoveProject(path) else { return }
         projects.remove(path)
@@ -651,54 +655,91 @@ final class AppModel {
     func openSession(inWorktree entry: WorktreeEntry) {
         let name = entry.branch.map { $0.split(separator: "/").last.map(String.init) ?? $0 } ?? Project.folderName(entry.path)
         createSession(NewSessionRequest(folder: entry.path, profile: AccountPicker.usableDefault(self), useWorktree: false, name: name,
-                                        permissionMode: Prefs.string(Prefs.newSessionMode), firstMessage: "", ideaID: nil))
+                                        permissionMode: Prefs.string(Prefs.newSessionMode), firstMessage: "", issueID: nil))
     }
 
-    func addIdea(_ text: String, project: String, by author: String) {
-        guard let idea = ideas.add(text, project: project, by: author) else { return }
-        saveIdeas()
-        // Ideas you write while the project's autopilot runs join its queue. Ones its sessions add wait for you,
+    @discardableResult
+    func addIssue(_ text: String, project: String, by author: String, parent: String? = nil, blockedBy: [String] = []) -> Issue? {
+        guard let issue = issues.add(text, project: project, by: author, parent: parent, blockedBy: blockedBy) else { return nil }
+        saveIssues()
+        // Issues you write while the project's autopilot runs join its queue. Ones its sessions add wait for you,
         // so a run can't keep feeding itself.
-        if author == "you" { autopilots[project]?.enqueue(idea.id) }
+        if author == "you" { autopilots[project]?.enqueue(issue.id) }
+        return issue
     }
 
-    func editIdea(_ id: String, text: String) {
-        ideas.edit(id, text: text)
-        saveIdeas()
+    func setIssueLinks(_ id: String, parent: String?, blockedBy: [String]) {
+        issues.setLinks(id, parent: parent, blockedBy: blockedBy)
+        saveIssues()
     }
 
-    func setIdeaStatus(_ id: String, _ status: Idea.Status) {
-        ideas.setStatus(id, status)
-        saveIdeas()
+    func commentIssue(_ id: String, _ text: String) {
+        issues.comment(id, text, by: "you")
+        saveIssues()
+    }
+
+    func setIssuePrefix(_ prefix: String, project: String) {
+        issues.setPrefix(prefix, project: project)
+        saveIssues()
+    }
+
+    /// The issue a session works on: the one it was started for, else the one its branch is named after.
+    func issue(for pane: Pane) -> Issue? {
+        issues.issue(startedIn: pane.id) ?? pane.branch.flatMap { issues.issue(forBranch: $0, in: pane.projectPath) }
+    }
+
+    /// `viber issue shipped`, which /ship runs: the session's issue is in review, with a note on what landed.
+    private func shipped(from pane: Pane, text: String) {
+        guard let issue = issue(for: pane), issue.status != .done else { return }
+        if issue.status == .open { issues.start(issue.id, sessionID: pane.id, sessionTitle: pane.title) }
+        issues.setStatus(issue.id, .review)
+        issues.comment(issue.id, text.isEmpty ? "Shipped: the branch is ready to merge." : text, by: pane.title)
+        saveIssues()
+    }
+
+    func editIssue(_ id: String, text: String) {
+        issues.edit(id, text: text)
+        saveIssues()
+    }
+
+    func setIssueStatus(_ id: String, _ status: Issue.Status) {
+        issues.setStatus(id, status)
+        saveIssues()
         releaseFromAutopilot(id, finished: status == .done)
     }
 
-    func removeIdea(_ id: String) {
-        ideas.remove(id)
-        saveIdeas()
+    func removeIssue(_ id: String) {
+        issues.remove(id)
+        saveIssues()
         releaseFromAutopilot(id, finished: false)
     }
 
-    /// Starts a plan-mode session for an idea, in a new worktree when the project is a git repo.
-    /// The idea is marked started, and linked to the session, once the session opens.
-    func plan(_ idea: Idea) {
-        guard !planningIdeas.contains(idea.id) else { return }
-        planningIdeas.insert(idea.id)
-        let project = idea.project
+    /// Start on an issue: a plan-mode session for it, unless something still blocks it, in which case an alert asks.
+    func startIssue(_ issue: Issue) {
+        if issues.blockers(of: issue).isEmpty { plan(issue) } else { blockedStart = issue }
+    }
+
+    /// Starts a plan-mode session for an issue, in a new worktree when the project is a git repo.
+    /// The issue is marked started, and linked to the session, once the session opens.
+    func plan(_ issue: Issue) {
+        guard !planningIssues.contains(issue.id) else { return }
+        planningIssues.insert(issue.id)
+        let project = issue.project
         Task.detached {
             let root = Worktree.repoRoot(project)
             let key = root.map { WorktreeHooks.mainCheckout($0) ?? $0 }
             await MainActor.run {
                 let pattern = key.map { Prefs.branchPattern(project: $0) } ?? Worktree.defaultBranchPattern
                 let request = NewSessionRequest(folder: project, profile: AccountPicker.usableDefault(self), useWorktree: root != nil,
-                                                name: idea.title, permissionMode: PermissionMode.plan.rawValue,
-                                                firstMessage: idea.text, ideaID: idea.id, branchPattern: pattern)
-                guard root != nil, Worktree.needsInput(pattern) else { self.createSession(request); return }
+                                                name: issue.title, permissionMode: PermissionMode.plan.rawValue,
+                                                firstMessage: self.firstMessage(for: issue), issueID: issue.id, issueKey: issue.key,
+                                                branchPattern: pattern)
+                guard root != nil, Worktree.needsInput(pattern, key: issue.key) else { self.createSession(request); return }
                 // The branch needs a part only the user knows, such as a ticket number: ask in the sheet.
-                self.planningIdeas.remove(idea.id)
+                self.planningIssues.remove(issue.id)
                 self.newSessionPrefill = request
                 Task {
-                    // The ideas popover closes in the same click.
+                    // The issues popover closes in the same click.
                     try? await Task.sleep(for: .milliseconds(200))
                     self.showNewSession = true
                 }
@@ -706,14 +747,29 @@ final class AppModel {
         }
     }
 
+    /// What a session started for an issue reads first: the issue with its key, what it is part of or waits for,
+    /// and the notes on it.
+    func firstMessage(for issue: Issue) -> String {
+        var lines = ["\(issue.key): \(issue.text)"]
+        if let parent = issue.parentID.flatMap({ issues.issue($0) }) { lines.append("\nPart of \(parent.key): \(parent.title)") }
+        let blockers = issues.blockers(of: issue)
+        if !blockers.isEmpty { lines.append("\nStill blocked by " + blockers.map { "\($0.key) (\($0.status.label.lowercased()))" }.joined(separator: ", ") + ".") }
+        if !issue.comments.isEmpty {
+            lines.append("\nNotes on it:")
+            lines += issue.comments.map { "- \($0.by == "you" ? "the user" : $0.by): \($0.text)" }
+        }
+        lines.append("\n(`viber issue show \(issue.key)` prints this again; `viber issue` prints which issue this session is on.)")
+        return lines.joined(separator: "\n")
+    }
+
     // MARK: Autopilot
 
-    /// Opens the Autopilot sheet on a project's ideas to plan, or on one idea.
-    func offerAutopilot(project: String, ideaID: String? = nil, fromPopover: Bool = false) {
-        let request = AutopilotSheetRequest(project: project, ideaID: ideaID)
+    /// Opens the Autopilot sheet on a project's issues to plan, or on one issue.
+    func offerAutopilot(project: String, issueID: String? = nil, fromPopover: Bool = false) {
+        let request = AutopilotSheetRequest(project: project, issueID: issueID)
         guard fromPopover else { autopilotSheet = request; return }
         Task {
-            // The ideas popover closes in the same click.
+            // The issues popover closes in the same click.
             try? await Task.sleep(for: .milliseconds(200))
             self.autopilotSheet = request
         }
@@ -726,74 +782,74 @@ final class AppModel {
         advanceAutopilot(pilot.project)
     }
 
-    /// Adds an idea to the project's running autopilot.
-    func addToAutopilot(_ idea: Idea) {
-        autopilots[idea.project]?.enqueue(idea.id)
+    /// Adds an issue to the project's running autopilot.
+    func addToAutopilot(_ issue: Issue) {
+        autopilots[issue.project]?.enqueue(issue.id)
     }
 
-    /// The project whose autopilot is on this idea now.
-    func autopilotProject(working ideaID: String) -> String? {
-        autopilots.first { $0.value.current == ideaID }?.key
+    /// The project whose autopilot is on this issue now.
+    func autopilotProject(working issueID: String) -> String? {
+        autopilots.first { $0.value.current == issueID }?.key
     }
 
-    /// The session of the idea the project's autopilot is on, once its worktree is made.
+    /// The session of the issue the project's autopilot is on, once its worktree is made.
     func autopilotPane(_ project: String) -> Pane? {
-        guard let id = autopilots[project]?.current, let idea = ideas.idea(id), idea.status == .started,
-              let session = idea.sessionID else { return nil }
+        guard let id = autopilots[project]?.current, let issue = issues.issue(id), issue.status == .started,
+              let session = issue.sessionID else { return nil }
         return pane(session)
     }
 
     func isAutopilotSession(_ pane: Pane) -> Bool {
-        ideas.idea(startedIn: pane.id).flatMap { autopilotProject(working: $0.id) } != nil
+        issues.issue(startedIn: pane.id).flatMap { autopilotProject(working: $0.id) } != nil
     }
 
-    /// Starts the next idea's session in a new worktree, or ends the run when none is left.
+    /// Starts the next issue's session in a new worktree, or ends the run when none is left.
     private func advanceAutopilot(_ project: String) {
         guard var pilot = autopilots[project], pilot.paused == nil, pilot.current == nil else { return }
         if pilot.stuckInARow >= Autopilot.maxStuckInARow {
-            pauseAutopilot(project, "\(pilot.stuckInARow) ideas in a row got stuck, so something may be wrong with the project. "
+            pauseAutopilot(project, "\(pilot.stuckInARow) issues in a row got stuck, so something may be wrong with the project. "
                            + "Look at their sessions, then resume.")
             return
         }
-        guard !pilot.stopping, let idea = pilot.takeNext(from: ideas) else {
+        guard !pilot.stopping, let issue = pilot.takeNext(from: issues) else {
             autopilots[project] = nil
             finishedAutopilots[project] = pilot
             notifier.post(id: "autopilot:\(project):\(Date().timeIntervalSince1970)", title: "Autopilot · \(projectName(project))",
-                          body: (pilot.stopping ? "Stopped as you asked: " : "No ideas left to plan: ") + pilot.tally + ".",
+                          body: (pilot.stopping ? "Stopped as you asked: " : "No issues left to plan: ") + pilot.tally + ".",
                           target: Target.project(project).key)
             return
         }
         autopilots[project] = pilot
-        createSession(NewSessionRequest(folder: project, profile: pilot.profile, useWorktree: true, name: idea.title,
-                                        // Merged ideas build on each other; pull requests each start from origin.
+        createSession(NewSessionRequest(folder: project, profile: pilot.profile, useWorktree: true, name: issue.title,
+                                        // Merged issues build on each other; pull requests each start from origin.
                                         base: pilot.finish == .merge ? .current : .originDefault,
-                                        permissionMode: pilot.permissionMode, firstMessage: pilot.prompt(for: idea),
-                                        ideaID: idea.id, branchPattern: pilot.branchPattern),
+                                        permissionMode: pilot.permissionMode, firstMessage: pilot.prompt(for: issue, in: issues),
+                                        issueID: issue.id, issueKey: issue.key, branchPattern: pilot.branchPattern),
                       selecting: false)
     }
 
-    /// `viber idea done` or `failed`: records how the session's idea went, and moves its autopilot on.
-    private func reportIdea(from pane: Pane, text: String, finished: Bool) {
-        guard let idea = ideas.idea(startedIn: pane.id) else { return }
-        ideas.report(idea.id, text, finished: finished)
-        saveIdeas()
-        guard let project = autopilotProject(working: idea.id) else { return }
+    /// `viber issue done` or `failed`: records how the session's issue went, and moves its autopilot on.
+    private func reportIssue(from pane: Pane, text: String, finished: Bool) {
+        guard let issue = issues.issue(startedIn: pane.id) else { return }
+        issues.report(issue.id, text, finished: finished)
+        saveIssues()
+        guard let project = autopilotProject(working: issue.id) else { return }
         autopilots[project]?.finishCurrent(stuck: !finished)
         if !finished {
-            notifier.post(id: "autopilot:\(idea.id):stuck", title: "\(idea.title) · stuck", body: String(text.prefix(180)),
+            notifier.post(id: "autopilot:\(issue.id):stuck", title: "\(issue.title) · stuck", body: String(text.prefix(180)),
                           target: Target.pane(pane.id).key)
         }
         advanceAutopilot(project)
     }
 
-    /// The current idea's session ended a turn without a report: wait for its background work to wake it, remind it,
-    /// or give up on the idea. A failed turn (an API error, a dead login, a usage limit) or your Stop pauses the run.
+    /// The current issue's session ended a turn without a report: wait for its background work to wake it, remind it,
+    /// or give up on the issue. A failed turn (an API error, a dead login, a usage limit) or your Stop pauses the run.
     private func autopilotTurnEnded(_ pane: Pane, stalled: Bool = false) {
-        guard let idea = ideas.idea(startedIn: pane.id), let project = autopilotProject(working: idea.id),
+        guard let issue = issues.issue(startedIn: pane.id), let project = autopilotProject(working: issue.id),
               let pilot = autopilots[project], pilot.paused == nil else { return }
         if let stopped = pane.interruptedAt, Date().timeIntervalSince(stopped) < 120 {
             pane.interruptedAt = nil
-            pauseAutopilot(project, "You stopped “\(pane.title)”. Resume to let it carry on, or skip to the next idea.")
+            pauseAutopilot(project, "You stopped “\(pane.title)”. Resume to let it carry on, or skip to the next issue.")
             return
         }
         switch pane.state {
@@ -807,7 +863,7 @@ final class AppModel {
                 autopilots[project]?.nudged()
                 submit(pilot.nudge(), in: pane)
             case .giveUp:
-                giveUp(on: idea.id, project: project, why: "Its session kept stopping without saying whether it finished.")
+                giveUp(on: issue.id, project: project, why: "Its session kept stopping without saying whether it finished.")
             }
         default:
             // Still working, or waiting for you: answering it lets it carry on.
@@ -826,21 +882,21 @@ final class AppModel {
         }
     }
 
-    private func giveUp(on ideaID: String, project: String, why: String) {
-        let title = ideas.idea(ideaID)?.title ?? "An idea"
-        ideas.report(ideaID, why, finished: false)
-        saveIdeas()
+    private func giveUp(on issueID: String, project: String, why: String) {
+        let title = issues.issue(issueID)?.title ?? "An issue"
+        issues.report(issueID, why, finished: false)
+        saveIssues()
         autopilots[project]?.finishCurrent(stuck: true)
-        notifier.post(id: "autopilot:\(ideaID):stuck", title: "\(title) · stuck", body: why, target: Target.project(project).key)
+        notifier.post(id: "autopilot:\(issueID):stuck", title: "\(title) · stuck", body: why, target: Target.project(project).key)
         advanceAutopilot(project)
     }
 
-    /// The current idea's worktree couldn't be made. That is usually the project's setup, which would stop the next idea too.
-    private func autopilotSetupFailed(_ ideaID: String, _ error: Error) {
-        guard let project = autopilotProject(working: ideaID) else { return }
-        let title = ideas.idea(ideaID)?.title ?? "the idea"
-        ideas.report(ideaID, "The autopilot couldn't make its worktree: \(error.localizedDescription)", finished: false)
-        saveIdeas()
+    /// The current issue's worktree couldn't be made. That is usually the project's setup, which would stop the next issue too.
+    private func autopilotSetupFailed(_ issueID: String, _ error: Error) {
+        guard let project = autopilotProject(working: issueID) else { return }
+        let title = issues.issue(issueID)?.title ?? "the issue"
+        issues.report(issueID, "The autopilot couldn't make its worktree: \(error.localizedDescription)", finished: false)
+        saveIssues()
         autopilots[project]?.finishCurrent(stuck: true)
         pauseAutopilot(project, "The worktree for “\(title)” couldn't be made. Its setup's output is in the sidebar.")
     }
@@ -852,7 +908,7 @@ final class AppModel {
                       body: reason, target: Target.project(project).key)
     }
 
-    /// Picks a paused run up again: the current idea's session is told to carry on, or the next idea starts.
+    /// Picks a paused run up again: the current issue's session is told to carry on, or the next issue starts.
     func resumeAutopilot(_ project: String) {
         guard autopilots[project]?.paused != nil else { return }
         autopilots[project]?.resume()
@@ -863,35 +919,35 @@ final class AppModel {
         }
     }
 
-    /// Lets the current idea finish, then ends the run. Asked again, it keeps going after all.
+    /// Lets the current issue finish, then ends the run. Asked again, it keeps going after all.
     func toggleStopAfterCurrent(_ project: String) {
         guard let pilot = autopilots[project] else { return }
         if pilot.current == nil { stopAutopilot(project); return }
         autopilots[project]?.stopping.toggle()
     }
 
-    /// Gives up on the current idea and starts the next one. Its session is stopped and stays open.
-    func skipAutopilotIdea(_ project: String) {
+    /// Gives up on the current issue and starts the next one. Its session is stopped and stays open.
+    func skipAutopilotIssue(_ project: String) {
         guard let id = autopilots[project]?.current else { return }
         let pane = autopilotPane(project)
         pane?.interrupt()
         pane?.interruptedAt = nil
-        if let job = jobs.first(where: { $0.ideaID == id }) { dismiss(job) }
-        ideas.report(id, "You skipped it.", finished: false)
-        saveIdeas()
+        if let job = jobs.first(where: { $0.issueID == id }) { dismiss(job) }
+        issues.report(id, "You skipped it.", finished: false)
+        saveIssues()
         autopilots[project]?.finishCurrent(stuck: true)
         autopilots[project]?.resume()
         advanceAutopilot(project)
     }
 
-    /// Ends the run now. The current idea's session is stopped and stays open; a worktree still being made is dropped.
+    /// Ends the run now. The current issue's session is stopped and stays open; a worktree still being made is dropped.
     func stopAutopilot(_ project: String) {
         guard var pilot = autopilots[project] else { return }
         autopilots[project] = nil
         pilot.stopping = true
         finishedAutopilots[project] = pilot
-        if let id = pilot.current, let job = jobs.first(where: { $0.ideaID == id }) { dismiss(job) }
-        if let pane = pilot.current.flatMap({ ideas.idea($0)?.sessionID }).flatMap(pane) {
+        if let id = pilot.current, let job = jobs.first(where: { $0.issueID == id }) { dismiss(job) }
+        if let pane = pilot.current.flatMap({ issues.issue($0)?.sessionID }).flatMap(pane) {
             pane.interrupt()
             pane.interruptedAt = nil
         }
@@ -901,7 +957,7 @@ final class AppModel {
         finishedAutopilots[project] = nil
     }
 
-    /// You changed or deleted the idea the autopilot is on, so it moves on. Its session carries on as an ordinary one.
+    /// You changed or deleted the issue the autopilot is on, so it moves on. Its session carries on as an ordinary one.
     private func releaseFromAutopilot(_ id: String, finished: Bool) {
         guard let project = autopilotProject(working: id) else { return }
         autopilots[project]?.finishCurrent(stuck: !finished)
@@ -931,8 +987,13 @@ final class AppModel {
         if settingsSheet?.paneID == pane.id { settingsSheet = nil }
         notifier.clear(target: Target.pane(pane.id).key)
         save()
-        if let idea = ideas.idea(startedIn: pane.id), let project = autopilotProject(working: idea.id) {
-            giveUp(on: idea.id, project: project, why: "Its session was closed before it said how it went.")
+        if let issue = issues.issue(startedIn: pane.id), let project = autopilotProject(working: issue.id) {
+            giveUp(on: issue.id, project: project, why: "Its session was closed before it said how it went.")
+        } else if removeWorktree, let issue = issue(for: pane), issue.status == .started || issue.status == .review {
+            // /cleanup only removes a worktree whose branch is merged, so the issue it was for is done.
+            issues.setStatus(issue.id, .done)
+            issues.comment(issue.id, "Merged: its worktree was cleaned up.", by: pane.title)
+            saveIssues()
         }
         guard removeWorktree, let info = pane.worktree else { return }
         let job = WorktreeJob(removing: info, deleteBranch: deleteBranch, title: pane.title, project: pane.projectPath)
@@ -994,7 +1055,7 @@ final class AppModel {
     }
 
     private func turnFinished(_ pane: Pane) {
-        // A `viber idea done` from the turn that just ended decides what the autopilot does next: read it now,
+        // A `viber issue done` from the turn that just ended decides what the autopilot does next: read it now,
         // not on the next poll.
         if isAutopilotSession(pane) {
             drainRequests()
@@ -1097,10 +1158,24 @@ final class AppModel {
                 notifier.post(id: UUID().uuidString, title: pane.title, body: request.text ?? "", target: Target.pane(pane.id).key)
             case .rename:
                 if let text = request.text, !text.isEmpty { pane.title = text; save() }
-            case .idea:
-                addIdea(request.text ?? "", project: pane.projectPath, by: pane.title)
-            case .ideaDone, .ideaFailed:
-                reportIdea(from: pane, text: request.text ?? "", finished: request.command == .ideaDone)
+            case .issueAdd:
+                addIssue(request.text ?? "", project: pane.projectPath, by: pane.title, parent: request.parent, blockedBy: request.blockedBy ?? [])
+            case .issueDone, .issueFailed:
+                reportIssue(from: pane, text: request.text ?? "", finished: request.command == .issueDone)
+            case .issueShipped:
+                shipped(from: pane, text: request.text ?? "")
+            case .issueUpdate:
+                guard let key = request.key, let issue = issues.issue(key, in: pane.projectPath) else { continue }
+                if let status = request.status.flatMap(Issue.Status.init(rawValue:)) { setIssueStatus(issue.id, status) }
+                if request.parent != nil || request.blockedBy != nil {
+                    let parent = request.parent ?? issue.parentID
+                    issues.setLinks(issue.id, parent: parent == "" ? nil : parent, blockedBy: request.blockedBy ?? issue.blockedBy)
+                    saveIssues()
+                }
+            case .issueComment:
+                guard let key = request.key, let issue = issues.issue(key, in: pane.projectPath) else { continue }
+                issues.comment(issue.id, request.text ?? "", by: pane.title)
+                saveIssues()
             }
         }
     }
@@ -1209,11 +1284,11 @@ final class AppModel {
         }
     }
 
-    func saveIdeas() {
+    func saveIssues() {
         do {
-            try ideas.save()
+            try issues.save()
         } catch {
-            errorMessage = "Could not save ideas: \(error.localizedDescription)"
+            errorMessage = "Could not save issues: \(error.localizedDescription)"
         }
     }
 
@@ -1226,19 +1301,19 @@ final class AppModel {
     }
 
     private func restore() {
-        ideas = IdeaList.load()
-        // Ideas were filed under a session's folder; a subfolder's or worktree's now belong to its repository.
-        if ideas.moveProjects(ProjectRoot.resolve) { saveIdeas() }
+        issues = IssueList.load()
+        // Issues were filed under a session's folder; a subfolder's or worktree's now belong to its repository.
+        if issues.moveProjects(ProjectRoot.resolve) { saveIssues() }
         if let data = try? Data(contentsOf: ViberPaths.panes),
            let records = try? JSONDecoder().decode([PaneRecord].self, from: data) {
             panes = records.map(Pane.init(record:))
             panes.forEach(wire)
         }
-        // The first launch with projects starts the list from the open sessions and the folders that have ideas.
+        // The first launch with projects starts the list from the open sessions and the folders that have issues.
         let saved = ProjectList.load()
         projects = saved ?? ProjectList()
         var changed = saved == nil
-        let withIdeas = saved == nil ? ideas.ideas.map(\.project).filter { FileManager.default.fileExists(atPath: $0) } : []
+        let withIdeas = saved == nil ? issues.issues.map(\.project).filter { FileManager.default.fileExists(atPath: $0) } : []
         for path in panes.map(\.projectPath) + withIdeas {
             if projects.add(path) { changed = true }
         }

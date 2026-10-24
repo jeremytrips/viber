@@ -124,7 +124,7 @@ final class Pane: Identifiable {
     var profileLabel: String { spec.profile ?? "Default login" }
     var cwd: String { spec.cwd }
     /// The project it belongs to: its repository's main checkout (also for subfolders and worktrees), else its folder.
-    /// Ideas are filed under it.
+    /// Issues are filed under it.
     @ObservationIgnored let projectPath: String
     var projectName: String { URL(fileURLWithPath: projectPath).lastPathComponent }
     /// The worktree's branch as it is now, or the one it was created on until it is read (and while HEAD is detached).

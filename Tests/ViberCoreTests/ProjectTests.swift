@@ -172,11 +172,11 @@ final class ProjectListTests: XCTestCase {
     }
 
     func testIdeasMoveToTheirProject() {
-        var ideas = IdeaList()
-        ideas.add("one", project: "/code/app/apps/web", by: "you", at: at)
-        ideas.add("two", project: "/code/app", by: "you", at: at)
-        XCTAssertTrue(ideas.moveProjects { $0.hasPrefix("/code/app") ? "/code/app" : $0 })
-        XCTAssertEqual(ideas.ideas.map(\.project), ["/code/app", "/code/app"])
-        XCTAssertFalse(ideas.moveProjects { $0 }, "nothing left to move")
+        var issues = IssueList()
+        issues.add("one", project: "/code/app/apps/web", by: "you", at: at)
+        issues.add("two", project: "/code/app", by: "you", at: at)
+        XCTAssertTrue(issues.moveProjects { $0.hasPrefix("/code/app") ? "/code/app" : $0 })
+        XCTAssertEqual(issues.issues.map(\.project), ["/code/app", "/code/app"])
+        XCTAssertFalse(issues.moveProjects { $0 }, "nothing left to move")
     }
 }

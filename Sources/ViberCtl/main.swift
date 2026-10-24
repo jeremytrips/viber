@@ -9,9 +9,12 @@ usage: viber close [--remove-worktree] [--delete-branch]
        viber worktree
        viber notify <text...>
        viber rename <title...>
-       viber idea [list | add <text...> | add -]
-       viber idea done [<summary...> | -]
-       viber idea failed <why...> | -
+       viber issue [list | show <key> | add [--parent <key>] [--blocked-by <key,...>] <text...> | add -]
+       viber issue update <key> [--status <status>] [--parent <key>|none] [--blocked-by <key,...>|none]
+       viber issue comment <key> <text...> | comment <key> -
+       viber issue done [<what shipped...> | -]
+       viber issue failed <why...> | -
+       viber issue shipped [<what landed...>]
        viber --help
 
 Talks to the Viber app that runs this Claude Code session.
@@ -22,12 +25,18 @@ Talks to the Viber app that runs this Claude Code session.
            (the one --delete-branch deletes), and the repository. Exits 1 if Viber made none.
   notify   Show a macOS notification for this session.
   rename   Set this session's title in the sidebar.
-  idea     This project's ideas: things to do later that nobody has planned yet.
-           list           print the ideas that are not done (the default)
-           add <text...>  add an idea (`add -` reads it from stdin); the first line is its title
-           done [summary] mark the idea this session was started for as done, saying what shipped
-           failed <why>   say it got stuck and why; it stays started, linked to this session
-           After either, an autopilot run moves on to its next idea.
+  issue    This project's issues: work to do, in progress, in review or done, each with a key like EST-12.
+           (no arguments) print this session's own issue; exits 1 if it has none
+           list           print the issues that are not done
+           show <key>     print one issue in full, with its links and comments
+           add <text...>  add an issue to do (`add -` reads it from stdin); the first line is its title
+                          --parent <key> makes it a sub-issue; --blocked-by <key,...> says what must be done first
+           update <key>   change an issue's status (todo, progress, review, done), parent or blockers
+           comment <key>  add a note to an issue
+           done [what]    mark this session's issue as done, saying what shipped
+           failed <why>   say this session's issue got stuck and why; it stays in progress, linked to this session
+           shipped [what] this session's issue is in review: the branch is pushed or ready to merge
+           After done or failed, an autopilot run moves on to its next issue.
 """
 
 func fail(_ message: String, code: Int32) -> Never {
@@ -46,6 +55,62 @@ if ["--help", "-h", "help"].contains(command) {
 
 guard let paneID = ProcessInfo.processInfo.environment["VIBER_PANE_ID"], !paneID.isEmpty else {
     fail("viber: not running inside a Viber session (VIBER_PANE_ID is not set)", code: 2)
+}
+
+/// The project this session's issues are filed under.
+func projectPath() -> String {
+    guard let project = ProcessInfo.processInfo.environment["VIBER_PROJECT"], !project.isEmpty else {
+        fail("viber: this session was started by an older Viber; restart it to use the project's issues", code: 2)
+    }
+    return project
+}
+
+/// The issue this session is for: the one it was started for, else the one its branch is named after.
+func ownIssue(in list: IssueList) -> Issue? {
+    if let issue = list.issue(startedIn: paneID) { return issue }
+    let head = Shell.run("git", ["rev-parse", "--abbrev-ref", "HEAD"], timeout: 5)
+    guard head.ok, head.output != "HEAD" else { return nil }
+    return list.issue(forBranch: head.output, in: projectPath())
+}
+
+/// Text from the arguments, or from stdin when they are just `-`.
+func text(from rest: [String]) -> String {
+    (rest == ["-"] ? String(decoding: FileHandle.standardInput.readDataToEndOfFile(), as: UTF8.self) : rest.joined(separator: " "))
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+func checkLength(_ text: String, what: String) {
+    guard text.count <= IssueList.maxLength else {
+        fail("viber: the \(what) is \(text.count) characters; keep it under \(IssueList.maxLength)", code: 64)
+    }
+}
+
+/// `--parent <key>` and `--blocked-by <a,b>` taken out of the arguments. "none" clears them for update.
+func takeLinks(from rest: inout [String]) -> (parent: String?, blockedBy: [String]?) {
+    var parent: String?, blockedBy: [String]?
+    var kept: [String] = []
+    var index = 0
+    while index < rest.count {
+        let arg = rest[index]
+        if arg == "--parent" || arg == "--blocked-by", index + 1 < rest.count {
+            let value = rest[index + 1]
+            if arg == "--parent" { parent = value.lowercased() == "none" ? "" : value }
+            else { blockedBy = value.lowercased() == "none" ? [] : value.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) } }
+            index += 2
+        } else {
+            kept.append(arg)
+            index += 1
+        }
+    }
+    rest = kept
+    return (parent, blockedBy)
+}
+
+/// Fails unless every key names an issue in the project.
+func checkKeys(_ keys: [String], in list: IssueList) {
+    for key in keys where !key.isEmpty && list.issue(key, in: projectPath()) == nil {
+        fail("viber: no issue \(key) in this project (`viber issue list` shows them)", code: 1)
+    }
 }
 
 let request: ViberRequest
@@ -90,46 +155,85 @@ case "notify", "rename":
         request = ViberRequest(paneID: paneID, command: .rename, text: text)
         confirmation = "Viber will rename this session to: \(text)"
     }
-case "idea":
-    let action = args.first ?? "list"
+case "issue", "idea":
+    let list = IssueList.load()
+    let action = args.first ?? "own"
+    var rest = Array(args.dropFirst())
     switch action {
+    case "own":
+        guard let issue = ownIssue(in: list) else { fail("viber: this session has no issue of its own", code: 1) }
+        print("\(issue.key) · \(issue.status.label): \(issue.title)")
+        exit(0)
     case "list":
-        guard let project = ProcessInfo.processInfo.environment["VIBER_PROJECT"], !project.isEmpty else {
-            fail("viber: this session was started by an older Viber; restart it to read the project's ideas", code: 2)
-        }
-        print(IdeaList.listing(IdeaList.load().pending(in: project), projectName: URL(fileURLWithPath: project).lastPathComponent))
+        let project = projectPath()
+        print(IssueList.listing(list.pending(in: project), in: list, projectName: URL(fileURLWithPath: project).lastPathComponent))
+        exit(0)
+    case "show":
+        guard let key = rest.first else { fail("viber: show needs an issue key\n\n\(usage)", code: 64) }
+        guard let issue = list.issue(key, in: projectPath()) else { fail("viber: no issue \(key) in this project", code: 1) }
+        print(list.detail(issue))
         exit(0)
     case "add":
-        let rest = Array(args.dropFirst())
-        let text = rest == ["-"]
-            ? String(decoding: FileHandle.standardInput.readDataToEndOfFile(), as: UTF8.self)
-            : rest.joined(separator: " ")
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            fail("viber: idea add needs text\n\n\(usage)", code: 64)
+        let links = takeLinks(from: &rest)
+        let body = text(from: rest)
+        guard !body.isEmpty else { fail("viber: issue add needs text\n\n\(usage)", code: 64) }
+        checkLength(body, what: "issue")
+        checkKeys([links.parent ?? ""] + (links.blockedBy ?? []), in: list)
+        request = ViberRequest(paneID: paneID, command: .issueAdd, text: body, parent: links.parent, blockedBy: links.blockedBy)
+        confirmation = "Viber will add the issue to this project's list in a few seconds."
+    case "update":
+        guard let key = rest.first else { fail("viber: update needs an issue key\n\n\(usage)", code: 64) }
+        rest.removeFirst()
+        guard let issue = list.issue(key, in: projectPath()) else { fail("viber: no issue \(key) in this project", code: 1) }
+        let links = takeLinks(from: &rest)
+        var status: String?
+        if let index = rest.firstIndex(of: "--status") {
+            guard index + 1 < rest.count, let parsed = Issue.Status.parse(rest[index + 1]) else {
+                fail("viber: --status needs one of: todo, progress, review, done", code: 64)
+            }
+            status = parsed.rawValue
+            rest.removeSubrange(index...index + 1)
         }
-        guard text.count <= IdeaList.maxLength else {
-            fail("viber: the idea is \(text.count) characters; keep it under \(IdeaList.maxLength)", code: 64)
+        guard rest.isEmpty else { fail("viber: unknown arguments for update: \(rest.joined(separator: " "))\n\n\(usage)", code: 64) }
+        guard status != nil || links.parent != nil || links.blockedBy != nil else {
+            fail("viber: update needs --status, --parent or --blocked-by", code: 64)
         }
-        request = ViberRequest(paneID: paneID, command: .idea, text: text)
-        confirmation = "Viber will add the idea to this project's list in a few seconds."
-    case "done", "failed":
-        let rest = Array(args.dropFirst())
-        let text = (rest == ["-"]
-            ? String(decoding: FileHandle.standardInput.readDataToEndOfFile(), as: UTF8.self)
-            : rest.joined(separator: " ")).trimmingCharacters(in: .whitespacesAndNewlines)
-        if action == "failed", text.isEmpty { fail("viber: idea failed needs the reason\n\n\(usage)", code: 64) }
-        guard text.count <= IdeaList.maxLength else {
-            fail("viber: the report is \(text.count) characters; keep it under \(IdeaList.maxLength)", code: 64)
+        checkKeys([links.parent ?? ""] + (links.blockedBy ?? []), in: list)
+        request = ViberRequest(paneID: paneID, command: .issueUpdate, key: issue.key, status: status, parent: links.parent, blockedBy: links.blockedBy)
+        var changes: [String] = []
+        if let status { changes.append("move it to \(Issue.Status(rawValue: status)?.label.lowercased() ?? status)") }
+        if let parent = links.parent { changes.append(parent.isEmpty ? "take it out of its parent" : "make it part of \(parent.uppercased())") }
+        if let blockers = links.blockedBy { changes.append(blockers.isEmpty ? "clear what blocks it" : "mark it blocked by \(blockers.joined(separator: ", ").uppercased())") }
+        confirmation = "Viber will update \(issue.key): " + changes.joined(separator: ", ") + "."
+    case "comment":
+        guard let key = rest.first else { fail("viber: comment needs an issue key\n\n\(usage)", code: 64) }
+        rest.removeFirst()
+        guard let issue = list.issue(key, in: projectPath()) else { fail("viber: no issue \(key) in this project", code: 1) }
+        let body = text(from: rest)
+        guard !body.isEmpty else { fail("viber: comment needs text\n\n\(usage)", code: 64) }
+        checkLength(body, what: "comment")
+        request = ViberRequest(paneID: paneID, command: .issueComment, text: body, key: issue.key)
+        confirmation = "Viber will add the comment to \(issue.key)."
+    case "done", "failed", "shipped":
+        let body = text(from: rest)
+        if action == "failed", body.isEmpty { fail("viber: issue failed needs the reason\n\n\(usage)", code: 64) }
+        checkLength(body, what: "report")
+        guard let issue = ownIssue(in: list) else {
+            fail("viber: this session has no issue of its own (it wasn't started for one, and its branch names none), so there is none to mark", code: 1)
         }
-        guard let idea = IdeaList.load().idea(startedIn: paneID) else {
-            fail("viber: this session wasn't started for an idea, so there is none to mark", code: 1)
+        switch action {
+        case "done":
+            request = ViberRequest(paneID: paneID, command: .issueDone, text: body, key: issue.key)
+            confirmation = "Viber will mark \(issue.key) “\(issue.title)” as done."
+        case "failed":
+            request = ViberRequest(paneID: paneID, command: .issueFailed, text: body, key: issue.key)
+            confirmation = "Viber will mark \(issue.key) “\(issue.title)” as stuck, with your reason."
+        default:
+            request = ViberRequest(paneID: paneID, command: .issueShipped, text: body, key: issue.key)
+            confirmation = "Viber will move \(issue.key) “\(issue.title)” to in review."
         }
-        request = ViberRequest(paneID: paneID, command: action == "done" ? .ideaDone : .ideaFailed, text: text)
-        confirmation = action == "done"
-            ? "Viber will mark “\(idea.title)” as done."
-            : "Viber will mark “\(idea.title)” as stuck, with your reason."
     default:
-        fail("viber: unknown idea action: \(action)\n\n\(usage)", code: 64)
+        fail("viber: unknown issue action: \(action)\n\n\(usage)", code: 64)
     }
 default:
     fail("viber: unknown command: \(command)\n\n\(usage)", code: 64)

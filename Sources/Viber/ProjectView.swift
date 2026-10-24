@@ -2,8 +2,13 @@ import AppKit
 import SwiftUI
 import ViberCore
 
-/// A project's page: its open sessions, ideas, earlier sessions, worktrees, branches and settings.
+/// A project's page: Planning (its open sessions, issues, earlier sessions, worktrees and branches) and Settings.
 struct ProjectView: View {
+    enum Tab: String, CaseIterable, Identifiable {
+        case planning = "Planning", settings = "Settings"
+        var id: Self { self }
+    }
+
     @Environment(AppModel.self) private var model
     let path: String
 
@@ -14,9 +19,12 @@ struct ProjectView: View {
     @State private var editingPattern = false
     @State private var pattern = Worktree.defaultBranchPattern
     @State private var draft = ""
+    @AppStorage("projectTab") private var tab: Tab = .planning
+    @AppStorage("issuesAsBoard") private var board = false
+    @State private var editingPrefix = false
     @State private var creatingRepo = false
     @State private var repoError: String?
-    @FocusState private var ideaFocused: Bool
+    @FocusState private var issueFocused: Bool
 
     private static let earlierShown = 6
     private static let branchesShown = 8
@@ -39,14 +47,25 @@ struct ProjectView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 26) {
                 header
-                openSessions
-                ideas
-                earlierSessions
-                if summary?.isRepo == true {
-                    worktrees
-                    branches
+                Picker("Tab", selection: $tab) {
+                    ForEach(Tab.allCases) { Text($0.rawValue).tag($0) }
                 }
-                settings
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, -8)
+                if tab == .planning {
+                    openSessions
+                    issues
+                    earlierSessions
+                    if summary?.isRepo == true {
+                        worktrees
+                        branches
+                    }
+                } else {
+                    settings
+                }
             }
             .padding(24)
             .frame(maxWidth: 820)
@@ -140,50 +159,60 @@ struct ProjectView: View {
         }
     }
 
-    // MARK: Ideas
+    // MARK: Issues
 
-    private var ideas: some View {
-        let pending = model.ideas.pending(in: path)
-        let toPlan = model.ideas.toPlanCount(in: path)
-        return PageSection(title: "Ideas", detail: toPlan > 0 ? "\(toPlan) to plan" : nil) {
+    private var issues: some View {
+        let mine = model.issues.issues(in: path)
+        let toDo = mine.filter { $0.status == .open }.count
+        let counts = [(toDo, "to do"), (mine.filter { $0.status == .started }.count, "in progress"),
+                      (mine.filter { $0.status == .review }.count, "in review")].filter { $0.0 > 0 }.map { "\($0.0) \($0.1)" }
+        return PageSection(title: "Issues", detail: counts.isEmpty ? nil : counts.joined(separator: " · ")) {
             HStack(spacing: 14) {
-                if model.autopilots[path] == nil, toPlan > 0, summary?.isRepo != false {
+                if model.autopilots[path] == nil, toDo > 0, summary?.isRepo != false {
                     Button { model.offerAutopilot(project: path) } label: { Label("Autopilot…", systemImage: "airplane") }
                         .buttonStyle(.link)
-                        .help("Implement the ideas one after another on their own, each in a new worktree, shipped once it works")
+                        .help("Implement the issues to do one after another on their own, each in a new worktree, shipped once it works")
                 }
-                Button("All Ideas") { model.select(.ideas) }
+                Button("All Issues") { model.select(.issues) }
                     .buttonStyle(.link)
-                    .help("Every project's ideas, done ones too (⇧⌘I)")
+                    .help("Every project's issues (⇧⌘I)")
+                Picker("Layout", selection: $board) {
+                    Image(systemName: "list.bullet").tag(false).help("List")
+                    Image(systemName: "rectangle.split.3x1").tag(true).help("Board")
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
             }
         } content: {
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 10) {
                 AutopilotCard(project: path)
                 HStack(alignment: .top, spacing: 6) {
-                    TextField("Something to do later…", text: $draft, axis: .vertical)
+                    TextField("New issue… the first line is its title", text: $draft, axis: .vertical)
                         .textFieldStyle(.roundedBorder)
                         .lineLimit(1...5)
-                        .focused($ideaFocused)
-                        .onSubmit(addIdea)
-                    Button("Add", action: addIdea)
+                        .focused($issueFocused)
+                        .onSubmit(addIssue)
+                    Button("Add", action: addIssue)
                         .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
-                ForEach(pending) { idea in
-                    IdeaRow(idea: idea, compact: true)
-                }
-                if pending.isEmpty {
-                    Text("Nothing to plan. Plan starts a session for an idea in plan mode, and sessions can add ideas with /idea.")
+                if mine.isEmpty {
+                    Text("No issues yet. Start opens a session for one in plan mode; sessions move it along as they ship, and can add issues with /issue.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                } else if board {
+                    IssueBoard(project: path)
+                } else {
+                    IssueGroups(project: path)
                 }
             }
         }
     }
 
-    private func addIdea() {
-        model.addIdea(draft, project: path, by: "you")
+    private func addIssue() {
+        model.addIssue(draft, project: path, by: "you")
         draft = ""
-        ideaFocused = true
+        issueFocused = true
     }
 
     // MARK: Repository
@@ -235,11 +264,21 @@ struct ProjectView: View {
     // MARK: Settings
 
     private var settings: some View {
-        PageSection(title: "Settings") {
+        let prefix = model.issues.prefix(for: path)
+        return PageSection(title: "Settings") {
             PageCard {
+                SettingRow(label: "Issue keys",
+                           note: "\(prefix)-1, \(prefix)-2… Branch names carry them, and sessions and commits refer to issues by them. Issues live in Viber, not in the repository.") {
+                    Text(prefix).font(.callout.monospaced()).textSelection(.enabled)
+                    Button("Edit…") { editingPrefix = true }
+                        .popover(isPresented: $editingPrefix, arrowEdge: .bottom) {
+                            IssuePrefixEditor(project: path, isPresented: $editingPrefix)
+                        }
+                }
+                Divider()
                 if summary?.isRepo == true {
                     SettingRow(label: "Branch pattern",
-                               note: "The branch new worktree sessions start on. Saved in Viber, not in the repository.") {
+                               note: "The branch new worktree sessions start on. <slug> is the session name and <key> the issue's key; a pattern with neither puts the key in front of the slug. Saved in Viber, not in the repository.") {
                         Text(pattern).font(.callout.monospaced()).textSelection(.enabled)
                         Button("Edit…") { editingPattern = true }
                             .popover(isPresented: $editingPattern, arrowEdge: .bottom) {
@@ -436,7 +475,7 @@ private struct EarlierSessionRow: View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(session.title).lineLimit(1)
-                Text(place(folder, in: project) + (session.updatedDate.map { " · " + IdeaRow.relative($0, now: model.now) } ?? ""))
+                Text(place(folder, in: project) + (session.updatedDate.map { " · " + IssueRow.relative($0, now: model.now) } ?? ""))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -519,7 +558,7 @@ private struct BranchRow: View {
             }
             Spacer(minLength: 8)
             if let date = branch.date {
-                Text(IdeaRow.relative(date, now: model.now)).font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                Text(IssueRow.relative(date, now: model.now)).font(.caption).foregroundStyle(.secondary).monospacedDigit()
             }
         }
         .padding(.horizontal, 12).padding(.vertical, 7)
@@ -529,5 +568,41 @@ private struct BranchRow: View {
                 NSPasteboard.general.setString(branch.name, forType: .string)
             }
         }
+    }
+}
+
+/// Changes a project's issue key prefix; its issues are renumbered with it (the numbers stay).
+private struct IssuePrefixEditor: View {
+    @Environment(AppModel.self) private var model
+    let project: String
+    @Binding var isPresented: Bool
+    @State private var draft = ""
+
+    var body: some View {
+        let cleaned = IssueList.cleanPrefix(draft)
+        let fallback = IssueList.defaultPrefix(forProject: project)
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Issue keys").font(.headline)
+            TextField("Prefix", text: $draft, prompt: Text(fallback))
+                .textFieldStyle(.roundedBorder)
+                .onSubmit(save)
+            Text(cleaned.isEmpty ? "Letters and digits, such as \(fallback). Keys become \(fallback)-1, \(fallback)-2…"
+                 : "Keys become \(cleaned)-1, \(cleaned)-2… Existing issues keep their numbers.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Button("Use Default") { draft = "" }
+                Spacer()
+                Button("Cancel") { isPresented = false }.keyboardShortcut(.cancelAction)
+                Button("Save", action: save).keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(14)
+        .frame(width: 360)
+        .onAppear { draft = model.issues.prefixes[project] ?? "" }
+    }
+
+    private func save() {
+        model.setIssuePrefix(draft, project: project)
+        isPresented = false
     }
 }

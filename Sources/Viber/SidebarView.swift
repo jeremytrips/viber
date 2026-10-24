@@ -28,7 +28,7 @@ struct SidebarView: View {
         let shortcuts = Dictionary(uniqueKeysWithValues: groups.flatMap(\.panes).enumerated().map { ($1.id, $0) })
         List(selection: selection) {
             Section {
-                IdeasRow().tag(Target.ideas)
+                IssuesRow().tag(Target.issues)
             }
             Section {
                 ForEach(groups, id: \.project.path) { group in
@@ -123,17 +123,17 @@ struct PaneRowMenu: View {
     }
 }
 
-/// Entry point to the Ideas panel, with how many ideas are waiting to be planned.
-struct IdeasRow: View {
+/// Entry point to the Issues panel, with how many issues are still to do.
+struct IssuesRow: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        let count = model.ideas.ideas.filter { $0.status == .open }.count
+        let count = model.issues.issues.filter { $0.status == .open }.count
         HStack(spacing: 6) {
-            Label("Ideas", systemImage: "lightbulb")
+            Label("Issues", systemImage: "checklist")
             Spacer(minLength: 4)
             if count > 0 {
-                Text("\(count) to plan").font(.caption).foregroundStyle(.secondary)
+                Text("\(count) to do").font(.caption).foregroundStyle(.secondary)
             }
         }
     }
@@ -148,7 +148,7 @@ struct ProjectRow: View {
     @State private var hovering = false
 
     var body: some View {
-        let ideas = model.ideas.toPlanCount(in: project.path)
+        let issues = model.issues.toPlanCount(in: project.path)
         let waiting = panes.filter { $0.state.needsYou }.count
         HStack(spacing: 6) {
             Image(systemName: panes.isEmpty ? "folder" : "folder.fill")
@@ -167,22 +167,22 @@ struct ProjectRow: View {
                     Image(systemName: "airplane").foregroundStyle(pilot.paused == nil ? Color.accentColor : Color.orange)
                 }
                 .buttonStyle(.borderless)
-                .help(pilot.paused.map { "Autopilot paused: \($0)" } ?? "The autopilot is implementing \(project.name)'s ideas")
+                .help(pilot.paused.map { "Autopilot paused: \($0)" } ?? "The autopilot is implementing \(project.name)'s issues")
                 .accessibilityLabel(pilot.paused == nil ? "Autopilot running" : "Autopilot paused")
             }
-            if ideas > 0 || hovering || showingIdeas {
+            if issues > 0 || hovering || showingIdeas {
                 Button { showingIdeas = true } label: {
                     HStack(spacing: 2) {
-                        Image(systemName: ideas == 0 ? "lightbulb" : "lightbulb.fill")
-                        if ideas > 0 { Text("\(ideas)").monospacedDigit() }
+                        Image(systemName: issues == 0 ? "checklist.unchecked" : "checklist")
+                        if issues > 0 { Text("\(issues)").monospacedDigit() }
                     }
-                    .foregroundStyle(ideas == 0 ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.accentColor))
+                    .foregroundStyle(issues == 0 ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.accentColor))
                 }
                 .buttonStyle(.borderless)
-                .help(ideas == 0 ? "Ideas for later in \(project.name)" : "\(ideas) idea\(ideas == 1 ? "" : "s") to plan in \(project.name)")
-                .accessibilityLabel(ideas == 0 ? "Project ideas" : "Project ideas, \(ideas) to plan")
+                .help(issues == 0 ? "Issues in \(project.name)" : "\(issues) issue\(issues == 1 ? "" : "s") to do in \(project.name)")
+                .accessibilityLabel(issues == 0 ? "Project issues" : "Project issues, \(issues) to do")
                 .popover(isPresented: $showingIdeas, arrowEdge: .trailing) {
-                    ProjectIdeasPopover(name: project.name, path: project.path) { showingIdeas = false }
+                    ProjectIssuesPopover(name: project.name, path: project.path) { showingIdeas = false }
                 }
             }
             if hovering || panes.isEmpty {
@@ -219,7 +219,7 @@ struct ProjectMenu: View {
         Button("Rename…") { model.renamingProject = path }
         Button("Remove from Sidebar") { model.removeProject(path) }
             .disabled(!model.canRemoveProject(path))
-            .help(model.canRemoveProject(path) ? "Its folder, ideas and settings stay; add it again to bring them back"
+            .help(model.canRemoveProject(path) ? "Its folder, issues and settings stay; add it again to bring them back"
                                                : "Close its sessions first")
     }
 }
@@ -236,20 +236,29 @@ struct PaneRow: View {
                 HStack(spacing: 4) {
                     if model.isAutopilotSession(pane) {
                         Image(systemName: "airplane").font(.caption).foregroundStyle(Color.accentColor)
-                            .help("The autopilot started this session for an idea")
+                            .help("The autopilot started this session for an issue")
                     }
                     Text(pane.title).lineLimit(1).fontWeight(.medium)
                 }
                 HStack(spacing: 5) {
                     Chip(text: pane.profileLabel)
+                    let issue = model.issue(for: pane)
+                    if let issue {
+                        HStack(spacing: 3) {
+                            Circle().fill(issue.status.color).frame(width: 6, height: 6)
+                            Text("\(issue.key) · \(issue.status.label)")
+                        }
+                        .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                        .help("\(issue.key): \(issue.title)" + (pane.branch.map { "\n⑂ \($0)" } ?? ""))
+                    }
                     if let worktree = pane.worktree {
-                        if let branch = pane.branch {
+                        if issue == nil, let branch = pane.branch {
                             // The last part, so "feat/NEX-705-…" shows its ticket in the narrow chip.
                             Chip(text: "⑂ " + (branch.split(separator: "/").last.map(String.init) ?? branch))
                                 .help(worktree.branch.isEmpty || branch == worktree.branch ? branch : "\(branch), created as \(worktree.branch)")
                         }
-                        if let diff = pane.diffStat { Text(diff).font(.caption2.monospaced()).foregroundStyle(.secondary) }
-                    } else {
+                        if issue == nil, let diff = pane.diffStat { Text(diff).font(.caption2.monospaced()).foregroundStyle(.secondary) }
+                    } else if issue == nil {
                         Text(pane.state.label).font(.caption).foregroundStyle(.secondary)
                     }
                 }

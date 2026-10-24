@@ -43,7 +43,7 @@ Show a short checklist, one line each, with the evidence:
 viber close --remove-worktree --delete-branch
 ```
 
-Tell the user Viber will close this session and remove the worktree and branch after this reply. If the project has a WorktreeRemove hook (such as one that stops the worktree's containers), Viber runs it to remove a worktree that a WorktreeCreate hook made. Viber deletes the branch it recorded (the `branch:` line), not whatever is checked out now; if the current branch is a different one, say that it stays. It deletes with `git branch -d`, so a squash-merged branch may be kept; they can delete it later with `git branch -D <branch>` if they are sure.
+Tell the user Viber will close this session and remove the worktree and branch after this reply. If the session is on an issue (`viber issue` prints it), Viber marks it done, since the branch is merged. If the project has a WorktreeRemove hook (such as one that stops the worktree's containers), Viber runs it to remove a worktree that a WorktreeCreate hook made. Viber deletes the branch it recorded (the `branch:` line), not whatever is checked out now; if the current branch is a different one, say that it stays. It deletes with `git branch -d`, so a squash-merged branch may be kept; they can delete it later with `git branch -D <branch>` if they are sure.
 
 **Clean, but not a Viber worktree** (`viber worktree` fails, or prints a different path): say it is clean and that Viber only removes worktrees it created. Do not run `viber close`.
 

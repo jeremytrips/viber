@@ -39,4 +39,4 @@ Project rules come first. Before committing, look in `CLAUDE.md`, `AGENT.md` or 
 3. If the push output links an existing pull or merge request ("View pull request", "View merge request"), report that one instead. When the user opens it themselves, give a title and description they can paste.
 4. Output the PR URL or link on its own line.
 
-If running in Viber (`VIBER_PANE_ID` is set), you may finish with `viber notify "PR opened"`, or `viber notify "Branch pushed"` when the user still has to open it.
+If running in Viber (`VIBER_PANE_ID` is set): when this session is on an issue (`viber issue` prints it; it exits 1 otherwise), run `viber issue shipped "<what landed, in a sentence>"` so the issue moves to in review. You may also finish with `viber notify "PR opened"`, or `viber notify "Branch pushed"` when the user still has to open it.

@@ -19,9 +19,17 @@ public enum RecordedSessions {
 /// Delivered through the same atomic file-drop as HookInbox.
 public struct ViberRequest: Codable, Equatable {
     public enum Command: String, Codable {
-        case close, notify, rename, idea
-        /// How the idea this session was started for went: shipped, or stuck (with why).
-        case ideaDone, ideaFailed
+        case close, notify, rename
+        /// `viber issue add`: `text` is the issue, `parent` and `blockedBy` are keys.
+        case issueAdd
+        /// How the issue this session was started for went: shipped, or stuck (with why).
+        case issueDone, issueFailed
+        /// `viber issue shipped`: the session's issue is in review, with `text` on what landed.
+        case issueShipped
+        /// `viber issue update <key>`: `status`, `parent` and `blockedBy` as given.
+        case issueUpdate
+        /// `viber issue comment <key> <text>`.
+        case issueComment
     }
     public var paneID: String
     public var command: Command
@@ -29,10 +37,18 @@ public struct ViberRequest: Codable, Equatable {
     public var removeWorktree = false
     public var deleteBranch = false
     public var createdAt = Date()
+    /// The issue an update or comment is for; nil for the session's own issue.
+    public var key: String?
+    public var status: String?
+    /// For `issueUpdate`, nil leaves it alone and "" clears it.
+    public var parent: String?
+    public var blockedBy: [String]?
 
-    public init(paneID: String, command: Command, text: String? = nil, removeWorktree: Bool = false, deleteBranch: Bool = false) {
+    public init(paneID: String, command: Command, text: String? = nil, removeWorktree: Bool = false, deleteBranch: Bool = false,
+                key: String? = nil, status: String? = nil, parent: String? = nil, blockedBy: [String]? = nil) {
         self.paneID = paneID; self.command = command; self.text = text
         self.removeWorktree = removeWorktree; self.deleteBranch = deleteBranch
+        self.key = key; self.status = status; self.parent = parent; self.blockedBy = blockedBy
     }
 
     public func write(to directory: URL = ViberPaths.requests) throws {

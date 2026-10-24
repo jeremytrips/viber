@@ -1,7 +1,7 @@
 import SwiftUI
 import ViberCore
 
-/// Starts an autopilot run on a project's ideas to plan, or on one idea.
+/// Starts an autopilot run on a project's issues to plan, or on one issue.
 struct AutopilotSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
@@ -27,38 +27,38 @@ struct AutopilotSheet: View {
     /// The modes that make sense without someone watching.
     private static let modes: [PermissionMode] = [.auto, .acceptEdits, .default]
 
-    private var ideas: [Idea] {
-        if let id = request.ideaID { return model.ideas.idea(id).flatMap { $0.status == .open ? [$0] : nil } ?? [] }
-        return model.ideas.toPlan(in: request.project)
+    private var issues: [Issue] {
+        if let id = request.issueID { return model.issues.issue(id).flatMap { $0.status == .open ? [$0] : nil } ?? [] }
+        return model.issues.toPlan(in: request.project)
     }
 
     var body: some View {
-        let ideas = ideas
+        let issues = issues
         VStack(spacing: 0) {
             Form {
                 Section {
                     VStack(alignment: .leading, spacing: 6) {
                         Label("Autopilot for \(model.projectName(request.project))", systemImage: "airplane").font(.headline)
-                        Text(ideas.count == 1
-                             ? "Viber implements this idea on its own: it gets a new worktree and a session that writes it, runs the project's checks, ships it and reports back."
-                             : "Viber works through these ideas on its own, one at a time. Each gets a new worktree and a session that writes it, runs the project's checks, ships it and reports back; then the next one starts. Ideas you add meanwhile join the end; ones its sessions add wait for you.")
+                        Text(issues.count == 1
+                             ? "Viber implements this issue on its own: it gets a new worktree and a session that writes it, runs the project's checks, ships it and reports back."
+                             : "Viber works through these issues on its own, one at a time. Each gets a new worktree and a session that writes it, runs the project's checks, ships it and reports back; then the next one starts. Issues you add meanwhile join the end; ones its sessions add wait for you.")
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
 
-                Section(ideas.count == 1 ? "The idea" : "\(ideas.count) ideas, oldest first") {
-                    if ideas.isEmpty {
+                Section(issues.count == 1 ? "The issue" : "\(issues.count) issues, oldest first") {
+                    if issues.isEmpty {
                         Text("Nothing to plan here.").foregroundStyle(.secondary)
                     }
-                    ForEach(Array(ideas.prefix(Self.shown).enumerated()), id: \.element.id) { index, idea in
+                    ForEach(Array(issues.prefix(Self.shown).enumerated()), id: \.element.id) { index, issue in
                         HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            if ideas.count > 1 { Text("\(index + 1).").monospacedDigit().foregroundStyle(.secondary) }
-                            Text(idea.title).lineLimit(1).help(idea.text)
+                            if issues.count > 1 { Text("\(index + 1).").monospacedDigit().foregroundStyle(.secondary) }
+                            Text(issue.title).lineLimit(1).help(issue.text)
                         }
                     }
-                    if ideas.count > Self.shown {
-                        Text("and \(ideas.count - Self.shown) more").foregroundStyle(.secondary)
+                    if issues.count > Self.shown {
+                        Text("and \(issues.count - Self.shown) more").foregroundStyle(.secondary)
                     }
                 }
 
@@ -80,7 +80,7 @@ struct AutopilotSheet: View {
                         Text(repo.map { $0.usesHook ? "Made by the project's WorktreeCreate hook" : Autopilot.usablePattern($0.pattern) } ?? "")
                     }
                     if let repo, !repo.usesHook, Autopilot.usablePattern(repo.pattern) != repo.pattern {
-                        note("The project's pattern, \(repo.pattern), can't name a branch for each idea on its own, so the autopilot uses \(Worktree.defaultBranchPattern).")
+                        note("The project's pattern, \(repo.pattern), can't name a branch for each issue on its own, so the autopilot uses \(Worktree.defaultBranchPattern).")
                     }
                 }
             }
@@ -88,7 +88,7 @@ struct AutopilotSheet: View {
 
             Divider()
             HStack {
-                if let problem = problem(ideas) {
+                if let problem = problem(issues) {
                     Text(problem).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer()
@@ -96,7 +96,7 @@ struct AutopilotSheet: View {
                     .keyboardShortcut(.cancelAction)
                 Button("Start", action: start)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(problem(ideas) != nil)
+                    .disabled(problem(issues) != nil)
             }
             .padding(16)
         }
@@ -112,10 +112,10 @@ struct AutopilotSheet: View {
     private var finishNote: String {
         switch finish {
         case .pullRequest:
-            return "Each session pushes its branch to origin and opens a pull request (with gh on GitHub; elsewhere it gives the link). Every idea starts from origin's default branch, so each pull request stands alone."
+            return "Each session pushes its branch to origin and opens a pull request (with gh on GitHub; elsewhere it gives the link). Every issue starts from origin's default branch, so each pull request stands alone."
         case .merge:
             let target = repo?.current ?? "the branch"
-            return "Each session merges \(target) into its branch, checks again, then fast-forwards \(target) in the project's folder, so the next idea starts from the result. Nothing is pushed."
+            return "Each session merges \(target) into its branch, checks again, then fast-forwards \(target) in the project's folder, so the next issue starts from the result. Nothing is pushed."
         case .commit:
             return "Each session commits on its own branch and stops there, for you to review. Nothing is pushed or merged."
         }
@@ -130,11 +130,11 @@ struct AutopilotSheet: View {
     }
 
     /// Why Start is off, if it is.
-    private func problem(_ ideas: [Idea]) -> String? {
+    private func problem(_ issues: [Issue]) -> String? {
         if model.autopilots[request.project] != nil { return "The autopilot is already running here." }
         guard let repo else { return "Reading the repository…" }
-        if !repo.isRepo { return "The autopilot needs a git repository: each idea gets its own worktree and branch." }
-        if ideas.isEmpty { return "There is no idea to plan." }
+        if !repo.isRepo { return "The autopilot needs a git repository: each issue gets its own worktree and branch." }
+        if issues.isEmpty { return "There is no issue to plan." }
         if finish == .pullRequest && !repo.hasOrigin { return "There is no origin remote to open pull requests on." }
         if finish == .merge && repo.current == nil { return "The project's folder has no branch checked out to merge into." }
         return nil
@@ -156,14 +156,14 @@ struct AutopilotSheet: View {
     }
 
     private func start() {
-        guard let repo, problem(ideas) == nil else { return }
-        model.startAutopilot(Autopilot(project: request.project, ideas: ideas.map(\.id), finish: finish, target: repo.current,
+        guard let repo, problem(issues) == nil else { return }
+        model.startAutopilot(Autopilot(project: request.project, issues: issues.map(\.id), finish: finish, target: repo.current,
                                        permissionMode: mode, profile: profile, branchPattern: repo.pattern))
         dismiss()
     }
 }
 
-/// What a project's autopilot is doing, with buttons to resume, skip or stop it, and the ideas it took with what
+/// What a project's autopilot is doing, with buttons to resume, skip or stop it, and the issues it took with what
 /// their sessions reported. A run that ended stays until dismissed. Shows nothing when there is neither.
 struct AutopilotCard: View {
     @Environment(AppModel.self) private var model
@@ -187,12 +187,12 @@ struct AutopilotCard: View {
                     } else {
                         Button { model.dismissFinishedAutopilot(project) } label: { Image(systemName: "xmark") }
                             .buttonStyle(.borderless)
-                            .help("Dismiss; the ideas keep what their sessions reported")
+                            .help("Dismiss; the issues keep what their sessions reported")
                             .accessibilityLabel("Dismiss")
                     }
                 }
-                ForEach(pilot.handled.filter { $0 != running?.current }.compactMap { model.ideas.idea($0) }) { idea in
-                    handledRow(idea)
+                ForEach(pilot.handled.filter { $0 != running?.current }.compactMap { model.issues.issue($0) }) { issue in
+                    handledRow(issue)
                 }
                 if running != nil {
                     status(pilot)
@@ -207,17 +207,17 @@ struct AutopilotCard: View {
         }
     }
 
-    /// An idea the run took: how it went, and its session.
-    private func handledRow(_ idea: Idea) -> some View {
-        let report = idea.report
-        let pane = idea.sessionID.flatMap(model.pane)
+    /// An issue the run took: how it went, and its session.
+    private func handledRow(_ issue: Issue) -> some View {
+        let report = issue.report
+        let pane = issue.sessionID.flatMap(model.pane)
         return HStack(alignment: .firstTextBaseline, spacing: 6) {
             Image(systemName: report.map { $0.finished ? "checkmark.seal" : "exclamationmark.triangle" } ?? "circle.dashed")
                 .foregroundStyle(report.map { $0.finished ? Color.green : Color.orange } ?? Color.secondary)
-            (Text(idea.title).fontWeight(.medium)
+            (Text(issue.title).fontWeight(.medium)
              + Text("  " + (report.map { $0.text.isEmpty ? "Done." : $0.text } ?? "Stopped before it reported.")).foregroundStyle(.secondary))
                 .lineLimit(2)
-                .help(report?.text ?? idea.text)
+                .help(report?.text ?? issue.text)
             Spacer(minLength: 4)
             if let pane {
                 Button("Open") { model.select(.pane(pane.id)); onLeave?() }
@@ -229,40 +229,40 @@ struct AutopilotCard: View {
     }
 
     private func counts(_ pilot: Autopilot) -> String {
-        let left = pilot.upcoming(in: model.ideas).count
+        let left = pilot.upcoming(in: model.issues).count
         return "· \(pilot.tally) · \(left) to go"
     }
 
     @ViewBuilder
     private func status(_ pilot: Autopilot) -> some View {
-        let idea = pilot.current.flatMap { model.ideas.idea($0) }
+        let issue = pilot.current.flatMap { model.issues.issue($0) }
         let pane = model.autopilotPane(project)
         if let reason = pilot.paused {
             Text(reason).foregroundStyle(.secondary)
         }
-        if let idea {
+        if let issue {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 if let pane {
-                    Text(doing(pane, idea: idea)).foregroundStyle(pane.state.needsYou ? .orange : .primary)
+                    Text(doing(pane, issue: issue)).foregroundStyle(pane.state.needsYou ? .orange : .primary)
                     Button("Open") { model.select(.pane(pane.id)); onLeave?() }
                         .buttonStyle(.link)
                         .help("Show the session working on it")
                 } else {
-                    Text("Making a worktree for “\(idea.title)”…")
+                    Text("Making a worktree for “\(issue.title)”…")
                 }
             }
         }
         if pilot.stopping {
-            Text("Stops after this idea.").foregroundStyle(.secondary)
+            Text("Stops after this issue.").foregroundStyle(.secondary)
         }
     }
 
-    private func doing(_ pane: Pane, idea: Idea) -> String {
+    private func doing(_ pane: Pane, issue: Issue) -> String {
         switch pane.state {
-        case .permission, .input, .plan: return "“\(idea.title)” is waiting for you: \(pane.state.label.lowercased())."
-        case .failed: return "“\(idea.title)” failed."
-        case .exited: return "“\(idea.title)” stopped."
-        default: return "Working on “\(idea.title)”."
+        case .permission, .input, .plan: return "“\(issue.title)” is waiting for you: \(pane.state.label.lowercased())."
+        case .failed: return "“\(issue.title)” failed."
+        case .exited: return "“\(issue.title)” stopped."
+        default: return "Working on “\(issue.title)”."
         }
     }
 
@@ -271,14 +271,14 @@ struct AutopilotCard: View {
         if pilot.paused != nil {
             Button("Resume") { model.resumeAutopilot(project) }
                 .controlSize(.small)
-                .help(pilot.current != nil ? "Tell the session to carry on with its idea" : "Start the next idea")
+                .help(pilot.current != nil ? "Tell the session to carry on with its issue" : "Start the next issue")
         }
         Menu {
             if pilot.paused == nil, pilot.current != nil {
-                Button(pilot.stopping ? "Keep Going After This Idea" : "Stop After This Idea") { model.toggleStopAfterCurrent(project) }
+                Button(pilot.stopping ? "Keep Going After This Issue" : "Stop After This Issue") { model.toggleStopAfterCurrent(project) }
             }
             if pilot.current != nil {
-                Button("Skip to the Next Idea") { model.skipAutopilotIdea(project) }
+                Button("Skip to the Next Issue") { model.skipAutopilotIssue(project) }
             }
             Divider()
             Button("Stop Now") { model.stopAutopilot(project) }
@@ -288,6 +288,6 @@ struct AutopilotCard: View {
         .menuStyle(.borderlessButton)
         .fixedSize()
         .controlSize(.small)
-        .help("Stop after this idea, skip it, or stop now (its session stays open)")
+        .help("Stop after this issue, skip it, or stop now (its session stays open)")
     }
 }

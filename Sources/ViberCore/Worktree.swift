@@ -40,14 +40,16 @@ public struct WorktreeRequest: Sendable {
     public var branch: String?
     /// The project's pattern for the default branch, such as `viber/<slug>`.
     public var branchPattern: String
+    /// The key of the issue the session is for, such as `EST-12`: what `<key>` in the pattern becomes.
+    public var issueKey: String?
     /// Where a git worktree starts. A WorktreeCreate hook decides that itself.
     public var base: WorktreeBase
     public var permissionMode: String?
 
     public init(folder: String, name: String, branch: String? = nil, branchPattern: String = Worktree.defaultBranchPattern,
-                base: WorktreeBase = .originDefault, permissionMode: String? = nil) {
+                issueKey: String? = nil, base: WorktreeBase = .originDefault, permissionMode: String? = nil) {
         self.folder = folder; self.name = name; self.branch = branch; self.branchPattern = branchPattern
-        self.base = base; self.permissionMode = permissionMode
+        self.issueKey = issueKey; self.base = base; self.permissionMode = permissionMode
     }
 }
 
@@ -123,11 +125,11 @@ public enum Worktree {
             }
             progress(.step("Creating the worktree with git"))
             return try create(repoDir: request.folder, name: request.name, branch: request.branch,
-                              pattern: request.branchPattern, base: base)
+                              pattern: request.branchPattern, issueKey: request.issueKey, base: base)
         }
         // The hook gets the branch as the worktree `name` (Claude Code's only naming field), so it must also be
         // a name Claude Code itself would pass.
-        let name = request.branch ?? unusedDefaultBranch(forName: request.name, root: root, pattern: request.branchPattern)
+        let name = request.branch ?? unusedDefaultBranch(forName: request.name, root: root, pattern: request.branchPattern, key: request.issueKey)
         if case .problem(let problem) = checkBranch(name, repo: root) { throw WorktreeError(message: problem) }
         if let problem = hookNameProblem(name) { throw WorktreeError(message: problem) }
         let input = WorktreeHooks.input(.create, cwd: request.folder, name: name, permissionMode: request.permissionMode)
@@ -225,28 +227,39 @@ public enum Worktree {
         return found
     }
 
-    /// True when the pattern has a part other than `<slug>`, such as `<id>`, to fill in for each session.
-    public static func needsInput(_ pattern: String) -> Bool {
-        placeholders(in: pattern).contains { $0 != "<slug>" }
+    /// True when the pattern has a part to fill in for each session that Viber can't fill itself: anything but
+    /// `<slug>`, and `<key>` when the session isn't for an issue.
+    public static func needsInput(_ pattern: String, key: String? = nil) -> Bool {
+        placeholders(in: pattern).contains { $0 != "<slug>" && ($0 != "<key>" || key == nil) }
     }
 
-    /// The branch a worktree session gets unless another one is typed: `pattern` with the name's slug for `<slug>`.
-    public static func defaultBranch(forName name: String, pattern: String = defaultBranchPattern) -> String {
-        let s = slug(name)
-        return fill(pattern, slug: s.isEmpty ? "session" : s)
+    /// The branch a worktree session gets unless another one is typed: `pattern` with the name's slug for `<slug>`
+    /// and the issue's key, in lower case, for `<key>`. A pattern without `<key>` (or any other part to fill in)
+    /// still names the issue: its key goes in front of the slug, as in `viber/est-12-login`.
+    public static func defaultBranch(forName name: String, pattern: String = defaultBranchPattern, key: String? = nil) -> String {
+        fill(pattern, slug: slug(forName: name, pattern: pattern, key: key), key: key)
     }
 
-    static func fill(_ pattern: String, slug: String) -> String {
-        pattern.replacingOccurrences(of: "<slug>", with: slug)
+    static func fill(_ pattern: String, slug: String, key: String? = nil) -> String {
+        var branch = pattern.replacingOccurrences(of: "<slug>", with: slug)
+        if let key { branch = branch.replacingOccurrences(of: "<key>", with: key.lowercased()) }
+        return branch
+    }
+
+    /// The slug for `<slug>`: the name's, with the issue's key in front when the pattern has nowhere else for it.
+    static func slug(forName name: String, pattern: String, key: String?) -> String {
+        var s = slug(name)
+        if s.isEmpty { s = "session" }
+        if let key, !key.isEmpty, placeholders(in: pattern) == ["<slug>"] { s = slug(key) + "-" + s }
+        return s
     }
 
     /// The default branch, numbered after the slug (`viber/login-2`) if one by that name exists.
-    static func unusedDefaultBranch(forName name: String, root: String, pattern: String = defaultBranchPattern) -> String {
-        guard pattern.contains("<slug>") else { return pattern }
-        var s = slug(name)
-        if s.isEmpty { s = "session" }
-        var candidate = fill(pattern, slug: s), n = 2
-        while branchExists(candidate, repo: root) { candidate = fill(pattern, slug: "\(s)-\(n)"); n += 1 }
+    static func unusedDefaultBranch(forName name: String, root: String, pattern: String = defaultBranchPattern, key: String? = nil) -> String {
+        guard pattern.contains("<slug>") else { return fill(pattern, slug: "", key: key) }
+        let s = slug(forName: name, pattern: pattern, key: key)
+        var candidate = fill(pattern, slug: s, key: key), n = 2
+        while branchExists(candidate, repo: root) { candidate = fill(pattern, slug: "\(s)-\(n)", key: key); n += 1 }
         return candidate
     }
 
@@ -316,27 +329,26 @@ public enum Worktree {
     /// the gitignored files `.worktreeinclude` lists into it, as Claude Code does for worktrees it makes with git.
     /// The base is recorded, so the diff stat compares with it.
     public static func create(repoDir: String, name: String, branch: String? = nil,
-                              pattern: String = defaultBranchPattern, base chosen: String? = nil) throws -> WorktreeInfo {
+                              pattern: String = defaultBranchPattern, issueKey: String? = nil, base chosen: String? = nil) throws -> WorktreeInfo {
         guard let root = repoRoot(repoDir) else { throw WorktreeError(message: "\(repoDir) is not inside a git repository.") }
         let base = chosen ?? Shell.run("git", ["-C", root, "rev-parse", "--abbrev-ref", "HEAD"]).output
         guard !base.isEmpty, base != "HEAD" else { throw WorktreeError(message: "The repository has no current branch to start from.") }
         // A pattern without `<slug>` can't be numbered, so it has to be new like a typed name.
-        let requested = branch ?? (pattern.contains("<slug>") ? nil : pattern)
-        if requested == nil, let problem = placeholderProblem(fill(pattern, slug: "")) {
+        let requested = branch ?? (pattern.contains("<slug>") ? nil : fill(pattern, slug: "", key: issueKey))
+        if requested == nil, let problem = placeholderProblem(fill(pattern, slug: "", key: issueKey)) {
             throw WorktreeError(message: problem)
         }
         if let requested, case .problem(let problem) = checkBranch(requested, repo: root) { throw WorktreeError(message: problem) }
-        var slug = slug(name)
-        if slug.isEmpty { slug = "session" }
+        let slug = slug(forName: name, pattern: pattern, key: issueKey)
         let dir = URL(fileURLWithPath: root).appendingPathComponent(directory)
         // The folder is numbered when it is taken, and so is the default branch along with it.
         var candidate = slug, n = 2
         while FileManager.default.fileExists(atPath: dir.appendingPathComponent(candidate).path)
-                || (requested == nil && branchExists(fill(pattern, slug: candidate), repo: root)) {
+                || (requested == nil && branchExists(fill(pattern, slug: candidate, key: issueKey), repo: root)) {
             candidate = "\(slug)-\(n)"; n += 1
         }
         let path = dir.appendingPathComponent(candidate).path
-        let branch = requested ?? fill(pattern, slug: candidate)
+        let branch = requested ?? fill(pattern, slug: candidate, key: issueKey)
         excludeWorktreeDir(root: root)
         // --no-track: a branch started from origin/main must not push to (or count as behind) origin/main.
         let add = Shell.run("git", ["-C", root, "worktree", "add", "--no-track", "-b", branch, path, base])
