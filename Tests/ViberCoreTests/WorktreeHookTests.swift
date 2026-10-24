@@ -260,21 +260,39 @@ final class WorktreeCreateHookTests: XCTestCase {
         let repo = try temporaryRepo()
         let target = repo.deletingLastPathComponent().appendingPathComponent("hooked-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: target) }
-        // Reads the name from stdin, makes the worktree on its own branch, prints noise to stderr and the path last.
+        // Reads the name from stdin, makes the worktree on that branch, prints noise to stderr and the path last.
         try writeHook(.create, """
         name=$(sed -n 's/.*"name":"\\([^"]*\\)".*/\\1/p'); echo "setting up $name" >&2; \
-        git worktree add -q -b "team/$name" '\(target.path)' >&2 && echo "$CLAUDE_PROJECT_DIR" >&2 && echo '\(target.path)'
+        git worktree add -q -b "$name" '\(target.path)' >&2 && echo "$CLAUDE_PROJECT_DIR" >&2 && echo '\(target.path)'
         """, in: repo)
         let steps = Collector()
-        let info = try await Worktree.create(WorktreeRequest(folder: repo.path, name: "Login screen")) { progress in
+        let info = try await Worktree.create(WorktreeRequest(folder: repo.path, name: "Login screen", branch: "feat/NEX-7-login")) { progress in
             if case .output(let text) = progress { steps.add(text) }
         }
         XCTAssertEqual(info.path, target.standardizedFileURL.path)
-        XCTAssertEqual(info.branch, "team/login-screen", "the branch is read from the new worktree's HEAD")
+        XCTAssertEqual(info.branch, "feat/NEX-7-login", "the hook got the branch as its name; Viber read it back from HEAD")
         XCTAssertTrue(info.madeByHook)
         XCTAssertEqual(info.folder, repo.path)
-        XCTAssertTrue(steps.text.contains("setting up login-screen"), "the hook's output is shown as it runs")
+        XCTAssertTrue(steps.text.contains("setting up feat/NEX-7-login"), "the hook's output is shown as it runs")
         XCTAssertFalse(FileManager.default.fileExists(atPath: repo.appendingPathComponent(".claude/worktrees").path), "git was not used")
+    }
+
+    func testHookGetsTheDefaultBranchAndNamesItCanTake() async throws {
+        let repo = try temporaryRepo()
+        let target = repo.deletingLastPathComponent().appendingPathComponent("hooked-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: target) }
+        XCTAssertTrue(Shell.run("git", ["-C", repo.path, "branch", "viber/login"]).ok)
+        try writeHook(.create, """
+        name=$(sed -n 's/.*"name":"\\([^"]*\\)".*/\\1/p'); git worktree add -q -b "$name" '\(target.path)' >&2 && echo '\(target.path)'
+        """, in: repo)
+        let info = try await Worktree.create(WorktreeRequest(folder: repo.path, name: "Login")) { _ in }
+        XCTAssertEqual(info.branch, "viber/login-2", "an untouched default is numbered when taken")
+        do {
+            _ = try await Worktree.create(WorktreeRequest(folder: repo.path, name: "x", branch: "feat/über")) { _ in }
+            XCTFail("a name Claude Code wouldn't pass to the hook is refused before it runs")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("worktree name"))
+        }
     }
 
     func testHookFailureAndMissingPath() async throws {
@@ -294,6 +312,42 @@ final class WorktreeCreateHookTests: XCTestCase {
         } catch {
             XCTAssertTrue(error.localizedDescription.contains("printed no worktree path"))
         }
+    }
+}
+
+final class BranchNameTests: XCTestCase {
+    func testDefaultBranch() {
+        XCTAssertEqual(Worktree.defaultBranch(forName: "Login screen!"), "viber/login-screen")
+        XCTAssertEqual(Worktree.defaultBranch(forName: "  "), "viber/session")
+    }
+
+    func testCheckBranch() throws {
+        let repo = try temporaryRepo()
+        XCTAssertEqual(Worktree.checkBranch("feat/NEX-123-login", repo: repo.path), .ok)
+        XCTAssertEqual(Worktree.checkBranch("feat/NEX-123-login", repo: nil), .ok)
+        for bad in ["", "two words", "a..b", "-x", " x", "x.lock", "a/", "HEAD", "x~1"] {
+            XCTAssertNotEqual(Worktree.checkBranch(bad, repo: repo.path), .ok, bad)
+        }
+        XCTAssertEqual(Worktree.checkBranch("main", repo: repo.path), .problem("A branch named main already exists."))
+    }
+
+    func testHookNames() {
+        XCTAssertNil(Worktree.hookNameProblem("feat/NEX-123-login"))
+        XCTAssertNil(Worktree.hookNameProblem("viber/login_2.0"))
+        for bad in ["a//b", "feat/über", ".git/x", "x/.GIT..", "a/../b", "a+b", String(repeating: "a", count: 65)] {
+            XCTAssertNotNil(Worktree.hookNameProblem(bad), bad)
+        }
+    }
+
+    func testGitWorktreeOnATypedBranch() throws {
+        let repo = try temporaryRepo()
+        let info = try Worktree.create(repoDir: repo.path, name: "Login", branch: "feat/NEX-9-login")
+        XCTAssertEqual(info.branch, "feat/NEX-9-login")
+        XCTAssertEqual(URL(fileURLWithPath: info.path).lastPathComponent, "login", "the folder is still named after the session")
+        XCTAssertEqual(Worktree.currentBranch(info.path), "feat/NEX-9-login")
+        XCTAssertThrowsError(try Worktree.create(repoDir: repo.path, name: "Other", branch: "feat/NEX-9-login"), "a typed branch must be new")
+        let second = try Worktree.create(repoDir: repo.path, name: "Login", branch: "feat/NEX-10-login")
+        XCTAssertEqual(URL(fileURLWithPath: second.path).lastPathComponent, "login-2")
     }
 }
 

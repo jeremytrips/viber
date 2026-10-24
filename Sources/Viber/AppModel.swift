@@ -42,6 +42,8 @@ struct NewSessionRequest {
     var profile: String?
     var useWorktree: Bool
     var name: String
+    /// The worktree's branch; nil for `viber/<slug>`.
+    var branch: String? = nil
     var permissionMode: String
     var firstMessage: String
     /// The idea this session is started for, linked to it once it opens.
@@ -224,7 +226,7 @@ final class AppModel {
         switch job.kind {
         case .create(let request):
             let worktreeRequest = WorktreeRequest(folder: request.folder, name: request.name.isEmpty ? job.title : request.name,
-                                                  permissionMode: request.permissionMode)
+                                                  branch: request.branch, permissionMode: request.permissionMode)
             job.task = Task {
                 do {
                     let info = try await Worktree.create(worktreeRequest, progress: report)
