@@ -150,7 +150,8 @@ public enum DeviceArtifact: Equatable, Sendable {
            let range = Range(match.range, in: plain) {
             return .app(String(plain[range]))
         }
-        if let range = plain.range(of: #"/[^\s"'`<>]*/build/outputs/apk/[^\s"'`<>]*?\.apk(?=[\s"'`<>]|$)"#, options: [.regularExpression, .backwards]) {
+        if let match = lastMatch(#"/[^\s"'`<>]*/build/outputs/apk/[^\s"'`<>]*?\.apk(?=[\s"'`<>]|$)"#, in: plain),
+           let range = Range(match.range, in: plain) {
             return .apk(String(plain[range]))
         }
         return nil
