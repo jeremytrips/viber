@@ -38,10 +38,41 @@ public struct WorktreeRequest: Sendable {
     public var name: String
     /// The branch to create; nil for `viber/<slug>`, numbered if that is taken.
     public var branch: String?
+    /// Where a git worktree starts. A WorktreeCreate hook decides that itself.
+    public var base: WorktreeBase
     public var permissionMode: String?
 
-    public init(folder: String, name: String, branch: String? = nil, permissionMode: String? = nil) {
-        self.folder = folder; self.name = name; self.branch = branch; self.permissionMode = permissionMode
+    public init(folder: String, name: String, branch: String? = nil, base: WorktreeBase = .originDefault, permissionMode: String? = nil) {
+        self.folder = folder; self.name = name; self.branch = branch; self.base = base; self.permissionMode = permissionMode
+    }
+}
+
+/// Where a new git worktree's branch starts.
+public enum WorktreeBase: String, Equatable, Sendable, CaseIterable {
+    /// origin's default branch (origin/HEAD, else origin/main or origin/master), fetched first; like Claude Code.
+    case originDefault
+    /// The branch checked out in the folder now.
+    case current
+}
+
+/// The bases the New Session sheet offers for a repository.
+public struct BaseChoices: Equatable, Sendable {
+    public var hasOrigin: Bool
+    /// origin's default branch as cached locally, such as `origin/main`; nil until origin has been fetched.
+    public var originDefault: String?
+    /// The branch checked out now; nil when HEAD is detached.
+    public var current: String?
+
+    public init(hasOrigin: Bool, originDefault: String?, current: String?) {
+        self.hasOrigin = hasOrigin; self.originDefault = originDefault; self.current = current
+    }
+
+    /// The base to use when `wanted` isn't available: there is no origin, or HEAD is detached.
+    public func available(_ wanted: WorktreeBase) -> WorktreeBase {
+        switch wanted {
+        case .originDefault: return hasOrigin || current == nil ? .originDefault : .current
+        case .current: return current != nil || !hasOrigin ? .current : .originDefault
+        }
     }
 }
 
@@ -69,12 +100,25 @@ public enum Worktree {
     /// settings define one (the hook replaces `git worktree add`, as in Claude Code), otherwise with git.
     public static func create(_ request: WorktreeRequest, progress: @escaping @Sendable (WorktreeProgress) -> Void) async throws -> WorktreeInfo {
         guard let root = repoRoot(request.folder) else { throw WorktreeError(message: "\(request.folder) is not inside a git repository.") }
+        let stopped = WorktreeError(message: "Stopped before the worktree was made.")
         let hooks = try WorktreeHooks.hooks(.create, folder: request.folder)
-        try Task.checkCancellation()
+        if Task.isCancelled { throw stopped }
         guard !hooks.isEmpty else {
+            var base: String?
+            if request.base == .originDefault {
+                if hasOrigin(root) {
+                    progress(.step("Fetching origin"))
+                    let fetched = await fetchOriginDefault(root)
+                    if let note = fetched.note { progress(.output(note + "\n")) }
+                    base = fetched.ref
+                    if base == nil { progress(.output("origin has no default branch here, so the worktree starts from the current branch.\n")) }
+                } else {
+                    progress(.output("There is no origin remote, so the worktree starts from the current branch.\n"))
+                }
+                if Task.isCancelled { throw stopped }
+            }
             progress(.step("Creating the worktree with git"))
-            let info = try create(repoDir: request.folder, name: request.name, branch: request.branch)
-            return info
+            return try create(repoDir: request.folder, name: request.name, branch: request.branch, base: base)
         }
         // The hook gets the branch as the worktree `name` (Claude Code's only naming field), so it must also be
         // a name Claude Code itself would pass.
@@ -101,9 +145,46 @@ public enum Worktree {
             created = try WorktreeHooks.validateWorktreePath(printed, cwd: request.folder, repo: checkout)
         }
         guard let path = created else { throw WorktreeError(message: failures.joined(separator: "\n\n")) }
-        let base = Shell.run("git", ["-C", root, "rev-parse", "--abbrev-ref", "HEAD"]).output
+        // The hook chose where the branch starts; for the diff stat, compare with origin's default branch
+        // (what the work will be merged into), else with the folder's current branch.
+        let base = originDefaultBranch(root) ?? currentBranch(root) ?? "HEAD"
         return WorktreeInfo(repo: root, path: path, branch: currentBranch(path) ?? "", base: base,
                             createdByHook: true, folder: request.folder)
+    }
+
+    // MARK: Base branch
+
+    public static func hasOrigin(_ root: String) -> Bool {
+        Shell.run("git", ["-C", root, "remote", "get-url", "origin"]).ok
+    }
+
+    /// origin's default branch as cached locally: `origin/HEAD`'s target, else `origin/main`, else `origin/master`.
+    public static func originDefaultBranch(_ root: String) -> String? {
+        let head = Shell.run("git", ["-C", root, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"])
+        var candidates = ["origin/main", "origin/master"]
+        if head.ok, head.output.hasPrefix("origin/"), head.output != "origin/HEAD" { candidates.insert(head.output, at: 0) }
+        return candidates.first { Shell.run("git", ["-C", root, "rev-parse", "--verify", "--quiet", "refs/remotes/\($0)"]).ok }
+    }
+
+    /// What the New Session sheet can offer. Blocking: call it off the main thread.
+    public static func baseChoices(_ root: String) -> BaseChoices {
+        BaseChoices(hasOrigin: hasOrigin(root), originDefault: originDefaultBranch(root), current: currentBranch(root))
+    }
+
+    /// Fetches origin's default branch (all of origin when it isn't known yet), giving up after `timeout` seconds
+    /// and never waiting for a password. Offline, the cached ref is used. Returns the ref to start from, if any.
+    public static func fetchOriginDefault(_ root: String, timeout: TimeInterval = 8) async -> (ref: String?, note: String?) {
+        let known = originDefaultBranch(root)
+        var env = Executables.environment()
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        let target = known.map { [String($0.dropFirst("origin/".count))] } ?? []
+        let result = await Subprocess.run("git", ["-C", root, "fetch", "--quiet", "origin"] + target, environment: env, timeout: timeout)
+        if result.cancelled { return (known, nil) }
+        let ref = originDefaultBranch(root)
+        guard !result.ok else { return (ref, nil) }
+        let why = result.timedOut ? "it took longer than \(Int(timeout)) seconds"
+            : result.stderr.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "\n").last.map(String.init) ?? "git fetch failed"
+        return (ref, "Couldn't fetch origin (\(why))" + (ref.map { "; starting from the cached \($0)." } ?? "."))
     }
 
     /// The branch checked out at `path`, or nil when HEAD is detached or it isn't a git checkout.
@@ -203,12 +284,13 @@ public enum Worktree {
         try check(Shell.run("git", ["-C", dir, "commit", "-q", "-m", "Initial commit"]), "git commit")
     }
 
-    /// Creates `<repo>/.claude/worktrees/<slug>` on a new branch (`viber/<slug>` unless `branch` names one) from the
-    /// current branch, then copies the gitignored files `.worktreeinclude` lists into it, as Claude Code does for
-    /// worktrees it makes with git.
-    public static func create(repoDir: String, name: String, branch requested: String? = nil) throws -> WorktreeInfo {
+    /// Creates `<repo>/.claude/worktrees/<slug>` on a new branch (`viber/<slug>` unless `branch` names one) starting at
+    /// `base` (a ref such as `origin/main`; nil for the current branch), then copies the gitignored files
+    /// `.worktreeinclude` lists into it, as Claude Code does for worktrees it makes with git.
+    /// The base is recorded, so the diff stat compares with it.
+    public static func create(repoDir: String, name: String, branch requested: String? = nil, base chosen: String? = nil) throws -> WorktreeInfo {
         guard let root = repoRoot(repoDir) else { throw WorktreeError(message: "\(repoDir) is not inside a git repository.") }
-        let base = Shell.run("git", ["-C", root, "rev-parse", "--abbrev-ref", "HEAD"]).output
+        let base = chosen ?? Shell.run("git", ["-C", root, "rev-parse", "--abbrev-ref", "HEAD"]).output
         guard !base.isEmpty, base != "HEAD" else { throw WorktreeError(message: "The repository has no current branch to start from.") }
         if let requested, case .problem(let problem) = checkBranch(requested, repo: root) { throw WorktreeError(message: problem) }
         var slug = slug(name)
@@ -223,7 +305,8 @@ public enum Worktree {
         let path = dir.appendingPathComponent(candidate).path
         let branch = requested ?? "viber/\(candidate)"
         excludeWorktreeDir(root: root)
-        let add = Shell.run("git", ["-C", root, "worktree", "add", "-b", branch, path, base])
+        // --no-track: a branch started from origin/main must not push to (or count as behind) origin/main.
+        let add = Shell.run("git", ["-C", root, "worktree", "add", "--no-track", "-b", branch, path, base])
         guard add.ok else { throw WorktreeError(message: "git worktree add failed: \(add.stderr.trimmingCharacters(in: .whitespacesAndNewlines))") }
         WorktreeInclude.copy(from: root, to: path)
         return WorktreeInfo(repo: root, path: path, branch: branch, base: base, folder: repoDir)

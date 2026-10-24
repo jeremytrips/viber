@@ -44,6 +44,8 @@ struct NewSessionRequest {
     var name: String
     /// The worktree's branch; nil for `viber/<slug>`.
     var branch: String? = nil
+    /// Where a git worktree's branch starts.
+    var base: WorktreeBase = .originDefault
     var permissionMode: String
     var firstMessage: String
     /// The idea this session is started for, linked to it once it opens.
@@ -227,7 +229,7 @@ final class AppModel {
         switch job.kind {
         case .create(let request):
             let worktreeRequest = WorktreeRequest(folder: request.folder, name: request.name.isEmpty ? job.title : request.name,
-                                                  branch: request.branch, permissionMode: request.permissionMode)
+                                                  branch: request.branch, base: request.base, permissionMode: request.permissionMode)
             job.task = Task {
                 do {
                     let info = try await Worktree.create(worktreeRequest, progress: report)
