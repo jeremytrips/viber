@@ -520,6 +520,9 @@ struct CloseSheet: View {
     let pane: Pane
 
     @State private var hasChanges = false
+    /// The project's WorktreeRemove hooks, for a worktree a WorktreeCreate hook made.
+    @State private var teardown: [HookCommand] = []
+    @State private var teardownProblem: String?
 
     private var busy: Bool { pane.state == .working || pane.state.needsYou }
 
@@ -546,12 +549,27 @@ struct CloseSheet: View {
                             .textSelection(.enabled)
                             .help(worktree.path)
                     }
+                    if !teardown.isEmpty {
+                        LabeledContent("Teardown") {
+                            VStack(alignment: .trailing, spacing: 2) {
+                                ForEach(teardown, id: \.display) { hook in
+                                    Text(hook.display).font(.callout.monospaced()).lineLimit(2).truncationMode(.middle)
+                                        .textSelection(.enabled).help("The project's WorktreeRemove hook, from \(hook.source)")
+                                }
+                            }
+                        }
+                    }
                 }
                 if hasChanges {
                     Label("Has uncommitted changes", systemImage: "exclamationmark.circle.fill")
                         .foregroundStyle(.red)
                 }
-                Text("Removal is refused if there are uncommitted changes, and the branch is only deleted if it is merged.")
+                if let teardownProblem {
+                    Label(teardownProblem, systemImage: "exclamationmark.circle.fill")
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Text(removalNote(worktree))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -578,9 +596,27 @@ struct CloseSheet: View {
         .padding(20)
         .frame(width: 520)
         .task {
-            guard let path = pane.worktree?.path else { return }
-            hasChanges = await Task.detached { Worktree.hasUncommittedChanges(path) }.value
+            guard let worktree = pane.worktree else { return }
+            let (changes, hooks, problem) = await Task.detached { () -> (Bool, [HookCommand], String?) in
+                let changes = Worktree.hasUncommittedChanges(worktree.path)
+                guard worktree.madeByHook else { return (changes, [], nil) }
+                do { return (changes, try WorktreeHooks.hooks(.remove, folder: worktree.folder ?? worktree.repo), nil) }
+                catch { return (changes, [], error.localizedDescription) }
+            }.value
+            hasChanges = changes
+            teardown = hooks
+            teardownProblem = problem
         }
+    }
+
+    private func removalNote(_ worktree: WorktreeInfo) -> String {
+        var note = "Removal is refused if there are uncommitted changes, and the branch is only deleted if it is merged."
+        if !teardown.isEmpty {
+            note += " The project's WorktreeRemove hook removes the worktree; if it fails, the worktree is kept and its output shows in the sidebar."
+        } else if worktree.madeByHook {
+            note += " The project's WorktreeCreate hook made this worktree and there is no WorktreeRemove hook, so git removes it."
+        }
+        return note
     }
 
     private func close(removeWorktree: Bool = false, deleteBranch: Bool = false) {

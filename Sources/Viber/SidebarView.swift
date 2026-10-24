@@ -41,7 +41,7 @@ struct SidebarView: View {
                             .tag(Target.job(job.id))
                             .contextMenu {
                                 if job.isRunning {
-                                    Button("Stop Setup") { model.cancel(job) }
+                                    Button(job.isRemoval ? "Stop Teardown" : "Stop Setup") { model.cancel(job) }
                                 } else {
                                     Button("Try Again") { model.retry(job) }
                                     Button("Dismiss") { model.dismiss(job) }
