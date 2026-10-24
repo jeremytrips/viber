@@ -68,7 +68,13 @@ struct PaneHeader: View {
         HStack(alignment: .center, spacing: 16) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(pane.title).font(.headline).lineLimit(1)
-                Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                HStack(spacing: 0) {
+                    Button(model.projectName(pane.projectPath)) { model.select(.project(pane.projectPath)) }
+                        .buttonStyle(.link)
+                        .help("Show the project (⇧⌘P)")
+                    Text("  ·  " + subtitle).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                }
+                .font(.caption)
             }
             Spacer()
             Stat(label: "Account", value: pane.profileLabel)

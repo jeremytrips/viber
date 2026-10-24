@@ -34,12 +34,16 @@ struct ViberApp: App {
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("New Session…") { model.showNewSession = true }.keyboardShortcut("n")
+                Button("Add Project…") { model.chooseProject() }.keyboardShortcut("n", modifiers: [.command, .shift])
                 Button("Resume Session…") { model.reloadRecent(); model.showResume = true }.keyboardShortcut("r", modifiers: [.command, .shift])
             }
             CommandMenu("Session") {
                 Button("Jump to Session…") { model.showSwitcher = true }.keyboardShortcut("k")
                 Button("Next Session Waiting for You") { model.selectNextWaiting() }.keyboardShortcut("j")
                 Button("Show Ideas") { model.select(.ideas) }.keyboardShortcut("i", modifiers: [.command, .shift])
+                Button("Show Project") { if let path = model.selectedProject { model.select(.project(path)) } }
+                    .keyboardShortcut("p", modifiers: [.command, .shift])
+                    .disabled(model.selectedProject == nil || model.selectedProjectPage != nil)
                 Divider()
                 Button("Stop Claude") { model.selectedPane?.interrupt() }.keyboardShortcut(".")
                 Button("Open Folder in VS Code") {
@@ -90,6 +94,7 @@ struct ViberApp: App {
 
 struct ContentView: View {
     @Environment(AppModel.self) private var model
+    @State private var renameDraft = ""
 
     var body: some View {
         @Bindable var model = model
@@ -100,6 +105,8 @@ struct ContentView: View {
             Group {
                 if model.selection == .ideas {
                     IdeasView()
+                } else if let path = model.selectedProjectPage {
+                    ProjectView(path: path).id(path)
                 } else if let pane = model.selectedPane {
                     PaneView(pane: pane).id(pane.id)
                 } else if let session = model.selectedExternal {
@@ -121,6 +128,19 @@ struct ContentView: View {
         .sheet(item: $model.settingsSheet) { request in
             if let pane = model.pane(request.paneID) { SessionSettingsSheet(pane: pane, tab: request.tab) }
         }
+        .alert("Rename Project", isPresented: Binding(get: { model.renamingProject != nil }, set: { if !$0 { model.renamingProject = nil } })) {
+            TextField("Name", text: $renameDraft)
+            Button("Rename") {
+                if let path = model.renamingProject { model.renameProject(path, to: renameDraft) }
+                model.renamingProject = nil
+            }
+            Button("Cancel", role: .cancel) { model.renamingProject = nil }
+        } message: {
+            Text("Only Viber uses this name. Leave it empty to show the folder's name.")
+        }
+        .onChange(of: model.renamingProject) { _, path in
+            if let path { renameDraft = model.projectName(path) }
+        }
         .alert("Viber", isPresented: Binding(get: { model.errorMessage != nil }, set: { if !$0 { model.errorMessage = nil } })) {
             Button("OK") { model.errorMessage = nil }
         } message: {
@@ -134,14 +154,28 @@ struct EmptyStateView: View {
 
     var body: some View {
         VStack(spacing: 14) {
-            Image(systemName: "bubble.left.and.text.bubble.right")
-                .font(.system(size: 40)).foregroundStyle(.secondary)
-            Text("No session selected").font(.title3.weight(.semibold))
-            Text("Start a new Claude Code session, or resume one you ran before.")
-                .foregroundStyle(.secondary)
-            HStack {
-                Button("New Session") { model.showNewSession = true }.keyboardShortcut(.defaultAction)
-                Button("Resume…") { model.reloadRecent(); model.showResume = true }
+            if model.sidebarProjects.isEmpty {
+                Image(systemName: "folder.badge.plus")
+                    .font(.system(size: 40)).foregroundStyle(.secondary)
+                Text("Add your first project").font(.title3.weight(.semibold))
+                Text("A project is a folder or git repository. Its sessions, worktrees and ideas stay together in the sidebar.")
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 420)
+                HStack {
+                    Button("Add Project…") { model.chooseProject() }.keyboardShortcut(.defaultAction)
+                    Button("Resume…") { model.reloadRecent(); model.showResume = true }
+                }
+            } else {
+                Image(systemName: "bubble.left.and.text.bubble.right")
+                    .font(.system(size: 40)).foregroundStyle(.secondary)
+                Text("Nothing selected").font(.title3.weight(.semibold))
+                Text("Pick a project or a session in the sidebar, or start a new session.")
+                    .foregroundStyle(.secondary)
+                HStack {
+                    Button("New Session") { model.showNewSession = true }.keyboardShortcut(.defaultAction)
+                    Button("Resume…") { model.reloadRecent(); model.showResume = true }
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

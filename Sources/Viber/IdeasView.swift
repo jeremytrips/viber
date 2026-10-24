@@ -62,7 +62,7 @@ struct IdeasView: View {
                     }
                     ForEach(groups, id: \.project) { group in
                         VStack(alignment: .leading, spacing: 8) {
-                            Text(AppModel.projectName(group.project))
+                            Text(model.projectName(group.project))
                                 .font(.subheadline.weight(.semibold))
                                 .foregroundStyle(.secondary)
                                 .help(group.project)
@@ -144,13 +144,13 @@ struct IdeaComposer: View {
                 Menu {
                     ForEach(model.ideaProjects, id: \.self) { path in
                         Button { project = path } label: {
-                            if path == target { Label(AppModel.projectName(path), systemImage: "checkmark") } else { Text(AppModel.projectName(path)) }
+                            if path == target { Label(model.projectName(path), systemImage: "checkmark") } else { Text(model.projectName(path)) }
                         }
                     }
                     if !model.ideaProjects.isEmpty { Divider() }
                     Button("Other Folder…", action: chooseFolder)
                 } label: {
-                    Label(target.map(AppModel.projectName) ?? "Choose a project", systemImage: "folder")
+                    Label(target.map(model.projectName) ?? "Choose a project", systemImage: "folder")
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()

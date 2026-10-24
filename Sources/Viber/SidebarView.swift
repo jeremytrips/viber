@@ -5,44 +5,66 @@ import ViberCore
 struct SidebarView: View {
     @Environment(AppModel.self) private var model
 
-    private var groups: [(path: String, name: String, panes: [Pane], jobs: [WorktreeJob])] {
-        var order: [String] = []
-        var byProject: [String: [Pane]] = [:]
+    private struct ProjectGroup {
+        let project: Project
+        let panes: [Pane]
+        let jobs: [WorktreeJob]
+    }
+
+    private var groups: [ProjectGroup] {
+        var panesByProject: [String: [Pane]] = [:]
         var jobsByProject: [String: [WorktreeJob]] = [:]
-        for pane in model.panes {
-            if byProject[pane.projectPath] == nil { order.append(pane.projectPath) }
-            byProject[pane.projectPath, default: []].append(pane)
-        }
-        for job in model.jobs {
-            if byProject[job.project] == nil && jobsByProject[job.project] == nil { order.append(job.project) }
-            jobsByProject[job.project, default: []].append(job)
-        }
-        return order.map { path in
-            let panes = byProject[path] ?? []
-            return (path, panes.first?.projectName ?? AppModel.projectName(path), panes, jobsByProject[path] ?? [])
+        for pane in model.panes { panesByProject[pane.projectPath, default: []].append(pane) }
+        for job in model.jobs { jobsByProject[job.project, default: []].append(job) }
+        return model.sidebarProjects.map { project in
+            ProjectGroup(project: project, panes: panesByProject[project.path] ?? [], jobs: jobsByProject[project.path] ?? [])
         }
     }
 
     var body: some View {
         let selection = Binding<Target?>(get: { model.selection }, set: { model.select($0) })
+        let groups = groups
+        // ⌘1…⌘9 count down the sidebar, as AppModel.orderedPanes does.
+        let shortcuts = Dictionary(uniqueKeysWithValues: groups.flatMap(\.panes).enumerated().map { ($1.id, $0) })
         List(selection: selection) {
             Section {
                 IdeasRow().tag(Target.ideas)
             }
-            ForEach(groups, id: \.path) { group in
-                Section {
-                    ForEach(group.panes) { pane in
-                        PaneRow(pane: pane, index: model.panes.firstIndex { $0.id == pane.id } ?? 0)
-                            .tag(Target.pane(pane.id))
-                            .contextMenu { PaneRowMenu(pane: pane) }
+            Section {
+                ForEach(groups, id: \.project.path) { group in
+                    DisclosureGroup(isExpanded: Binding(get: { !group.project.isCollapsed },
+                                                        set: { model.setCollapsed(group.project.path, !$0) })) {
+                        ForEach(group.panes) { pane in
+                            PaneRow(pane: pane, index: shortcuts[pane.id] ?? 9)
+                                .tag(Target.pane(pane.id))
+                                .contextMenu { PaneRowMenu(pane: pane) }
+                        }
+                        ForEach(group.jobs) { job in
+                            WorktreeJobRow(job: job)
+                                .tag(Target.job(job.id))
+                                .contextMenu { WorktreeJobMenu(job: job) }
+                        }
+                    } label: {
+                        ProjectRow(project: group.project, panes: group.panes)
+                            .tag(Target.project(group.project.path))
+                            .contextMenu { ProjectMenu(path: group.project.path) }
                     }
-                    ForEach(group.jobs) { job in
-                        WorktreeJobRow(job: job)
-                            .tag(Target.job(job.id))
-                            .contextMenu { WorktreeJobMenu(job: job) }
+                }
+                if groups.isEmpty {
+                    Button { model.chooseProject() } label: {
+                        Label("Add a Project…", systemImage: "folder.badge.plus")
                     }
-                } header: {
-                    ProjectHeader(name: group.name, path: group.path)
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.secondary)
+                }
+            } header: {
+                HStack {
+                    Text("Projects")
+                    Spacer()
+                    Button { model.chooseProject() } label: { Image(systemName: "folder.badge.plus") }
+                        .buttonStyle(.borderless)
+                        .help("Add a project (⇧⌘N)")
+                        .accessibilityLabel("Add Project")
                 }
             }
         }
@@ -60,7 +82,7 @@ struct SidebarView: View {
         }
         .toolbar {
             ToolbarItem {
-                Button { model.showNewSession = true } label: { Label("New Session", systemImage: "plus") }
+                Button { model.newSession(in: model.selectedProject ?? "") } label: { Label("New Session", systemImage: "plus") }
                     .help("New session (⌘N)")
             }
         }
@@ -117,32 +139,80 @@ struct IdeasRow: View {
     }
 }
 
-/// A project's section title, with its ideas for later.
-struct ProjectHeader: View {
+/// A project in the sidebar. Selecting it shows the project's page; its sessions are listed under it.
+struct ProjectRow: View {
     @Environment(AppModel.self) private var model
-    let name: String
-    let path: String
+    let project: Project
+    let panes: [Pane]
     @State private var showingIdeas = false
+    @State private var hovering = false
 
     var body: some View {
-        let count = model.ideas.toPlanCount(in: path)
-        HStack(spacing: 4) {
-            Text(name).help(path)
+        let ideas = model.ideas.toPlanCount(in: project.path)
+        let waiting = panes.filter { $0.state.needsYou }.count
+        HStack(spacing: 6) {
+            Image(systemName: panes.isEmpty ? "folder" : "folder.fill")
+                .foregroundStyle(.secondary)
+                .frame(width: 18)
+            Text(project.name).fontWeight(.semibold).lineLimit(1)
             Spacer(minLength: 4)
-            Button { showingIdeas = true } label: {
-                HStack(spacing: 2) {
-                    Image(systemName: count == 0 ? "lightbulb" : "lightbulb.fill")
-                    if count > 0 { Text("\(count)").monospacedDigit() }
-                }
-                .foregroundStyle(count == 0 ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.accentColor))
+            if project.isCollapsed && waiting > 0 {
+                Text("\(waiting) waiting").font(.caption).foregroundStyle(.orange)
+            } else if project.isCollapsed && !panes.isEmpty {
+                Text("\(panes.count)").font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                    .help("\(panes.count) open session\(panes.count == 1 ? "" : "s")")
             }
-            .buttonStyle(.borderless)
-            .help(count == 0 ? "Ideas for later in \(name)" : "\(count) idea\(count == 1 ? "" : "s") to plan in \(name)")
-            .accessibilityLabel(count == 0 ? "Project ideas" : "Project ideas, \(count) to plan")
-            .popover(isPresented: $showingIdeas, arrowEdge: .trailing) {
-                ProjectIdeasPopover(name: name, path: path) { showingIdeas = false }
+            if ideas > 0 || hovering || showingIdeas {
+                Button { showingIdeas = true } label: {
+                    HStack(spacing: 2) {
+                        Image(systemName: ideas == 0 ? "lightbulb" : "lightbulb.fill")
+                        if ideas > 0 { Text("\(ideas)").monospacedDigit() }
+                    }
+                    .foregroundStyle(ideas == 0 ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.accentColor))
+                }
+                .buttonStyle(.borderless)
+                .help(ideas == 0 ? "Ideas for later in \(project.name)" : "\(ideas) idea\(ideas == 1 ? "" : "s") to plan in \(project.name)")
+                .accessibilityLabel(ideas == 0 ? "Project ideas" : "Project ideas, \(ideas) to plan")
+                .popover(isPresented: $showingIdeas, arrowEdge: .trailing) {
+                    ProjectIdeasPopover(name: project.name, path: project.path) { showingIdeas = false }
+                }
+            }
+            if hovering || panes.isEmpty {
+                Button { model.newSession(in: project.path) } label: { Image(systemName: "plus") }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.secondary)
+                    .help("New session in \(project.name)")
+                    .accessibilityLabel("New Session in \(project.name)")
             }
         }
+        .padding(.vertical, 2)
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .help(project.path)
+    }
+}
+
+/// A project's right-click menu, in the sidebar and on its page.
+struct ProjectMenu: View {
+    @Environment(AppModel.self) private var model
+    let path: String
+    /// Shown on the project's own page, which has its own New Session button.
+    var onPage = false
+
+    var body: some View {
+        if !onPage {
+            Button("New Session…") { model.newSession(in: path) }
+            Button("Show Project") { model.select(.project(path)) }
+            Divider()
+        }
+        Button("Show in Finder") { NSWorkspace.shared.open(URL(fileURLWithPath: path)) }
+        Button("Open in VS Code") { model.openInVSCode(path) }
+        Divider()
+        Button("Rename…") { model.renamingProject = path }
+        Button("Remove from Sidebar") { model.removeProject(path) }
+            .disabled(!model.canRemoveProject(path))
+            .help(model.canRemoveProject(path) ? "Its folder, ideas and settings stay; add it again to bring them back"
+                                               : "Close its sessions first")
     }
 }
 

@@ -27,7 +27,11 @@ Launch Viber from /Applications and allow notifications when asked. Notification
 
 ## Features
 
-- **Sessions sidebar**: every open session with its state (working, waiting for you, finished, failed). Sessions started outside Viber show up too.
+- **Projects**: the sidebar lists projects, with each one's open sessions under it and their state (working, waiting for you, finished, failed). Sessions started outside Viber show up too, below the projects.
+  - **What a project is**: in a git repository, the main checkout's folder, so sessions in its subfolders and in its worktrees (Viber's, a hook's or ones made by hand) all sit under it. Viber finds it by following a worktree's `.git` file back to the repository. Outside git, the folder itself.
+  - **Adding one**: ⇧⌘N, or the folder button next to *Projects* in the sidebar. Starting a session in a new folder adds its project too. A project stays in the sidebar when its last session closes; right-click it to rename it (only Viber uses the name) or remove it from the sidebar (its folder, ideas and settings stay).
+  - **Its page**: click a project to see its open sessions; its ideas, with a field to add one; earlier sessions from clauth's list, with **Resume** (dimmed when the folder, such as a removed worktree, is gone); its worktrees, with **Start Session** for one no session has open; its branches, newest commit first; and its settings: the branch pattern, the project's Claude Code settings files and CLAUDE.md, and the settings of a session that is open there. A folder that isn't a git repository yet can be made one there.
+  - **Starting sessions**: the **+** on a project (shown on hover) or **New Session** on its page opens the New Session sheet on it. The sheet's **Projects** menu lists the sidebar's projects, then recent folders of others. Click the arrow to fold a project's sessions away; ⌘1–⌘9 count down the sidebar.
 - **Chat**: streamed replies, tool calls summarized inline, Claude's thinking folded into a row you can open, stop with ⌘. Return sends; Shift-Return (or Option-Return) starts a new line. Hover a message to copy it: the button sits left of your messages and in the margin of Claude's (your messages also have Copy Message on right-click).
 - **Agents**: each subagent Claude starts gets a card. While it runs, the card shows its last step, tool count, tokens and time, and a Stop button. A smaller copy of the card stays pinned above the message box until the agent ends, so you can follow it without scrolling. A background agent stays running after the turn that started it. When it ends, its report shows on the card, Markdown-formatted and cut to a preview you can expand. Open the card to see the prompt Claude gave it and every tool call it made. When a background agent finishes, Claude reads its report in a turn of its own, which shows as working. Permission requests from an agent say which agent asks. Resumed sessions rebuild the cards from the agents' own transcripts.
 - **Checklist**: when Claude keeps a task list (`TaskCreate`/`TaskUpdate`, or `TodoWrite` on older setups), it stays pinned above the message box until everything on it is done. Claude Code only offers these tools to current models when `CLAUDE_CODE_ENABLE_TODO_TOOLS=1` is set (for example under `env` in `~/.claude/settings.json`).
@@ -60,7 +64,7 @@ Launch Viber from /Applications and allow notifications when asked. Notification
 
   Changes to these files apply to sessions started afterwards.
 - **Messages between sessions**: start a message with `//` to send it to another open session instead of this one. A menu ranks the other sessions by what you typed (their title, project, branch and recent conversation), so `//the firmware endpoint is ready` goes to the session working on firmware. Start with a session's name (`//backend: …`) to pick it directly, or use ↑↓ to choose. The receiving session shows who it came from. If it is busy, Claude reads it after the tool call it is running, like a message typed while it works. Its answer is posted back into the sender's chat (marked "Reply from …") so the sender's Claude can carry on; replies never ask for an answer, so sessions don't ping-pong. Messages live only in the two chats they touch: the sender's "Sent to …" line shows whether the message is not read yet, waiting for a reply, replied or got no reply.
-- **Ideas**: a list per project of things to do later that nobody has planned yet. Click the lightbulb next to a project name in the sidebar to jot one down or see that project's list (the number is how many are still to plan). The **Ideas** panel (top of the sidebar, ⇧⌘I) shows every project's ideas, filtered by *To plan*, *Started* or *Done*, with search. **Plan** starts a new session for an idea in plan mode, in a new worktree when the project is a git repo, with the idea as the first message. When the project's branch pattern has a part to fill in (such as `<id>`), Plan opens the New Session sheet with all this filled in, so you can name the branch. The idea is then marked started and links to that session. Tick an idea off when it's done, or right-click to edit, copy or delete it. Sessions can add ideas with `viber idea add` (the `/idea` skill), and each idea shows who added it. Ideas are stored by Viber, not in the repo. Project notes from earlier versions were turned into one idea each.
+- **Ideas**: a list per project of things to do later that nobody has planned yet. Click the lightbulb next to a project in the sidebar (shown on hover until there is one) to jot one down or see that project's list (the number is how many are still to plan); the project's page lists them too. Ideas are filed under the project, so an idea added from a subfolder or a worktree belongs to the repository. The **Ideas** panel (top of the sidebar, ⇧⌘I) shows every project's ideas, filtered by *To plan*, *Started* or *Done*, with search. **Plan** starts a new session for an idea in plan mode, in a new worktree when the project is a git repo, with the idea as the first message. When the project's branch pattern has a part to fill in (such as `<id>`), Plan opens the New Session sheet with all this filled in, so you can name the branch. The idea is then marked started and links to that session. Tick an idea off when it's done, or right-click to edit, copy or delete it. Sessions can add ideas with `viber idea add` (the `/idea` skill), and each idea shows who added it. Ideas are stored by Viber, not in the repo. Project notes from earlier versions were turned into one idea each.
 - **Browser preview** (the Safari button in the session header, ⇧⌘B): a browser beside the chat that you and Claude share, so Claude can check its own web work.
   - **Viber serves the tools itself.** They come from an MCP server built into Viber, over the same stdio channel, so there's nothing to install. Every session gets them.
   - **The tools:**
@@ -105,11 +109,13 @@ Launch Viber from /Applications and allow notifications when asked. Notification
 
 | Keys | Action |
 | --- | --- |
-| ⌘N | New session |
-| ⌘K | Jump to session |
+| ⌘N | New session, in the selected project |
+| ⇧⌘N | Add a project |
+| ⌘K | Jump to a session or project |
+| ⇧⌘P | Show the selected session's project |
 | ⇧⌘I | Show ideas |
 | ⌘J | Next session waiting for you |
-| ⌘1–⌘9 | Select session 1–9 |
+| ⌘1–⌘9 | Select session 1–9, counted down the sidebar |
 | ⌘. | Stop Claude |
 | ⇧↩ | New line in the message box |
 | ⌘⇧O | Open folder in VS Code |

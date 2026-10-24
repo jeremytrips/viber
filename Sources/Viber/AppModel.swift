@@ -3,10 +3,12 @@ import Foundation
 import Observation
 import ViberCore
 
-/// Sidebar selection: a Viber pane, or a session running somewhere else.
+/// Sidebar selection: a Viber pane, a project's page, or a session running somewhere else.
 enum Target: Hashable {
     case pane(String)
     case external(String)
+    /// A project's page, by its path.
+    case project(String)
     /// Every project's ideas that are not planned yet.
     case ideas
     /// A worktree being set up for a new session.
@@ -18,6 +20,7 @@ enum Target: Hashable {
         case .pane(let id): return "pane:\(id)"
         case .external(let id): return "ext:\(id)"
         case .job(let id): return "job:\(id)"
+        case .project(let path): return "project:\(path)"
         }
     }
 
@@ -26,6 +29,7 @@ enum Target: Hashable {
         else if key.hasPrefix("pane:") { self = .pane(String(key.dropFirst(5))) }
         else if key.hasPrefix("ext:") { self = .external(String(key.dropFirst(4))) }
         else if key.hasPrefix("job:") { self = .job(String(key.dropFirst(4))) }
+        else if key.hasPrefix("project:") { self = .project(String(key.dropFirst(8))) }
         else { return nil }
     }
 }
@@ -69,6 +73,14 @@ final class AppModel {
     var showNewSession = false
     /// Starting values for the next New Session sheet.
     var newSessionPrefill: NewSessionRequest?
+    /// The folder the next New Session sheet starts in, such as the project whose + was clicked.
+    var newSessionFolder: String?
+    /// The projects in the sidebar, kept while none of their sessions is open.
+    var projects = ProjectList()
+    /// The project being renamed, by its path.
+    var renamingProject: String?
+    /// The project each folder in `recent` belongs to.
+    var recentRoots: [String: String] = [:]
     var showSwitcher = false
     var showResume = false
     var closing: Pane?
@@ -125,6 +137,10 @@ final class AppModel {
         if case .external(let id)? = selection { return externals.first { $0.id == id } }
         return nil
     }
+    /// The project whose page is shown.
+    var selectedProjectPage: String? { if case .project(let path)? = selection { return path }; return nil }
+    /// The project of whatever is selected: its page, one of its sessions, or a worktree being set up for it.
+    var selectedProject: String? { selectedProjectPage ?? selectedPane?.projectPath ?? selectedJob?.project }
     var waitingCount: Int { panes.filter { $0.state.needsYou }.count + externals.filter { [.input, .plan, .permission].contains($0.state) }.count }
     var profiles: [ClauthStatus.Profile] { status?.profiles ?? [] }
     var defaultProfile: String? { status?.activeProfile }
@@ -143,14 +159,18 @@ final class AppModel {
         selection = target
         guard let target else { return }
         notifier.clear(target: target.key)
-        if case .pane(let id) = target, let pane = pane(id), !pane.started {
-            pane.start(binDir: binDir, pluginDir: pluginDir)
+        if case .pane(let id) = target, let pane = pane(id) {
+            // ⌘J or a notification can pick a session whose project is folded away.
+            if projects.project(pane.projectPath)?.isCollapsed == true { setCollapsed(pane.projectPath, false) }
+            if !pane.started { pane.start(binDir: binDir, pluginDir: pluginDir) }
         }
     }
 
+    /// ⌘1…⌘9, counted down the sidebar.
     func select(index: Int) {
-        guard panes.indices.contains(index) else { return }
-        select(.pane(panes[index].id))
+        let ordered = orderedPanes
+        guard ordered.indices.contains(index) else { return }
+        select(.pane(ordered[index].id))
     }
 
     func selectNextWaiting() {
@@ -164,6 +184,7 @@ final class AppModel {
     // MARK: Sessions
 
     func createSession(_ request: NewSessionRequest) {
+        ensureProject(ProjectRoot.resolve(request.folder))
         let title = request.name.isEmpty ? (request.firstMessage.isEmpty ? URL(fileURLWithPath: request.folder).lastPathComponent : String(request.firstMessage.prefix(50))) : request.name
         let mode = request.permissionMode == "default" ? nil : request.permissionMode
         let model = Prefs.string(Prefs.newSessionModel)
@@ -209,6 +230,7 @@ final class AppModel {
         let pane = Pane(title: title, spec: spec, worktree: worktree)
         wire(pane)
         panes.append(pane)
+        ensureProject(pane.projectPath)
         save()
         if let ideaID {
             planningIdeas.remove(ideaID)
@@ -312,7 +334,7 @@ final class AppModel {
 
     private func remove(_ job: WorktreeJob) {
         jobs.removeAll { $0.id == job.id }
-        if selection == .job(job.id) { selection = panes.last.map { .pane($0.id) } }
+        if selection == .job(job.id) { selection = .project(job.project) }
         notifier.clear(target: Target.job(job.id).key)
     }
 
@@ -525,16 +547,97 @@ final class AppModel {
 
     // MARK: Ideas
 
-    /// Projects an idea can be filed under: open sessions' projects in sidebar order, then others that have ideas.
+    /// Projects an idea can be filed under: the sidebar's, then others that have ideas.
     var ideaProjects: [String] {
         var seen = Set<String>()
-        let open = panes.map(\.projectPath).filter { seen.insert($0).inserted }
+        let listed = sidebarProjects.map(\.path).filter { seen.insert($0).inserted }
         let others = ideas.ideas.map(\.project).filter { seen.insert($0).inserted }
             .sorted { Self.projectName($0).localizedStandardCompare(Self.projectName($1)) == .orderedAscending }
-        return open + others
+        return listed + others
     }
 
     static func projectName(_ path: String) -> String { URL(fileURLWithPath: path).lastPathComponent }
+
+    /// A project's name as the sidebar shows it: the one the user gave it, else its folder's.
+    func projectName(_ path: String) -> String { projects.project(path)?.name ?? Self.projectName(path) }
+
+    // MARK: Projects
+
+    /// The sidebar's projects, plus any that an open session or worktree job belongs to but the list lacks.
+    var sidebarProjects: [Project] {
+        var list = projects.projects
+        for path in panes.map(\.projectPath) + jobs.map(\.project) where !list.contains(where: { $0.path == path }) {
+            list.append(Project(path: path, addedAt: Date()))
+        }
+        return list
+    }
+
+    /// Open sessions in sidebar order: by project, then in the order they were opened.
+    var orderedPanes: [Pane] {
+        sidebarProjects.flatMap { project in panes.filter { $0.projectPath == project.path } }
+    }
+
+    /// Adds the project `folder` belongs to (its repository's main checkout) and returns its path.
+    @discardableResult
+    func addProject(_ folder: String) -> String {
+        let path = ProjectRoot.resolve(folder)
+        ensureProject(path)
+        return path
+    }
+
+    private func ensureProject(_ path: String) {
+        if projects.add(path) { saveProjects() }
+    }
+
+    /// Asks for a folder and shows its project's page.
+    func chooseProject() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Add Project"
+        panel.message = "Choose a folder or git repository. A folder inside a repository adds the whole repository."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        select(.project(addProject(url.path)))
+    }
+
+    /// Whether the project can leave the sidebar: not while a session or worktree job of it is open.
+    func canRemoveProject(_ path: String) -> Bool {
+        !panes.contains { $0.projectPath == path } && !jobs.contains { $0.project == path }
+    }
+
+    /// Takes a project out of the sidebar. Its folder, ideas and settings stay; adding it again brings them back.
+    func removeProject(_ path: String) {
+        guard canRemoveProject(path) else { return }
+        projects.remove(path)
+        saveProjects()
+        if selection == .project(path) { selection = nil }
+    }
+
+    func renameProject(_ path: String, to name: String) {
+        projects.rename(path, to: name)
+        saveProjects()
+    }
+
+    func setCollapsed(_ path: String, _ collapsed: Bool) {
+        guard projects.project(path)?.isCollapsed != collapsed else { return }
+        projects.setCollapsed(path, collapsed)
+        saveProjects()
+    }
+
+    /// Opens the New Session sheet on a project, or on a folder in it.
+    func newSession(in folder: String) {
+        newSessionFolder = folder
+        showNewSession = true
+    }
+
+    /// Starts a session in a worktree that already exists, such as one a session before it left behind.
+    func openSession(inWorktree entry: WorktreeEntry) {
+        let name = entry.branch.map { $0.split(separator: "/").last.map(String.init) ?? $0 } ?? Project.folderName(entry.path)
+        createSession(NewSessionRequest(folder: entry.path, profile: AccountPicker.usableDefault(self), useWorktree: false, name: name,
+                                        permissionMode: Prefs.string(Prefs.newSessionMode), firstMessage: "", ideaID: nil))
+    }
 
     func addIdea(_ text: String, project: String, by author: String) {
         guard ideas.add(text, project: project, by: author) != nil else { return }
@@ -601,7 +704,8 @@ final class AppModel {
         pane.stop()
         pane.closePreview()
         panes.removeAll { $0.id == pane.id }
-        if wasSelected { selection = panes.last.map { .pane($0.id) } }
+        // Another session in the same project, else the project's page.
+        if wasSelected { selection = panes.last { $0.projectPath == pane.projectPath }.map { .pane($0.id) } ?? .project(pane.projectPath) }
         if settingsSheet?.paneID == pane.id { settingsSheet = nil }
         notifier.clear(target: Target.pane(pane.id).key)
         save()
@@ -850,7 +954,12 @@ final class AppModel {
         Task.detached {
             let result = Shell.run("clauth", ["sessions", "--json"])
             let sessions = result.ok ? ClauthSession.decodeList(Data(result.stdout.utf8)) : []
-            await MainActor.run { if !sessions.isEmpty { self.recent = sessions } }
+            var roots: [String: String] = [:]
+            for folder in Set(sessions.compactMap(\.workspace)) { roots[folder] = ProjectRoot.resolve(folder) }
+            let found = roots
+            await MainActor.run {
+                if !sessions.isEmpty { self.recent = sessions; self.recentRoots = found }
+            }
         }
     }
 
@@ -874,12 +983,32 @@ final class AppModel {
         }
     }
 
+    func saveProjects() {
+        do {
+            try projects.save()
+        } catch {
+            errorMessage = "Could not save projects: \(error.localizedDescription)"
+        }
+    }
+
     private func restore() {
         ideas = IdeaList.load()
-        guard let data = try? Data(contentsOf: ViberPaths.panes),
-              let records = try? JSONDecoder().decode([PaneRecord].self, from: data) else { return }
-        panes = records.map(Pane.init(record:))
-        panes.forEach(wire)
+        // Ideas were filed under a session's folder; a subfolder's or worktree's now belong to its repository.
+        if ideas.moveProjects(ProjectRoot.resolve) { saveIdeas() }
+        if let data = try? Data(contentsOf: ViberPaths.panes),
+           let records = try? JSONDecoder().decode([PaneRecord].self, from: data) {
+            panes = records.map(Pane.init(record:))
+            panes.forEach(wire)
+        }
+        // The first launch with projects starts the list from the open sessions and the folders that have ideas.
+        let saved = ProjectList.load()
+        projects = saved ?? ProjectList()
+        var changed = saved == nil
+        let withIdeas = saved == nil ? ideas.ideas.map(\.project).filter { FileManager.default.fileExists(atPath: $0) } : []
+        for path in panes.map(\.projectPath) + withIdeas {
+            if projects.add(path) { changed = true }
+        }
+        if changed { saveProjects() }
     }
 
     /// Settings → General: which state changes post a notification.

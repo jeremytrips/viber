@@ -98,6 +98,7 @@ final class Pane: Identifiable {
 
     init(id: String = UUID().uuidString, title: String, spec: LaunchSpec, worktree: WorktreeInfo? = nil) {
         self.id = id; self.title = title; self.spec = spec; self.worktree = worktree
+        projectPath = ProjectRoot.resolve(worktree?.repo ?? spec.cwd)
     }
 
     convenience init(record: PaneRecord) {
@@ -120,8 +121,9 @@ final class Pane: Identifiable {
     var state: PaneState { chat.state }
     var profileLabel: String { spec.profile ?? "Default login" }
     var cwd: String { spec.cwd }
-    /// What ideas are filed under: the repo root for worktree sessions, else the session's folder.
-    var projectPath: String { worktree?.repo ?? spec.cwd }
+    /// The project it belongs to: its repository's main checkout (also for subfolders and worktrees), else its folder.
+    /// Ideas are filed under it.
+    @ObservationIgnored let projectPath: String
     var projectName: String { URL(fileURLWithPath: projectPath).lastPathComponent }
     /// The worktree's branch as it is now, or the one it was created on until it is read (and while HEAD is detached).
     /// Nil when there is neither: a hook can make a worktree on a detached HEAD.

@@ -11,7 +11,7 @@ public struct Idea: Codable, Equatable, Identifiable {
     }
 
     public var id: String
-    /// Keyed like sessions' projects: the repo root for worktree sessions, else the session's folder.
+    /// Keyed like sessions' projects: the main checkout of the session's repository, else the session's folder.
     public var project: String
     public var text: String
     public var createdAt: Date
@@ -81,6 +81,16 @@ public struct IdeaList: Codable, Equatable {
     }
 
     public mutating func remove(_ id: String) { ideas.removeAll { $0.id == id } }
+
+    /// Files ideas under other projects, such as the repository a subfolder belongs to. Returns whether any moved.
+    public mutating func moveProjects(_ transform: (String) -> String) -> Bool {
+        var moved = false
+        for index in ideas.indices {
+            let project = transform(ideas[index].project)
+            if project != ideas[index].project { ideas[index].project = project; moved = true }
+        }
+        return moved
+    }
 
     public func idea(_ id: String) -> Idea? { ideas.first { $0.id == id } }
 

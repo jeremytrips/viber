@@ -57,7 +57,10 @@ struct NewSessionSheet: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
 
+    /// Where the session runs: a project, or a folder in one.
     @State private var folder = ""
+    /// The project `folder` belongs to, once looked up.
+    @State private var projectRoot: String?
     @State private var profile: String?
     @State private var useWorktree = false
     @State private var repoRoot: String?
@@ -118,22 +121,16 @@ struct NewSessionSheet: View {
         VStack(spacing: 0) {
             Form {
                 Section {
-                    LabeledContent("Folder") {
+                    LabeledContent("Project") {
                         HStack(spacing: 6) {
-                            Text(folder.isEmpty ? "No folder chosen" : (folder as NSString).abbreviatingWithTildeInPath)
-                                .foregroundStyle(folder.isEmpty ? .secondary : .primary)
+                            projectLabel
                                 .lineLimit(1)
                                 .truncationMode(.middle)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .help(folder)
-                            Menu("Recent") {
-                                ForEach(model.recentFolders.prefix(20), id: \.self) { path in
-                                    Button((path as NSString).abbreviatingWithTildeInPath) { folder = path }
-                                }
-                            }
-                            .disabled(model.recentFolders.isEmpty)
-                            .fixedSize()
+                            projectMenu
                             Button("Choose…", action: chooseFolder)
+                                .help("A folder or git repository. A new one is added to the sidebar's projects.")
                         }
                     }
                     AccountPicker(selection: $profile)
@@ -231,6 +228,39 @@ struct NewSessionSheet: View {
         .task(id: "\(folder)|\(branch)|\(branchEdited)|\(useWorktree)|\(maker.usesHook)|\(pattern)") { await checkBranch() }
     }
 
+    /// The project's name, then its path, or where in it the session runs.
+    private var projectLabel: Text {
+        guard !folder.isEmpty else { return Text("No project chosen").foregroundStyle(.secondary) }
+        let root = projectRoot ?? folder
+        let place = folder == root ? (root as NSString).abbreviatingWithTildeInPath
+            : folder.hasPrefix(root + "/") ? "in " + folder.dropFirst(root.count + 1) : "in " + (folder as NSString).abbreviatingWithTildeInPath
+        // A Form shows LabeledContent's value in the secondary color unless told otherwise.
+        return Text(model.projectName(root)).fontWeight(.medium).foregroundStyle(.primary) + Text("  " + place).foregroundStyle(.secondary)
+    }
+
+    /// The sidebar's projects, then recent folders of projects it doesn't have.
+    private var projectMenu: some View {
+        let projects = model.sidebarProjects
+        let others = model.recentFolders.filter { !model.projects.contains(model.recentRoots[$0] ?? $0) }.prefix(15)
+        return Menu("Projects") {
+            ForEach(projects) { project in
+                Button { folder = project.path } label: {
+                    if project.path == projectRoot { Label(project.name, systemImage: "checkmark") } else { Text(project.name) }
+                }
+            }
+            if !others.isEmpty {
+                if !projects.isEmpty { Divider() }
+                Section("Recent Folders") {
+                    ForEach(Array(others), id: \.self) { path in
+                        Button((path as NSString).abbreviatingWithTildeInPath) { folder = path }
+                    }
+                }
+            }
+        }
+        .disabled(projects.isEmpty && others.isEmpty)
+        .fixedSize()
+    }
+
     /// Where a git worktree's branch starts: origin's default branch (fetched first) or what is checked out here.
     /// A WorktreeCreate hook decides that itself, so this isn't shown then.
     @ViewBuilder private var basePicker: some View {
@@ -292,7 +322,9 @@ struct NewSessionSheet: View {
             ideaID = prefill.ideaID
             pattern = prefill.branchPattern
         } else {
-            folder = model.selectedPane?.worktree?.repo ?? model.selectedPane?.spec.cwd ?? model.recentFolders.first ?? ""
+            let asked = model.newSessionFolder ?? ""
+            model.newSessionFolder = nil
+            folder = !asked.isEmpty ? asked : model.selectedProject ?? model.sidebarProjects.first?.path ?? model.recentFolders.first ?? ""
             profile = AccountPicker.usableDefault(model)
             permissionMode = Prefs.string(Prefs.newSessionMode)
         }
@@ -309,15 +341,17 @@ struct NewSessionSheet: View {
     private func checkRepo() async {
         let dir = folder
         repoError = nil
-        guard !dir.isEmpty else { repoRoot = nil; useWorktree = false; return }
+        guard !dir.isEmpty else { repoRoot = nil; projectRoot = nil; useWorktree = false; return }
         let none = BaseChoices(hasOrigin: false, originDefault: nil, current: nil)
-        let (root, found, project, choices) = await Task.detached { () -> (String?, WorktreeMaker, String?, BaseChoices) in
-            guard let root = Worktree.repoRoot(dir) else { return (nil, .git(include: false), nil, none) }
+        let (root, found, project, choices, home) = await Task.detached { () -> (String?, WorktreeMaker, String?, BaseChoices, String) in
+            let home = ProjectRoot.resolve(dir)
+            guard let root = Worktree.repoRoot(dir) else { return (nil, .git(include: false), nil, none, home) }
             return (root, WorktreeMaker.find(folder: dir, root: root), WorktreeHooks.mainCheckout(dir) ?? root,
-                    Worktree.baseChoices(root))
+                    Worktree.baseChoices(root), home)
         }.value
         guard !Task.isCancelled, dir == folder else { return }
         repoRoot = root
+        projectRoot = home
         maker = found
         if project != patternProject {
             patternProject = project
@@ -377,7 +411,7 @@ struct NewSessionSheet: View {
 }
 
 /// Edits the branch pattern a repository's new worktree sessions start with.
-private struct BranchPatternEditor: View {
+struct BranchPatternEditor: View {
     let project: String
     @State var draft: String
     @Binding var isPresented: Bool
@@ -542,6 +576,7 @@ struct QuickSwitcher: View {
     private enum Action {
         case target(Target)
         case newSession
+        case addProject
         case resume
         case nextWaiting
     }
@@ -556,9 +591,13 @@ struct QuickSwitcher: View {
     }
 
     private var entries: [Entry] {
-        var all: [Entry] = model.panes.map { pane in
-            Entry(id: "pane:\(pane.id)", title: pane.title, subtitle: pane.projectName,
+        var all: [Entry] = model.orderedPanes.map { pane in
+            Entry(id: "pane:\(pane.id)", title: pane.title, subtitle: model.projectName(pane.projectPath),
                   state: pane.state, icon: nil, action: .target(.pane(pane.id)))
+        }
+        all += model.sidebarProjects.map { project in
+            Entry(id: "project:\(project.path)", title: project.name, subtitle: "project", state: nil, icon: "folder",
+                  action: .target(.project(project.path)))
         }
         all += model.externals.map { session in
             let title = model.recent.first { $0.id == session.id }?.title ?? session.projectName
@@ -567,6 +606,7 @@ struct QuickSwitcher: View {
         }
         all += [
             Entry(id: "cmd:new", title: "New Session…", subtitle: "⌘N", state: nil, icon: "plus", action: .newSession),
+            Entry(id: "cmd:project", title: "Add Project…", subtitle: "⇧⌘N", state: nil, icon: "folder.badge.plus", action: .addProject),
             Entry(id: "cmd:resume", title: "Resume Session…", subtitle: "⇧⌘R", state: nil,
                   icon: "clock.arrow.circlepath", action: .resume),
             Entry(id: "cmd:next", title: "Next session waiting for you", subtitle: "⌘J", state: nil,
@@ -665,6 +705,8 @@ struct QuickSwitcher: View {
             model.selectNextWaiting()
         case .newSession:
             presentLater { $0.showNewSession = true }
+        case .addProject:
+            presentLater { $0.chooseProject() }
         case .resume:
             presentLater { $0.reloadRecent(); $0.showResume = true }
         }

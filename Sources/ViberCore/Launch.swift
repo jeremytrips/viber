@@ -186,6 +186,7 @@ public enum ViberPaths {
     public static var requests: URL { support.appendingPathComponent("requests") }
     public static var panes: URL { support.appendingPathComponent("panes.json") }
     public static var ideas: URL { support.appendingPathComponent("ideas.json") }
+    public static var projects: URL { support.appendingPathComponent("projects.json") }
     /// Project notes from before ideas, read once to turn them into ideas.
     public static var notes: URL { support.appendingPathComponent("notes.json") }
     public static var clauthStatus: URL {

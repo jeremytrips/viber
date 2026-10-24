@@ -34,7 +34,7 @@ final class WorktreeJob: Identifiable {
     init(creating request: NewSessionRequest, title: String) {
         kind = .create(request)
         self.title = title
-        project = request.folder
+        project = ProjectRoot.resolve(request.folder)
     }
 
     init(removing info: WorktreeInfo, deleteBranch: Bool, title: String, project: String) {
