@@ -265,6 +265,11 @@ final class IPhoneController: DeviceController {
         return console.lines(since: Date().addingTimeInterval(-Double(seconds)), matching: named == nil ? process : nil).joined(separator: "\n")
     }
 
+    /// `DeviceSetting.unsupported(on:)` already refuses every setting on a phone.
+    func set(_ setting: DeviceSetting) async throws {
+        throw DeviceError.failed(DeviceSetting.appearance(dark: true).unsupported(on: device) ?? "Not on a physical iPhone.")
+    }
+
     func settle(afterAction: Bool) async {
         guard isStreaming else {
             try? await Task.sleep(nanoseconds: 300_000_000)

@@ -62,12 +62,12 @@ private struct GeneralSettings: View {
             }
             Section {
                 Toggle("Give Claude tools to see and use devices", isOn: $deviceTools)
-                Toggle("Let Claude tap, type, install and launch apps on simulators and emulators without asking", isOn: $deviceActions)
+                Toggle("Let Claude tap, type, install and launch apps, and change settings, on simulators and emulators without asking", isOn: $deviceActions)
                     .disabled(!deviceTools)
             } header: {
                 Text("Simulators and emulators")
             } footer: {
-                Text("Screenshots, screen outlines and logs of simulators and emulators never ask. On a USB phone they ask unless you chose the phone in the device panel, and taps, typing and installs always ask. The first setting applies to sessions started afterwards.")
+                Text("Screenshots, screen outlines and logs of simulators and emulators never ask. On a USB phone they ask unless you chose the phone in the device panel, and taps, typing, installs and settings changes always ask. The first setting applies to sessions started afterwards.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }

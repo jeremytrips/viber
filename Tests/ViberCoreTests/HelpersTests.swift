@@ -110,7 +110,7 @@ final class WorktreeTests: XCTestCase {
         XCTAssertEqual(Worktree.slug("Phone-number login screen!"), "phone-number-login-screen")
     }
 
-    func testCreateDiffAndRemove() throws {
+    func testCreateDiffAndRemove() async throws {
         let info = try Worktree.create(repoDir: repo.path, name: "Login screen")
         XCTAssertEqual(info.branch, "viber/login-screen")
         XCTAssertEqual(info.base, "main")
@@ -119,14 +119,41 @@ final class WorktreeTests: XCTestCase {
 
         try "a\nb\n".write(to: URL(fileURLWithPath: info.path).appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
         XCTAssertEqual(Worktree.diffStat(info), "+1 −0")
-        XCTAssertThrowsError(try Worktree.remove(info, deleteBranch: true), "uncommitted changes block removal")
+        do { try await Worktree.remove(info, deleteBranch: true); XCTFail("uncommitted changes block removal") } catch {}
 
         XCTAssertTrue(Shell.run("git", ["-C", info.path, "commit", "-qam", "b"]).ok)
-        XCTAssertThrowsError(try Worktree.remove(info, deleteBranch: true), "unmerged branch is kept")
+        do { try await Worktree.remove(info, deleteBranch: true); XCTFail("unmerged branch is kept") } catch {
+            XCTAssertTrue(error is BranchKept)
+        }
         XCTAssertFalse(FileManager.default.fileExists(atPath: info.path), "worktree itself was removed")
 
         let second = try Worktree.create(repoDir: repo.path, name: "Login screen")
         XCTAssertEqual(second.branch, "viber/login-screen-2", "names never collide with a kept branch")
+    }
+
+    func testSwitchedBranch() async throws {
+        func git(_ path: String, _ args: String...) { XCTAssertTrue(Shell.run("git", ["-C", path] + args).ok, args.joined(separator: " ")) }
+        func exists(_ branch: String) -> Bool { Shell.run("git", ["-C", repo.path, "rev-parse", "--verify", "--quiet", "refs/heads/\(branch)"]).ok }
+
+        let info = try Worktree.create(repoDir: repo.path, name: "MQTT auth")
+        XCTAssertEqual(Worktree.currentBranch(info.path), "viber/mqtt-auth")
+        git(info.path, "switch", "-qc", "feat/NEX-703")
+        XCTAssertEqual(Worktree.currentBranch(info.path), "feat/NEX-703")
+        git(info.path, "switch", "-q", "--detach")
+        XCTAssertNil(Worktree.currentBranch(info.path), "detached HEAD has no branch")
+        git(info.path, "switch", "-q", "feat/NEX-703")
+
+        let summary = try await Worktree.remove(info, deleteBranch: true)
+        XCTAssertTrue(summary.contains("Kept feat/NEX-703"), summary)
+        XCTAssertTrue(summary.contains("Deleted branch viber/mqtt-auth"), summary)
+        XCTAssertFalse(exists("viber/mqtt-auth"), "the branch Viber created is deleted")
+        XCTAssertTrue(exists("feat/NEX-703"), "the branch Claude switched to is kept")
+
+        let renamed = try Worktree.create(repoDir: repo.path, name: "Renamed")
+        git(renamed.path, "branch", "-m", "feat/NEX-704")
+        let renamedSummary = try await Worktree.remove(renamed, deleteBranch: true)
+        XCTAssertTrue(renamedSummary.contains("Branch viber/renamed was already gone"), renamedSummary)
+        XCTAssertTrue(exists("feat/NEX-704"))
     }
 
     func testCreateRepo() throws {

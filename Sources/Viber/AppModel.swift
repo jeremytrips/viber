@@ -9,12 +9,15 @@ enum Target: Hashable {
     case external(String)
     /// Every project's ideas that are not planned yet.
     case ideas
+    /// A worktree being set up for a new session.
+    case job(String)
 
     var key: String {
         switch self {
         case .ideas: return "ideas"
         case .pane(let id): return "pane:\(id)"
         case .external(let id): return "ext:\(id)"
+        case .job(let id): return "job:\(id)"
         }
     }
 
@@ -22,6 +25,7 @@ enum Target: Hashable {
         if key == "ideas" { self = .ideas }
         else if key.hasPrefix("pane:") { self = .pane(String(key.dropFirst(5))) }
         else if key.hasPrefix("ext:") { self = .external(String(key.dropFirst(4))) }
+        else if key.hasPrefix("job:") { self = .job(String(key.dropFirst(4))) }
         else { return nil }
     }
 }
@@ -38,10 +42,14 @@ struct NewSessionRequest {
     var profile: String?
     var useWorktree: Bool
     var name: String
+    /// The worktree's branch; nil for `branchPattern` filled in with the name.
+    var branch: String? = nil
     var permissionMode: String
     var firstMessage: String
     /// The idea this session is started for, linked to it once it opens.
     var ideaID: String?
+    /// The project's branch pattern, such as `viber/<slug>`.
+    var branchPattern = Worktree.defaultBranchPattern
 }
 
 @MainActor @Observable
@@ -57,6 +65,8 @@ final class AppModel {
     var now = Date()
     var errorMessage: String?
     var showNewSession = false
+    /// Starting values for the next New Session sheet.
+    var newSessionPrefill: NewSessionRequest?
     var showSwitcher = false
     var showResume = false
     var closing: Pane?
@@ -67,6 +77,8 @@ final class AppModel {
     let deviceHub = DeviceHub()
     /// Ideas whose session is being created, so Plan can't start two.
     var planningIdeas: Set<String> = []
+    /// Worktrees being set up for new sessions, shown in the sidebar until their session opens.
+    var jobs: [WorktreeJob] = []
 
     @ObservationIgnored let notifier = Notifier()
     @ObservationIgnored private let externalMonitor = ExternalMonitor()
@@ -104,7 +116,9 @@ final class AppModel {
     // MARK: Lookup
 
     func pane(_ id: String) -> Pane? { panes.first { $0.id == id } }
+    func job(_ id: String) -> WorktreeJob? { jobs.first { $0.id == id } }
     var selectedPane: Pane? { if case .pane(let id)? = selection { return pane(id) }; return nil }
+    var selectedJob: WorktreeJob? { if case .job(let id)? = selection { return job(id) }; return nil }
     var selectedExternal: Session? {
         if case .external(let id)? = selection { return externals.first { $0.id == id } }
         return nil
@@ -152,21 +166,13 @@ final class AppModel {
         let mode = request.permissionMode == "default" ? nil : request.permissionMode
         let model = Prefs.string(Prefs.newSessionModel)
         let launchModel = model.isEmpty ? nil : model
+        // Also for ideas started from the sheet, so Plan can't start a second session while the worktree is made.
+        if let id = request.ideaID { planningIdeas.insert(id) }
         if request.useWorktree {
-            let folder = request.folder, name = request.name.isEmpty ? title : request.name
-            Task.detached {
-                let result = Result { try Worktree.create(repoDir: folder, name: name) }
-                await MainActor.run {
-                    switch result {
-                    case .success(let info):
-                        self.open(title: title, spec: LaunchSpec(profile: request.profile, cwd: info.path, permissionMode: mode, model: launchModel),
-                                  worktree: info, firstMessage: request.firstMessage, ideaID: request.ideaID)
-                    case .failure(let error):
-                        if let id = request.ideaID { self.planningIdeas.remove(id) }
-                        self.errorMessage = error.localizedDescription
-                    }
-                }
-            }
+            let job = WorktreeJob(creating: request, title: title)
+            jobs.append(job)
+            select(.job(job.id))
+            run(job)
         } else {
             open(title: title, spec: LaunchSpec(profile: request.profile, cwd: request.folder, permissionMode: mode, model: launchModel),
                  worktree: nil, firstMessage: request.firstMessage, ideaID: request.ideaID)
@@ -195,7 +201,9 @@ final class AppModel {
         open(title: title, spec: LaunchSpec(profile: defaultProfile, cwd: session.project, resume: session.id), worktree: nil, firstMessage: "")
     }
 
-    private func open(title: String, spec: LaunchSpec, worktree: WorktreeInfo?, firstMessage: String, ideaID: String? = nil) {
+    @discardableResult
+    private func open(title: String, spec: LaunchSpec, worktree: WorktreeInfo?, firstMessage: String, ideaID: String? = nil,
+                      selecting: Bool = true) -> Pane {
         let pane = Pane(title: title, spec: spec, worktree: worktree)
         wire(pane)
         panes.append(pane)
@@ -205,9 +213,105 @@ final class AppModel {
             ideas.start(ideaID, sessionID: pane.id, sessionTitle: title)
             saveIdeas()
         }
-        select(.pane(pane.id))
+        if selecting { select(.pane(pane.id)) }
         let text = firstMessage.trimmingCharacters(in: .whitespacesAndNewlines)
         if !text.isEmpty { submit(text, in: pane) }
+        return pane
+    }
+
+    // MARK: Worktree setup and teardown
+
+    /// Runs the job off the main thread (a project hook can take minutes): makes the worktree and opens its
+    /// session, or removes a closed session's worktree.
+    private func run(_ job: WorktreeJob) {
+        job.reset()
+        let report: @Sendable (WorktreeProgress) -> Void = { progress in
+            // The main queue keeps the pieces in order.
+            DispatchQueue.main.async { MainActor.assumeIsolated { job.apply(progress) } }
+        }
+        switch job.kind {
+        case .create(let request):
+            let worktreeRequest = WorktreeRequest(folder: request.folder, name: request.name.isEmpty ? job.title : request.name,
+                                                  branch: request.branch, branchPattern: request.branchPattern,
+                                                  permissionMode: request.permissionMode)
+            job.task = Task {
+                do {
+                    let info = try await Worktree.create(worktreeRequest, progress: report)
+                    job.flush()
+                    guard jobs.contains(where: { $0.id == job.id }) else { return }
+                    finish(job, request: request, info: info)
+                } catch {
+                    if let id = request.ideaID { planningIdeas.remove(id) }
+                    fail(job, error, title: "worktree setup failed")
+                }
+            }
+        case .remove(let info, let deleteBranch):
+            job.task = Task {
+                do {
+                    let summary = try await Worktree.remove(info, deleteBranch: deleteBranch, progress: report)
+                    job.flush()
+                    guard jobs.contains(where: { $0.id == job.id }) else { return }
+                    remove(job)
+                    notifier.post(id: "job:\(job.id):removed", title: "Worktree removed", body: summary, target: "", sound: false)
+                } catch let kept as BranchKept {
+                    // The worktree is gone; only the branch stayed, which is how `branch -d` keeps unmerged work.
+                    job.flush()
+                    guard jobs.contains(where: { $0.id == job.id }) else { return }
+                    remove(job)
+                    errorMessage = kept.message
+                } catch {
+                    fail(job, error, title: "worktree removal failed")
+                }
+            }
+        }
+    }
+
+    private func finish(_ job: WorktreeJob, request: NewSessionRequest, info: WorktreeInfo) {
+        let mode = request.permissionMode == "default" ? nil : request.permissionMode
+        let model = Prefs.string(Prefs.newSessionModel)
+        let watching = selection == .job(job.id)
+        jobs.removeAll { $0.id == job.id }
+        let pane = open(title: job.title, spec: LaunchSpec(profile: request.profile, cwd: info.path, permissionMode: mode,
+                                                           model: model.isEmpty ? nil : model),
+                        worktree: info, firstMessage: request.firstMessage, ideaID: request.ideaID, selecting: watching)
+        if !(NSApp.isActive && watching) {
+            notifier.post(id: "job:\(job.id):ready", title: "\(job.title) · worktree ready",
+                          body: "The session has started in \((info.path as NSString).abbreviatingWithTildeInPath).",
+                          target: Target.pane(pane.id).key, sound: false)
+        }
+    }
+
+    /// The job stays in the sidebar with its output and the error, so it can be read and tried again.
+    private func fail(_ job: WorktreeJob, _ error: Error, title: String) {
+        job.flush()
+        guard jobs.contains(where: { $0.id == job.id }) else { return }
+        job.phase = .failed(error.localizedDescription)
+        if !(NSApp.isActive && selection == .job(job.id)) {
+            notifier.post(id: "job:\(job.id):failed", title: "\(job.title) · \(title)",
+                          body: String(error.localizedDescription.prefix(180)), target: Target.job(job.id).key)
+        }
+    }
+
+    /// Stops a running job; it stays, marked failed, so its output can still be read.
+    func cancel(_ job: WorktreeJob) {
+        job.task?.cancel()
+    }
+
+    func retry(_ job: WorktreeJob) {
+        guard !job.isRunning else { return }
+        if let id = job.ideaID { planningIdeas.insert(id) }
+        run(job)
+    }
+
+    func dismiss(_ job: WorktreeJob) {
+        job.task?.cancel()
+        remove(job)
+    }
+
+    private func remove(_ job: WorktreeJob) {
+        jobs.removeAll { $0.id == job.id }
+        if selection == .job(job.id) { selection = panes.last.map { .pane($0.id) } }
+        notifier.clear(target: Target.job(job.id).key)
     }
 
     private func wire(_ pane: Pane) {
@@ -378,7 +482,7 @@ final class AppModel {
                     }
                 }.joined(separator: "\n")
                 return RelayCandidate(id: pane.id, title: pane.title, project: pane.projectName,
-                                      branch: pane.worktree?.branch, context: String(recentText.suffix(4000)))
+                                      branch: pane.branch, context: String(recentText.suffix(4000)))
             }
     }
 
@@ -457,11 +561,22 @@ final class AppModel {
         planningIdeas.insert(idea.id)
         let project = idea.project
         Task.detached {
-            let isRepo = Worktree.repoRoot(project) != nil
+            let root = Worktree.repoRoot(project)
+            let key = root.map { WorktreeHooks.mainCheckout($0) ?? $0 }
             await MainActor.run {
-                self.createSession(NewSessionRequest(folder: project, profile: AccountPicker.usableDefault(self), useWorktree: isRepo,
-                                                     name: idea.title, permissionMode: PermissionMode.plan.rawValue,
-                                                     firstMessage: idea.text, ideaID: idea.id))
+                let pattern = key.map { Prefs.branchPattern(project: $0) } ?? Worktree.defaultBranchPattern
+                let request = NewSessionRequest(folder: project, profile: AccountPicker.usableDefault(self), useWorktree: root != nil,
+                                                name: idea.title, permissionMode: PermissionMode.plan.rawValue,
+                                                firstMessage: idea.text, ideaID: idea.id, branchPattern: pattern)
+                guard root != nil, Worktree.needsInput(pattern) else { self.createSession(request); return }
+                // The branch needs a part only the user knows, such as a ticket number: ask in the sheet.
+                self.planningIdeas.remove(idea.id)
+                self.newSessionPrefill = request
+                Task {
+                    // The ideas popover closes in the same click.
+                    try? await Task.sleep(for: .milliseconds(200))
+                    self.showNewSession = true
+                }
             }
         }
     }
@@ -476,29 +591,24 @@ final class AppModel {
         pane.run { [$0.setPermissionMode(mode)] }
     }
 
-    /// Ends a session. Worktree removal runs in the background and reports failures.
+    /// Ends a session. Worktree removal runs in the background, in the sidebar while it runs (a project's
+    /// WorktreeRemove hook can take a while), and stays there with its output if it fails.
     func close(_ pane: Pane, removeWorktree: Bool = false, deleteBranch: Bool = false) {
+        let wasSelected = selection == .pane(pane.id)
         pane.onStateChange = nil
         pane.stop()
         pane.closePreview()
         panes.removeAll { $0.id == pane.id }
-        if selection == .pane(pane.id) { selection = panes.last.map { .pane($0.id) } }
+        if wasSelected { selection = panes.last.map { .pane($0.id) } }
         if settingsSheet?.paneID == pane.id { settingsSheet = nil }
         notifier.clear(target: Target.pane(pane.id).key)
         save()
         guard removeWorktree, let info = pane.worktree else { return }
-        Task.detached {
-            do {
-                try Worktree.remove(info, deleteBranch: deleteBranch)
-                await MainActor.run {
-                    self.notifier.post(id: UUID().uuidString, title: "Worktree removed",
-                                       body: deleteBranch ? "\(info.branch) and its worktree are gone." : "Kept branch \(info.branch).",
-                                       target: "", sound: false)
-                }
-            } catch {
-                await MainActor.run { self.errorMessage = error.localizedDescription }
-            }
-        }
+        let job = WorktreeJob(removing: info, deleteBranch: deleteBranch, title: pane.title, project: pane.projectPath)
+        jobs.append(job)
+        // A hook's teardown is worth watching; git's takes a moment.
+        if wasSelected && info.madeByHook { select(.job(job.id)) }
+        run(job)
     }
 
     func requestClose(_ pane: Pane) {
@@ -517,6 +627,8 @@ final class AppModel {
     func shutdown() {
         save()
         for pane in panes { pane.stop() }
+        // Stops any setup hook still running; its process group would otherwise outlive the app.
+        for job in jobs { job.task?.cancel() }
     }
 
     // MARK: State, notifications, polling
@@ -556,15 +668,17 @@ final class AppModel {
             close(pane, removeWorktree: request.removeWorktree, deleteBranch: request.deleteBranch)
             return
         }
-        refreshDiff(pane)
+        refreshWorktree(pane)
         save()
     }
 
-    func refreshDiff(_ pane: Pane) {
+    /// Reads the worktree's diff stat and the branch checked out in it.
+    func refreshWorktree(_ pane: Pane) {
         guard let info = pane.worktree else { return }
         Task.detached {
             let stat = Worktree.diffStat(info)
-            await MainActor.run { pane.diffStat = stat }
+            let branch = Worktree.currentBranch(info.path)
+            await MainActor.run { pane.diffStat = stat; pane.liveBranch = branch }
         }
     }
 
@@ -585,7 +699,7 @@ final class AppModel {
                 Task { @MainActor in self?.reloadStatus(); self?.deviceHub.reap() }
             }
         ]
-        for pane in panes where pane.worktree != nil { refreshDiff(pane) }
+        for pane in panes where pane.worktree != nil { refreshWorktree(pane) }
     }
 
     private func tick() {

@@ -216,6 +216,11 @@ final class PhoneToolboxTests: XCTestCase {
         XCTAssertEqual(shot.text, "Screenshot of iPhone (2) · iOS 18.7.8 (402×874 points).")
         let list = await DeviceToolbox.call("device_list", [:], host: host)
         XCTAssertEqual(list.text, "- iPhone (2) · iOS 18.7.8 · Wi-Fi · running · id E3F4 · this session's device")
+        let dark = await DeviceToolbox.call("device_set", ["appearance": "dark"], host: host)
+        XCTAssertTrue(dark.isError)
+        XCTAssertTrue(dark.text.contains("physical iPhone's settings"), dark.text)
+        let android = DeviceInfo(id: "X", name: "Pixel", platform: .android, kind: .physical, os: "Android 16", state: .booted)
+        XCTAssertNil(DeviceSetting.appearance(dark: true).unsupported(on: android), "Android phones still take settings")
     }
 }
 
