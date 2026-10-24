@@ -340,6 +340,7 @@ final class Pane: Identifiable {
     }
 
     /// Runs a build or an Expo URL on this session's device, or on a running (else the newest) simulator.
+    /// A development build's link fails if the build isn't installed there; the error says so in the chat.
     func runOnDevice(_ artifact: DeviceArtifact) {
         guard let hub = deviceHub else { return }
         Task {
@@ -354,7 +355,7 @@ final class Pane: Identifiable {
                 case .app(let path):
                     let id = try await driver.install(path)
                     try await driver.launch(id, arguments: [], terminateRunning: true)
-                case .expo(let url):
+                case .expo(let url), .devClient(let url):
                     try await driver.openURL(url)
                 }
             } catch {
