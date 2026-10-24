@@ -104,6 +104,8 @@ struct ContentView: View {
                     PaneView(pane: pane).id(pane.id)
                 } else if let session = model.selectedExternal {
                     ExternalView(session: session).id(session.id)
+                } else if let job = model.selectedJob {
+                    WorktreeJobView(job: job).id(job.id)
                 } else {
                     EmptyStateView()
                 }

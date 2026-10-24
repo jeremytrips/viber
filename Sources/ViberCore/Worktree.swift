@@ -1,19 +1,101 @@
 import Foundation
 
-public struct WorktreeInfo: Codable, Equatable {
+public struct WorktreeInfo: Codable, Equatable, Sendable {
     public var repo: String
     public var path: String
+    /// The branch the worktree was created on (read from its HEAD when a hook made it; empty if detached).
     public var branch: String
     public var base: String
+    /// A project's WorktreeCreate hook made it, so its WorktreeRemove hook removes it.
+    public var createdByHook: Bool?
+    /// The folder the session was started from, whose settings define the hooks.
+    public var folder: String?
+
+    public init(repo: String, path: String, branch: String, base: String, createdByHook: Bool? = nil, folder: String? = nil) {
+        self.repo = repo; self.path = path; self.branch = branch; self.base = base
+        self.createdByHook = createdByHook; self.folder = folder
+    }
+
+    public var madeByHook: Bool { createdByHook == true }
 }
 
 public struct WorktreeError: Error, LocalizedError {
     public var message: String
     public var errorDescription: String? { message }
+    public init(message: String) { self.message = message }
 }
 
-/// Git worktrees for parallel sessions. Every operation shells out to `git` and is blocking.
+/// What a new worktree session asked for.
+public struct WorktreeRequest: Sendable {
+    public var folder: String
+    /// The session's name, which the worktree's folder and default branch are named after.
+    public var name: String
+    public var permissionMode: String?
+
+    public init(folder: String, name: String, permissionMode: String? = nil) {
+        self.folder = folder; self.name = name; self.permissionMode = permissionMode
+    }
+}
+
+/// How far creating or removing a worktree has got, for showing while it runs.
+public enum WorktreeProgress: Sendable {
+    /// What is happening now.
+    case step(String)
+    /// Output from a hook, as it arrives.
+    case output(String)
+}
+
+/// Git worktrees for parallel sessions. The synchronous operations shell out to `git` and block;
+/// the async ones run project hooks without blocking the caller.
 public enum Worktree {
+    /// Where Viber (like Claude Code) puts the worktrees it makes with git, under the repository root.
+    public static let directory = ".claude/worktrees"
+
+    /// Makes a worktree for a new session: with the project's WorktreeCreate hook when the folder's Claude Code
+    /// settings define one (the hook replaces `git worktree add`, as in Claude Code), otherwise with git.
+    public static func create(_ request: WorktreeRequest, progress: @escaping @Sendable (WorktreeProgress) -> Void) async throws -> WorktreeInfo {
+        guard let root = repoRoot(request.folder) else { throw WorktreeError(message: "\(request.folder) is not inside a git repository.") }
+        let hooks = try WorktreeHooks.hooks(.create, folder: request.folder)
+        try Task.checkCancellation()
+        guard !hooks.isEmpty else {
+            progress(.step("Creating the worktree with git"))
+            let info = try create(repoDir: request.folder, name: request.name)
+            return info
+        }
+        var name = slug(request.name)
+        if name.isEmpty { name = "session" }
+        let input = WorktreeHooks.input(.create, cwd: request.folder, name: name, permissionMode: request.permissionMode)
+        let checkout = WorktreeHooks.mainCheckout(request.folder) ?? root
+        var created: String?
+        var failures: [String] = []
+        // Like Claude Code, every configured hook runs and the first one that succeeds with a path is used.
+        for hook in hooks {
+            progress(.step("Running the WorktreeCreate hook: \(hook.display)"))
+            let result = await WorktreeHooks.run(hook, input: input, folder: request.folder) { progress(.output($0)) }
+            if result.cancelled || Task.isCancelled {
+                throw WorktreeError(message: "Stopped the WorktreeCreate hook. It may have left a partly made worktree behind.")
+            }
+            guard result.ok else { failures.append(WorktreeHooks.failure(hook, result, event: .create)); continue }
+            guard created == nil else { continue }
+            guard let printed = WorktreeHooks.printedPath(result.stdout) else {
+                failures.append("The WorktreeCreate hook succeeded but printed no worktree path: \(hook.display). It must print the directory it made as the last line of its output, with everything else on stderr.")
+                continue
+            }
+            created = try WorktreeHooks.validateWorktreePath(printed, cwd: request.folder, repo: checkout)
+        }
+        guard let path = created else { throw WorktreeError(message: failures.joined(separator: "\n\n")) }
+        let base = Shell.run("git", ["-C", root, "rev-parse", "--abbrev-ref", "HEAD"]).output
+        return WorktreeInfo(repo: root, path: path, branch: currentBranch(path) ?? "", base: base,
+                            createdByHook: true, folder: request.folder)
+    }
+
+    /// The branch checked out at `path`, or nil when HEAD is detached or it isn't a git checkout.
+    public static func currentBranch(_ path: String) -> String? {
+        let r = Shell.run("git", ["-C", path, "rev-parse", "--abbrev-ref", "HEAD"])
+        guard r.ok, !r.output.isEmpty, r.output != "HEAD" else { return nil }
+        return r.output
+    }
+
     public static func slug(_ title: String) -> String {
         let lowered = title.lowercased().map { $0.isLetter || $0.isNumber ? $0 : "-" }
         let collapsed = String(lowered).split(separator: "-").joined(separator: "-")
@@ -40,14 +122,15 @@ public enum Worktree {
         try check(Shell.run("git", ["-C", dir, "commit", "-q", "-m", "Initial commit"]), "git commit")
     }
 
-    /// Creates `<repo>/.claude/worktrees/<slug>` on a new `viber/<slug>` branch from the current branch.
+    /// Creates `<repo>/.claude/worktrees/<slug>` on a new `viber/<slug>` branch from the current branch, then copies
+    /// the gitignored files `.worktreeinclude` lists into it, as Claude Code does for worktrees it makes with git.
     public static func create(repoDir: String, name: String) throws -> WorktreeInfo {
         guard let root = repoRoot(repoDir) else { throw WorktreeError(message: "\(repoDir) is not inside a git repository.") }
         let base = Shell.run("git", ["-C", root, "rev-parse", "--abbrev-ref", "HEAD"]).output
         guard !base.isEmpty, base != "HEAD" else { throw WorktreeError(message: "The repository has no current branch to start from.") }
         var slug = slug(name)
         if slug.isEmpty { slug = "session" }
-        let dir = URL(fileURLWithPath: root).appendingPathComponent(".claude/worktrees")
+        let dir = URL(fileURLWithPath: root).appendingPathComponent(directory)
         var candidate = slug, n = 2
         while FileManager.default.fileExists(atPath: dir.appendingPathComponent(candidate).path)
                 || Shell.run("git", ["-C", root, "rev-parse", "--verify", "--quiet", "refs/heads/viber/\(candidate)"]).ok {
@@ -58,7 +141,8 @@ public enum Worktree {
         excludeWorktreeDir(root: root)
         let add = Shell.run("git", ["-C", root, "worktree", "add", "-b", branch, path, base])
         guard add.ok else { throw WorktreeError(message: "git worktree add failed: \(add.stderr.trimmingCharacters(in: .whitespacesAndNewlines))") }
-        return WorktreeInfo(repo: root, path: path, branch: branch, base: base)
+        WorktreeInclude.copy(from: root, to: path)
+        return WorktreeInfo(repo: root, path: path, branch: branch, base: base, folder: repoDir)
     }
 
     /// Keeps `.claude/worktrees/` out of `git status` in the main checkout without touching tracked files.

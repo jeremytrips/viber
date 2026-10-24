@@ -5,16 +5,21 @@ import ViberCore
 struct SidebarView: View {
     @Environment(AppModel.self) private var model
 
-    private var groups: [(path: String, name: String, panes: [Pane])] {
+    private var groups: [(path: String, name: String, panes: [Pane], jobs: [WorktreeJob])] {
         var order: [String] = []
         var byProject: [String: [Pane]] = [:]
+        var jobsByProject: [String: [WorktreeJob]] = [:]
         for pane in model.panes {
             if byProject[pane.projectPath] == nil { order.append(pane.projectPath) }
             byProject[pane.projectPath, default: []].append(pane)
         }
+        for job in model.jobs {
+            if byProject[job.project] == nil && jobsByProject[job.project] == nil { order.append(job.project) }
+            jobsByProject[job.project, default: []].append(job)
+        }
         return order.map { path in
             let panes = byProject[path] ?? []
-            return (path, panes.first?.projectName ?? path, panes)
+            return (path, panes.first?.projectName ?? AppModel.projectName(path), panes, jobsByProject[path] ?? [])
         }
     }
 
@@ -30,6 +35,18 @@ struct SidebarView: View {
                         PaneRow(pane: pane, index: model.panes.firstIndex { $0.id == pane.id } ?? 0)
                             .tag(Target.pane(pane.id))
                             .contextMenu { PaneRowMenu(pane: pane) }
+                    }
+                    ForEach(group.jobs) { job in
+                        WorktreeJobRow(job: job)
+                            .tag(Target.job(job.id))
+                            .contextMenu {
+                                if job.isRunning {
+                                    Button("Stop Setup") { model.cancel(job) }
+                                } else {
+                                    Button("Try Again") { model.retry(job) }
+                                    Button("Dismiss") { model.dismiss(job) }
+                                }
+                            }
                     }
                 } header: {
                     ProjectHeader(name: group.name, path: group.path)
