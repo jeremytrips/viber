@@ -120,10 +120,7 @@ enum UsageWindows {
 
     static func resetText(_ window: ClauthStatus.Window, now: Date) -> String {
         guard let reset = window.resetDate else { return "" }
-        let seconds = max(0, reset.timeIntervalSince(now))
-        let hours = Int(seconds / 3600), minutes = Int(seconds.truncatingRemainder(dividingBy: 3600) / 60)
-        if hours >= 24 { return "resets in \(hours / 24)d \(hours % 24)h" }
-        return hours > 0 ? "resets in \(hours)h \(minutes)m" : "resets in \(minutes)m"
+        return "resets in " + AppModel.span(reset.timeIntervalSince(now))
     }
 }
 

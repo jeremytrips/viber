@@ -250,16 +250,26 @@ struct PaneRow: View {
                         }
                         if let diff = pane.diffStat { Text(diff).font(.caption2.monospaced()).foregroundStyle(.secondary) }
                     } else {
-                        Text(pane.state.label).font(.caption).foregroundStyle(.secondary)
+                        Text(pane.continueAt == nil ? pane.state.label : "Usage limit").font(.caption).foregroundStyle(.secondary)
                     }
                 }
             }
             Spacer(minLength: 4)
             if index < 9 { Text("⌘\(index + 1)").font(.caption2).foregroundStyle(.tertiary) }
-            StateDot(state: pane.state)
+            if pane.continueAt != nil {
+                Image(systemName: "hourglass").font(.caption).foregroundStyle(.orange).frame(width: 8)
+                    .accessibilityLabel("Waiting for the usage limit")
+            } else {
+                StateDot(state: pane.state)
+            }
         }
         .padding(.vertical, 3)
-        .help(pane.state.label)
+        .help(helpText)
+    }
+
+    private var helpText: String {
+        guard let at = pane.continueAt, let limit = pane.chat.usageLimit else { return pane.state.label }
+        return "Hit the \(limit.name). Viber carries on at \(AppModel.clock(at, now: model.now))"
     }
 }
 

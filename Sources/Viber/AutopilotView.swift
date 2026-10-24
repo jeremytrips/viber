@@ -179,7 +179,7 @@ struct AutopilotCard: View {
                 HStack(spacing: 6) {
                     Image(systemName: "airplane").foregroundStyle(tint)
                     Text(running == nil ? (pilot.stopping ? "Autopilot stopped" : "Autopilot finished")
-                         : pilot.paused == nil ? "Autopilot" : "Autopilot paused").fontWeight(.semibold)
+                         : pilot.paused == nil ? "Autopilot" : waitingAt != nil ? "Autopilot waiting" : "Autopilot paused").fontWeight(.semibold)
                     Text(running == nil ? "· \(pilot.tally)" : counts(pilot)).foregroundStyle(.secondary).monospacedDigit()
                     Spacer(minLength: 8)
                     if running != nil {
@@ -228,6 +228,9 @@ struct AutopilotCard: View {
         .font(.callout)
     }
 
+    /// When the current session carries on by itself, once the usage limit that stopped it resets.
+    private var waitingAt: Date? { model.autopilotPane(project)?.continueAt }
+
     private func counts(_ pilot: Autopilot) -> String {
         let left = pilot.upcoming(in: model.ideas).count
         return "· \(pilot.tally) · \(left) to go"
@@ -260,6 +263,9 @@ struct AutopilotCard: View {
     private func doing(_ pane: Pane, idea: Idea) -> String {
         switch pane.state {
         case .permission, .input, .plan: return "“\(idea.title)” is waiting for you: \(pane.state.label.lowercased())."
+        case .failed where pane.chat.usageLimit != nil:
+            guard let at = pane.continueAt else { return "“\(idea.title)” stopped at the limit. Resume once it resets." }
+            return "Carries on with “\(idea.title)” at \(AppModel.clock(at, now: model.now)), when the limit resets."
         case .failed: return "“\(idea.title)” failed."
         case .exited: return "“\(idea.title)” stopped."
         default: return "Working on “\(idea.title)”."
@@ -271,7 +277,8 @@ struct AutopilotCard: View {
         if pilot.paused != nil {
             Button("Resume") { model.resumeAutopilot(project) }
                 .controlSize(.small)
-                .help(pilot.current != nil ? "Tell the session to carry on with its idea" : "Start the next idea")
+                .help(waitingAt != nil ? "Carry on now instead of when the limit resets"
+                      : pilot.current != nil ? "Tell the session to carry on with its idea" : "Start the next idea")
         }
         Menu {
             if pilot.paused == nil, pilot.current != nil {

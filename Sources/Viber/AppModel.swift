@@ -706,6 +706,48 @@ final class AppModel {
         }
     }
 
+    // MARK: Usage limits
+
+    /// A turn that stopped at the account's usage limit: carry on once the limit resets, unless that's turned off
+    /// or the limit kept outlasting its reset time.
+    private func waitOutLimit(_ pane: Pane) {
+        guard let limit = pane.chat.usageLimit, Prefs.bool(Prefs.continueAfterLimit) else { pane.continueAt = nil; return }
+        pane.continueAt = limit.continueAt(now: Date())
+    }
+
+    /// Sends on the sessions whose limit has reset. A message sent meanwhile takes the wait's place.
+    private func continueLimitedSessions() {
+        for pane in panes {
+            guard let at = pane.continueAt else { continue }
+            if pane.chat.usageLimit == nil { pane.continueAt = nil; continue }
+            guard at <= now, [.failed, .finished, .idle, .exited].contains(pane.state) else { continue }
+            continueAfterLimit(pane)
+        }
+    }
+
+    /// Tells a session the limit stopped to carry on. An autopilot session resumes its run, which tells it.
+    func continueAfterLimit(_ pane: Pane) {
+        pane.continueAt = nil
+        if let project = ideas.idea(startedIn: pane.id).flatMap({ autopilotProject(working: $0.id) }), autopilots[project]?.paused != nil {
+            resumeAutopilot(project)
+        } else {
+            submit(UsageLimit.continueMessage, in: pane)
+        }
+    }
+
+    /// Leaves the session where the limit stopped it.
+    func cancelContinue(_ pane: Pane) {
+        pane.continueAt = nil
+    }
+
+    /// "Hit the session limit. Viber carries on at 23:31."
+    func limitNotice(_ limit: UsageLimit, continueAt: Date?) -> String {
+        let hit = "Hit the \(limit.name)."
+        if let continueAt { return hit + " Viber carries on at \(Self.clock(continueAt, now: now))." }
+        if let reset = limit.resetsAt, reset > now { return hit + " It resets at \(Self.clock(reset, now: now))." }
+        return hit
+    }
+
     // MARK: Autopilot
 
     /// Opens the Autopilot sheet on a project's ideas to plan, or on one idea.
@@ -787,13 +829,19 @@ final class AppModel {
     }
 
     /// The current idea's session ended a turn without a report: wait for its background work to wake it, remind it,
-    /// or give up on the idea. A failed turn (an API error, a dead login, a usage limit) or your Stop pauses the run.
+    /// or give up on the idea. A failed turn (an API error, a dead login) or your Stop pauses the run; a usage limit
+    /// pauses it until the limit resets.
     private func autopilotTurnEnded(_ pane: Pane, stalled: Bool = false) {
         guard let idea = ideas.idea(startedIn: pane.id), let project = autopilotProject(working: idea.id),
               let pilot = autopilots[project], pilot.paused == nil else { return }
         if let stopped = pane.interruptedAt, Date().timeIntervalSince(stopped) < 120 {
             pane.interruptedAt = nil
             pauseAutopilot(project, "You stopped “\(pane.title)”. Resume to let it carry on, or skip to the next idea.")
+            return
+        }
+        if pane.state == .failed, let limit = pane.chat.usageLimit {
+            // The session carries on once the limit resets and resumes the run. Its own notification says when.
+            pauseAutopilot(project, "The \(limit.name) was reached.", notify: pane.continueAt == nil)
             return
         }
         switch pane.state {
@@ -845,9 +893,10 @@ final class AppModel {
         pauseAutopilot(project, "The worktree for “\(title)” couldn't be made. Its setup's output is in the sidebar.")
     }
 
-    private func pauseAutopilot(_ project: String, _ reason: String) {
+    private func pauseAutopilot(_ project: String, _ reason: String, notify: Bool = true) {
         guard autopilots[project] != nil else { return }
         autopilots[project]?.paused = reason
+        guard notify else { return }
         notifier.post(id: "autopilot:\(project):paused:\(Date().timeIntervalSince1970)", title: "Autopilot paused · \(projectName(project))",
                       body: reason, target: Target.project(project).key)
     }
@@ -876,6 +925,7 @@ final class AppModel {
         let pane = autopilotPane(project)
         pane?.interrupt()
         pane?.interruptedAt = nil
+        pane?.continueAt = nil
         if let job = jobs.first(where: { $0.ideaID == id }) { dismiss(job) }
         ideas.report(id, "You skipped it.", finished: false)
         saveIdeas()
@@ -894,6 +944,7 @@ final class AppModel {
         if let pane = pilot.current.flatMap({ ideas.idea($0)?.sessionID }).flatMap(pane) {
             pane.interrupt()
             pane.interruptedAt = nil
+            pane.continueAt = nil
         }
     }
 
@@ -986,7 +1037,7 @@ final class AppModel {
         case .finished:
             guard previous == .working, pane.chat.turnStartedByUser else { return }
             body = "Finished" + (pane.chat.lastTurnSeconds.map { " in \(Self.duration($0))" } ?? "") + "."
-        case .failed: body = "The last turn failed."
+        case .failed: body = pane.chat.usageLimit.map { limitNotice($0, continueAt: pane.continueAt) } ?? "The last turn failed."
         default: return
         }
         notifier.post(id: "\(pane.id):\(state.rawValue):\(Date().timeIntervalSince1970)",
@@ -1006,6 +1057,7 @@ final class AppModel {
             return
         }
         refreshWorktree(pane)
+        waitOutLimit(pane)
         save()
         autopilotTurnEnded(pane)
     }
@@ -1042,6 +1094,7 @@ final class AppModel {
 
     private func tick() {
         now = Date()
+        continueLimitedSessions()
         for pane in panes {
             guard let cache = pane.chat.cache else { continue }
             let remaining = cache.remaining(at: now)
@@ -1258,6 +1311,23 @@ final class AppModel {
 
     static func duration(_ seconds: Double) -> String {
         seconds >= 60 ? "\(Int(seconds) / 60)m \(Int(seconds) % 60)s" : "\(Int(seconds))s"
+    }
+
+    /// "23:31" today, "Tue 09:01" on another day, as the user's locale writes them.
+    nonisolated static func clock(_ date: Date, now: Date) -> String {
+        let formatter = DateFormatter()
+        if Calendar.current.isDate(date, inSameDayAs: now) { formatter.timeStyle = .short }
+        else { formatter.setLocalizedDateFormatFromTemplate("EEEjmm") }
+        return formatter.string(from: date)
+    }
+
+    /// "2d 3h", "1h 12m", "4m"; "<1m" for less.
+    nonisolated static func span(_ seconds: TimeInterval) -> String {
+        let seconds = max(0, seconds)
+        let hours = Int(seconds / 3600), minutes = Int(seconds.truncatingRemainder(dividingBy: 3600) / 60)
+        if hours >= 24 { return "\(hours / 24)d \(hours % 24)h" }
+        if hours > 0 { return "\(hours)h \(minutes)m" }
+        return minutes > 0 ? "\(minutes)m" : "<1m"
     }
 
     static func countdown(_ seconds: TimeInterval) -> String {
