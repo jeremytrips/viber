@@ -23,11 +23,11 @@ final class AutopilotTests: XCTestCase {
         list.start(planned.id, sessionID: "p", sessionTitle: "Planned")
         XCTAssertEqual(run.upcoming(in: list).map(\.id), [third.id])
 
-        run.finishCurrent(stuck: false)
+        run.finish(first.id, stuck: false)
         XCTAssertEqual(run.takeNext(from: list)?.id, third.id, "an issue planned by hand is skipped")
-        run.finishCurrent(stuck: true)
+        run.finish(third.id, stuck: true)
         XCTAssertNil(run.takeNext(from: list))
-        XCTAssertNil(run.current)
+        XCTAssertTrue(run.active.isEmpty)
         XCTAssertEqual(run.tally, "1 done, 1 stuck")
     }
 
@@ -48,33 +48,73 @@ final class AutopilotTests: XCTestCase {
         let a = try XCTUnwrap(list.add("a", project: "/repo", by: "you"))
         var run = pilot([a])
         _ = run.takeNext(from: list)
-        XCTAssertEqual(run.afterTurn(backgroundWork: true), .wait)
-        XCTAssertEqual(run.afterTurn(backgroundWork: false), .nudge)
-        XCTAssertTrue(run.nudge().contains("After 2 more turns"))
-        run.nudged()
-        XCTAssertEqual(run.afterTurn(backgroundWork: false), .nudge)
-        XCTAssertTrue(run.nudge().contains("If the next turn ends without either"))
-        run.nudged()
-        XCTAssertEqual(run.afterTurn(backgroundWork: false), .giveUp)
-        XCTAssertEqual(run.afterTurn(backgroundWork: true), .wait)
+        XCTAssertEqual(run.afterTurn(for: a.id, backgroundWork: true), .wait)
+        XCTAssertEqual(run.afterTurn(for: a.id, backgroundWork: false), .nudge)
+        XCTAssertTrue(run.nudge(for: a.id).contains("After 2 more turns"))
+        run.nudged(a.id)
+        XCTAssertEqual(run.afterTurn(for: a.id, backgroundWork: false), .nudge)
+        XCTAssertTrue(run.nudge(for: a.id).contains("If the next turn ends without either"))
+        run.nudged(a.id)
+        XCTAssertEqual(run.afterTurn(for: a.id, backgroundWork: false), .giveUp)
+        XCTAssertEqual(run.afterTurn(for: a.id, backgroundWork: true), .wait)
 
         run.resume()
-        XCTAssertEqual(run.afterTurn(backgroundWork: false), .nudge, "resuming starts the reminders over")
+        XCTAssertEqual(run.afterTurn(for: a.id, backgroundWork: false), .nudge, "resuming starts the reminders over")
     }
 
     func testCountsStuckIdeasInARow() throws {
         var list = IssueList()
         let issues = try (0..<4).map { try XCTUnwrap(list.add("issue \($0)", project: "/repo", by: "you")) }
         var run = pilot(issues)
-        for _ in 0..<2 { _ = run.takeNext(from: list); run.finishCurrent(stuck: true) }
+        for _ in 0..<2 { let id = run.takeNext(from: list)!.id; run.finish(id, stuck: true) }
         XCTAssertEqual(run.stuckInARow, 2)
-        _ = run.takeNext(from: list); run.finishCurrent(stuck: false)
+        do { let id = run.takeNext(from: list)!.id; run.finish(id, stuck: false) }
         XCTAssertEqual(run.stuckInARow, 0, "one that ships resets the count")
-        _ = run.takeNext(from: list); run.finishCurrent(stuck: true)
+        do { let id = run.takeNext(from: list)!.id; run.finish(id, stuck: true) }
         XCTAssertEqual(run.stuckInARow, 1)
         run.resume()
         XCTAssertEqual(run.stuckInARow, 0)
         XCTAssertEqual(run.tally, "1 done, 3 stuck")
+    }
+
+    func testSeveralAtOnceWithinTheWorktreeCap() throws {
+        var list = IssueList()
+        let issues = try (0..<5).map { try XCTUnwrap(list.add("issue \($0)", project: "/repo", by: "you", at: at)) }
+        var run = Autopilot(project: "/repo", issues: issues.map(\.id), finish: .pullRequest, target: nil, permissionMode: "auto",
+                            profile: nil, branchPattern: "viber/<slug>", sessionsAtOnce: 3, worktreesAtMost: 4)
+        XCTAssertEqual(run.takeNext(from: list, openWorktrees: 0)?.id, issues[0].id)
+        XCTAssertEqual(run.takeNext(from: list, openWorktrees: 1)?.id, issues[1].id)
+        XCTAssertEqual(run.takeNext(from: list, openWorktrees: 2)?.id, issues[2].id)
+        XCTAssertNil(run.takeNext(from: list, openWorktrees: 3), "three at once")
+        XCTAssertEqual(run.active, issues.prefix(3).map(\.id))
+        run.finish(issues[1].id, stuck: false)
+        XCTAssertNil(run.takeNext(from: list, openWorktrees: 4), "a slot is free, but the project has four worktrees open")
+        XCTAssertEqual(run.takeNext(from: list, openWorktrees: 3)?.id, issues[3].id)
+        XCTAssertEqual(run.active, [issues[0].id, issues[2].id, issues[3].id])
+        XCTAssertEqual(Autopilot(project: "/repo", issues: [], finish: .commit, target: nil, permissionMode: "auto", profile: nil,
+                                 branchPattern: "viber/<slug>", sessionsAtOnce: 20, worktreesAtMost: 1).sessionsAtOnce, Autopilot.maxSessions)
+    }
+
+    func testBlockedIssuesWaitForTheirBlockerInTheRun() throws {
+        var list = IssueList()
+        let api = try XCTUnwrap(list.add("API", project: "/repo", by: "you", at: at))
+        let web = try XCTUnwrap(list.add("Web", project: "/repo", by: "you", blockedBy: [api.key], at: at))
+        let other = try XCTUnwrap(list.add("Other", project: "/repo", by: "you", at: at))
+        let outside = try XCTUnwrap(list.add("Outside", project: "/repo", by: "you", at: at))
+        let last = try XCTUnwrap(list.add("Last", project: "/repo", by: "you", blockedBy: [outside.key], at: at))
+        var run = Autopilot(project: "/repo", issues: [api.id, web.id, other.id, last.id], finish: .commit, target: nil,
+                            permissionMode: "auto", profile: nil, branchPattern: "viber/<slug>", sessionsAtOnce: 3)
+        XCTAssertEqual(run.takeNext(from: list)?.id, api.id)
+        XCTAssertEqual(run.takeNext(from: list)?.id, other.id, "Web waits for API, which is active")
+        XCTAssertEqual(run.takeNext(from: list)?.id, last.id, "Outside isn't in the run, so Last isn't held back")
+        XCTAssertEqual(run.waiting(in: list).map { $0.issue.id }, [web.id])
+        XCTAssertEqual(run.waiting(in: list).first?.for.map(\.id), [api.id])
+        run.finish(other.id, stuck: false)
+        XCTAssertNil(run.takeNext(from: list), "only Web is left, and API is still active")
+        list.report(api.id, "Shipped", finished: true)
+        run.finish(api.id, stuck: false)
+        XCTAssertEqual(run.takeNext(from: list)?.id, web.id)
+        XCTAssertTrue(run.prompt(for: web, in: list, startBranch: "viber/rep-1-api").contains("starts from `viber/rep-1-api`"))
     }
 
     func testBranchPatternMustNameABranchPerIdea() throws {

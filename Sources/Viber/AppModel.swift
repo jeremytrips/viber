@@ -58,6 +58,8 @@ struct NewSessionRequest {
     var branch: String? = nil
     /// Where a git worktree's branch starts.
     var base: WorktreeBase = .originDefault
+    /// A branch to start from instead: what an autopilot issue builds on when that isn't merged yet.
+    var startBranch: String? = nil
     var permissionMode: String
     var firstMessage: String
     /// The issue this session is started for, linked to it once it opens.
@@ -274,7 +276,7 @@ final class AppModel {
         case .create(let request):
             let worktreeRequest = WorktreeRequest(folder: request.folder, name: request.name.isEmpty ? job.title : request.name,
                                                   branch: request.branch, branchPattern: request.branchPattern, issueKey: request.issueKey,
-                                                  base: request.base, permissionMode: request.permissionMode)
+                                                  base: request.base, startBranch: request.startBranch, permissionMode: request.permissionMode)
             job.task = Task {
                 do {
                     let info = try await Worktree.create(worktreeRequest, progress: report)
@@ -831,43 +833,87 @@ final class AppModel {
 
     /// The project whose autopilot is on this issue now.
     func autopilotProject(working issueID: String) -> String? {
-        autopilots.first { $0.value.current == issueID }?.key
+        autopilots.first { $0.value.active.contains(issueID) }?.key
     }
 
-    /// The session of the issue the project's autopilot is on, once its worktree is made.
-    func autopilotPane(_ project: String) -> Pane? {
-        guard let id = autopilots[project]?.current, let issue = issues.issue(id), issue.status == .started,
-              let session = issue.sessionID else { return nil }
-        return pane(session)
+    /// The sessions of the issues the project's autopilot is on, once their worktrees are made.
+    func autopilotPanes(_ project: String) -> [Pane] {
+        (autopilots[project]?.active ?? []).compactMap { id in
+            guard let issue = issues.issue(id), issue.status == .started, let session = issue.sessionID else { return nil }
+            return pane(session)
+        }
     }
 
     func isAutopilotSession(_ pane: Pane) -> Bool {
         issues.issue(startedIn: pane.id).flatMap { autopilotProject(working: $0.id) } != nil
     }
 
-    /// Starts the next issue's session in a new worktree, or ends the run when none is left.
+    /// Worktrees the project has open through Viber: sessions in one, and ones being made.
+    func openWorktrees(in project: String) -> Int {
+        panes.filter { $0.projectPath == project && $0.worktree != nil }.count
+            + jobs.filter { $0.project == project && $0.isRunning && !$0.isRemoval }.count
+    }
+
+    /// Why the run isn't starting another issue although some are left, if that is so.
+    func autopilotWait(_ project: String) -> String? {
+        guard let pilot = autopilots[project], pilot.paused == nil, !pilot.stopping, !pilot.upcoming(in: issues).isEmpty else { return nil }
+        if pilot.active.count >= pilot.sessionsAtOnce { return nil }
+        let open = openWorktrees(in: project)
+        if open >= pilot.worktreesAtMost {
+            return "\(open) worktrees are open, the most this run allows. It continues when one is closed, such as after /cleanup."
+        }
+        let waiting = pilot.waiting(in: issues)
+        if !waiting.isEmpty, waiting.count == pilot.upcoming(in: issues).count {
+            let keys = Set(waiting.flatMap { $0.for.map(\.key) }).sorted()
+            return "The rest wait for \(keys.joined(separator: ", ")) to ship."
+        }
+        return nil
+    }
+
+    /// Starts sessions for the next issues, as many as the run has room for, or ends the run when nothing is left.
     private func advanceAutopilot(_ project: String) {
-        guard var pilot = autopilots[project], pilot.paused == nil, pilot.current == nil else { return }
+        guard var pilot = autopilots[project], pilot.paused == nil else { return }
         if pilot.stuckInARow >= Autopilot.maxStuckInARow {
             pauseAutopilot(project, "\(pilot.stuckInARow) issues in a row got stuck, so something may be wrong with the project. "
                            + "Look at their sessions, then resume.")
             return
         }
-        guard !pilot.stopping, let issue = pilot.takeNext(from: issues) else {
+        var starting: [(Issue, String?)] = []
+        if !pilot.stopping {
+            while let issue = pilot.takeNext(from: issues, openWorktrees: openWorktrees(in: project) + starting.count) {
+                starting.append((issue, startBranch(for: issue, pilot: pilot)))
+            }
+        }
+        if starting.isEmpty, pilot.active.isEmpty, pilot.stopping || pilot.takeNext(from: issues, openWorktrees: 0) == nil {
             autopilots[project] = nil
             finishedAutopilots[project] = pilot
+            let left = pilot.upcoming(in: issues).count
             notifier.post(id: "autopilot:\(project):\(Date().timeIntervalSince1970)", title: "Autopilot · \(projectName(project))",
-                          body: (pilot.stopping ? "Stopped as you asked: " : "No issues left to plan: ") + pilot.tally + ".",
-                          target: Target.project(project).key)
+                          body: (pilot.stopping ? "Stopped as you asked: " : left > 0 ? "\(left) left that wait for each other: " : "No issues left to plan: ")
+                          + pilot.tally + ".", target: Target.project(project).key)
             return
         }
         autopilots[project] = pilot
-        createSession(NewSessionRequest(folder: project, profile: pilot.profile, useWorktree: true, name: issue.title,
-                                        // Merged issues build on each other; pull requests each start from origin.
-                                        base: pilot.finish == .merge ? .current : .originDefault,
-                                        permissionMode: pilot.permissionMode, firstMessage: pilot.prompt(for: issue, in: issues),
-                                        issueID: issue.id, issueKey: issue.key, branchPattern: pilot.branchPattern),
-                      selecting: false)
+        for (issue, branch) in starting {
+            createSession(NewSessionRequest(folder: project, profile: pilot.profile, useWorktree: true, name: issue.title,
+                                            // Merged issues build on each other; pull requests each start from origin.
+                                            base: pilot.finish == .merge ? .current : .originDefault, startBranch: branch,
+                                            permissionMode: pilot.permissionMode,
+                                            firstMessage: pilot.prompt(for: issue, in: issues, startBranch: branch),
+                                            issueID: issue.id, issueKey: issue.key, branchPattern: pilot.branchPattern),
+                          selecting: false)
+        }
+    }
+
+    /// The branch an issue's worktree starts from when it builds on one the run shipped without merging: the branch
+    /// of the last blocker that is done. With `merge`, the target branch already has that work.
+    private func startBranch(for issue: Issue, pilot: Autopilot) -> String? {
+        guard pilot.finish != .merge else { return nil }
+        return issue.blockedBy.compactMap { id -> String? in
+            guard let blocker = issues.issue(id), blocker.status == .done, pilot.handled.contains(id),
+                  let session = blocker.sessionID, let pane = pane(session) else { return nil }
+            return pane.branch
+        }.last
     }
 
     /// `viber issue done` or `failed`: records how the session's issue went, and moves its autopilot on.
@@ -876,7 +922,7 @@ final class AppModel {
         issues.report(issue.id, text, finished: finished)
         saveIssues()
         guard let project = autopilotProject(working: issue.id) else { return }
-        autopilots[project]?.finishCurrent(stuck: !finished)
+        autopilots[project]?.finish(issue.id, stuck: !finished)
         if !finished {
             notifier.post(id: "autopilot:\(issue.id):stuck", title: "\(issue.title) · stuck", body: String(text.prefix(180)),
                           target: Target.pane(pane.id).key)
@@ -884,7 +930,7 @@ final class AppModel {
         advanceAutopilot(project)
     }
 
-    /// The current issue's session ended a turn without a report: wait for its background work to wake it, remind it,
+    /// An active issue's session ended a turn without a report: wait for its background work to wake it, remind it,
     /// or give up on the issue. A failed turn (an API error, a dead login) or your Stop pauses the run; a usage limit
     /// pauses it until the limit resets.
     private func autopilotTurnEnded(_ pane: Pane, stalled: Bool = false) {
@@ -892,7 +938,7 @@ final class AppModel {
               let pilot = autopilots[project], pilot.paused == nil else { return }
         if let stopped = pane.interruptedAt, Date().timeIntervalSince(stopped) < 120 {
             pane.interruptedAt = nil
-            pauseAutopilot(project, "You stopped “\(pane.title)”. Resume to let it carry on, or skip to the next issue.")
+            pauseAutopilot(project, "You stopped “\(pane.title)”. Resume to let it carry on, or skip it.")
             return
         }
         if pane.state == .failed, let limit = pane.chat.usageLimit {
@@ -905,11 +951,11 @@ final class AppModel {
             pauseAutopilot(project, "“\(pane.title)” stopped with an error. Look at it, then resume.")
         case .finished, .idle:
             let background = !pane.chat.controls.runningTasks.isEmpty || !pane.chat.runningAgents.isEmpty
-            switch pilot.afterTurn(backgroundWork: background && !stalled) {
+            switch pilot.afterTurn(for: issue.id, backgroundWork: background && !stalled) {
             case .wait: break
             case .nudge:
-                autopilots[project]?.nudged()
-                submit(pilot.nudge(), in: pane)
+                autopilots[project]?.nudged(issue.id)
+                submit(pilot.nudge(for: issue.id), in: pane)
             case .giveUp:
                 giveUp(on: issue.id, project: project, why: "Its session kept stopping without saying whether it finished.")
             }
@@ -923,10 +969,11 @@ final class AppModel {
     /// (which may never end, like a dev server) still runs. One whose process died mid-turn never ends that turn.
     private func checkStalledAutopilots() {
         for project in autopilots.keys {
-            guard let pane = autopilotPane(project) else { continue }
-            if pane.state == .exited { autopilotTurnEnded(pane); continue }
-            guard [.finished, .idle].contains(pane.state), now.timeIntervalSince(pane.lastActivity) > Autopilot.stallInterval else { continue }
-            autopilotTurnEnded(pane, stalled: true)
+            for pane in autopilotPanes(project) {
+                if pane.state == .exited { autopilotTurnEnded(pane); continue }
+                guard [.finished, .idle].contains(pane.state), now.timeIntervalSince(pane.lastActivity) > Autopilot.stallInterval else { continue }
+                autopilotTurnEnded(pane, stalled: true)
+            }
         }
     }
 
@@ -934,18 +981,18 @@ final class AppModel {
         let title = issues.issue(issueID)?.title ?? "An issue"
         issues.report(issueID, why, finished: false)
         saveIssues()
-        autopilots[project]?.finishCurrent(stuck: true)
+        autopilots[project]?.finish(issueID, stuck: true)
         notifier.post(id: "autopilot:\(issueID):stuck", title: "\(title) · stuck", body: why, target: Target.project(project).key)
         advanceAutopilot(project)
     }
 
-    /// The current issue's worktree couldn't be made. That is usually the project's setup, which would stop the next issue too.
+    /// An issue's worktree couldn't be made. That is usually the project's setup, which would stop the next one too.
     private func autopilotSetupFailed(_ issueID: String, _ error: Error) {
         guard let project = autopilotProject(working: issueID) else { return }
         let title = issues.issue(issueID)?.title ?? "the issue"
         issues.report(issueID, "The autopilot couldn't make its worktree: \(error.localizedDescription)", finished: false)
         saveIssues()
-        autopilots[project]?.finishCurrent(stuck: true)
+        autopilots[project]?.finish(issueID, stuck: true)
         pauseAutopilot(project, "The worktree for “\(title)” couldn't be made. Its setup's output is in the sidebar.")
     }
 
@@ -957,50 +1004,52 @@ final class AppModel {
                       body: reason, target: Target.project(project).key)
     }
 
-    /// Picks a paused run up again: the current issue's session is told to carry on, or the next issue starts.
+    /// Picks a paused run up again: idle sessions are told to carry on, and the next issues start.
     func resumeAutopilot(_ project: String) {
         guard autopilots[project]?.paused != nil else { return }
         autopilots[project]?.resume()
-        if let pane = autopilotPane(project) {
-            if pane.state != .working && !pane.state.needsYou { submit(Autopilot.resumeMessage, in: pane) }
-        } else {
-            advanceAutopilot(project)
+        for pane in autopilotPanes(project) where pane.state != .working && !pane.state.needsYou {
+            submit(Autopilot.resumeMessage, in: pane)
         }
+        advanceAutopilot(project)
     }
 
-    /// Lets the current issue finish, then ends the run. Asked again, it keeps going after all.
+    /// Lets the active issues finish, then ends the run. Asked again, it keeps going after all.
     func toggleStopAfterCurrent(_ project: String) {
         guard let pilot = autopilots[project] else { return }
-        if pilot.current == nil { stopAutopilot(project); return }
+        if pilot.active.isEmpty { stopAutopilot(project); return }
         autopilots[project]?.stopping.toggle()
     }
 
-    /// Gives up on the current issue and starts the next one. Its session is stopped and stays open.
-    func skipAutopilotIssue(_ project: String) {
-        guard let id = autopilots[project]?.current else { return }
-        let pane = autopilotPane(project)
-        pane?.interrupt()
-        pane?.interruptedAt = nil
-        pane?.continueAt = nil
+    /// Gives up on an active issue so the next one can start. Its session is stopped and stays open.
+    func skipAutopilotIssue(_ id: String, project: String) {
+        guard autopilots[project]?.active.contains(id) == true else { return }
+        if let pane = issues.issue(id)?.sessionID.flatMap(pane) {
+            pane.interrupt()
+            pane.interruptedAt = nil
+            pane.continueAt = nil
+        }
         if let job = jobs.first(where: { $0.issueID == id }) { dismiss(job) }
         issues.report(id, "You skipped it.", finished: false)
         saveIssues()
-        autopilots[project]?.finishCurrent(stuck: true)
+        autopilots[project]?.finish(id, stuck: true)
         autopilots[project]?.resume()
         advanceAutopilot(project)
     }
 
-    /// Ends the run now. The current issue's session is stopped and stays open; a worktree still being made is dropped.
+    /// Ends the run now. The active issues' sessions are stopped and stay open; worktrees still being made are dropped.
     func stopAutopilot(_ project: String) {
         guard var pilot = autopilots[project] else { return }
         autopilots[project] = nil
         pilot.stopping = true
         finishedAutopilots[project] = pilot
-        if let id = pilot.current, let job = jobs.first(where: { $0.issueID == id }) { dismiss(job) }
-        if let pane = pilot.current.flatMap({ issues.issue($0)?.sessionID }).flatMap(pane) {
-            pane.interrupt()
-            pane.interruptedAt = nil
-            pane.continueAt = nil
+        for id in pilot.active {
+            if let job = jobs.first(where: { $0.issueID == id }) { dismiss(job) }
+            if let pane = issues.issue(id)?.sessionID.flatMap(pane) {
+                pane.interrupt()
+                pane.interruptedAt = nil
+                pane.continueAt = nil
+            }
         }
     }
 
@@ -1008,10 +1057,10 @@ final class AppModel {
         finishedAutopilots[project] = nil
     }
 
-    /// You changed or deleted the issue the autopilot is on, so it moves on. Its session carries on as an ordinary one.
+    /// You changed or deleted an issue the autopilot is on, so it moves on. Its session carries on as an ordinary one.
     private func releaseFromAutopilot(_ id: String, finished: Bool) {
         guard let project = autopilotProject(working: id) else { return }
-        autopilots[project]?.finishCurrent(stuck: !finished)
+        autopilots[project]?.finish(id, stuck: !finished)
         advanceAutopilot(project)
     }
 
@@ -1046,6 +1095,8 @@ final class AppModel {
             issues.comment(issue.id, "Merged: its worktree was cleaned up.", by: pane.title)
             saveIssues()
         }
+        // One worktree fewer may let the project's autopilot start its next issue.
+        if pane.worktree != nil { advanceAutopilot(pane.projectPath) }
         guard removeWorktree, let info = pane.worktree else { return }
         let job = WorktreeJob(removing: info, deleteBranch: deleteBranch, title: pane.title, project: pane.projectPath)
         jobs.append(job)

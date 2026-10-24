@@ -21,6 +21,10 @@ enum Prefs {
     /// When a session stops at the account's usage limit, tell it to carry on once the limit resets.
     static let continueAfterLimit = "continueAfterLimit"
 
+    /// How many sessions an autopilot run keeps going at once, and the most worktrees it lets a project have open.
+    static let autopilotSessions = "autopilotSessions"
+    static let autopilotWorktrees = "autopilotWorktrees"
+
     /// New worktrees' branch patterns, by the repository's main checkout. A missing one is Worktree.defaultBranchPattern.
     static let branchPatterns = "branchPatterns"
 
@@ -28,7 +32,7 @@ enum Prefs {
         UserDefaults.standard.register(defaults: [
             notifyFinished: true, notifyNeedsYou: true, notifyCache: true, cacheWarningMinutes: 2,
             newSessionMode: "auto", newSessionModel: "", previewTools: true, previewLocalActions: true,
-            deviceTools: true, deviceActions: true, continueAfterLimit: true
+            deviceTools: true, deviceActions: true, continueAfterLimit: true, autopilotSessions: 3, autopilotWorktrees: 8
         ])
     }
 

@@ -44,12 +44,14 @@ public struct WorktreeRequest: Sendable {
     public var issueKey: String?
     /// Where a git worktree starts. A WorktreeCreate hook decides that itself.
     public var base: WorktreeBase
+    /// A branch to start from instead, such as one an issue builds on that isn't merged yet.
+    public var startBranch: String?
     public var permissionMode: String?
 
     public init(folder: String, name: String, branch: String? = nil, branchPattern: String = Worktree.defaultBranchPattern,
-                issueKey: String? = nil, base: WorktreeBase = .originDefault, permissionMode: String? = nil) {
+                issueKey: String? = nil, base: WorktreeBase = .originDefault, startBranch: String? = nil, permissionMode: String? = nil) {
         self.folder = folder; self.name = name; self.branch = branch; self.branchPattern = branchPattern
-        self.issueKey = issueKey; self.base = base; self.permissionMode = permissionMode
+        self.issueKey = issueKey; self.base = base; self.startBranch = startBranch; self.permissionMode = permissionMode
     }
 }
 
@@ -111,7 +113,10 @@ public enum Worktree {
         if Task.isCancelled { throw stopped }
         guard !hooks.isEmpty else {
             var base: String?
-            if request.base == .originDefault {
+            if let start = request.startBranch, branchExists(start, repo: root) {
+                progress(.output("Starting from \(start).\n"))
+                base = start
+            } else if request.base == .originDefault {
                 if hasOrigin(root) {
                     progress(.step("Fetching origin"))
                     let fetched = await fetchOriginDefault(root)

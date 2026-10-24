@@ -10,6 +10,8 @@ struct AutopilotSheet: View {
     @State private var finish = Autopilot.Finish.pullRequest
     @State private var mode = PermissionMode.auto.rawValue
     @State private var profile: String?
+    @State private var sessions = Prefs.int(Prefs.autopilotSessions)
+    @State private var worktrees = Prefs.int(Prefs.autopilotWorktrees)
     /// Nil while it is read.
     @State private var repo: Repo?
 
@@ -41,7 +43,7 @@ struct AutopilotSheet: View {
                         Label("Autopilot for \(model.projectName(request.project))", systemImage: "airplane").font(.headline)
                         Text(issues.count == 1
                              ? "Viber implements this issue on its own: it gets a new worktree and a session that writes it, runs the project's checks, ships it and reports back."
-                             : "Viber works through these issues on its own, one at a time. Each gets a new worktree and a session that writes it, runs the project's checks, ships it and reports back; then the next one starts. Issues you add meanwhile join the end; ones its sessions add wait for you.")
+                             : "Viber works through these issues on its own, several at a time. Each gets a new worktree and a session that writes it, runs the project's checks, ships it and reports back; then the next one takes its place. An issue blocked by another in the run waits for it. Issues you add meanwhile join the end; ones its sessions add wait for you.")
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -76,6 +78,11 @@ struct AutopilotSheet: View {
                     }
                     note(modeNote)
                     AccountPicker(selection: $profile)
+                    Stepper("Sessions at once: \(sessions)", value: $sessions, in: 1...Autopilot.maxSessions)
+                    note(sessions == 1 ? "One issue at a time." : "\(sessions) issues at a time, each in its own session and worktree. Each costs usage, and each runs the project's checks.")
+                    Stepper("Worktrees at most: \(worktrees)", value: $worktrees, in: max(sessions, 1)...32)
+                    note(finish == .merge ? "Counts the project's open worktree sessions. Merged issues close theirs, so this rarely matters."
+                         : "Counts the project's open worktree sessions, including issues waiting for review: a shipped issue keeps its worktree until it is merged and cleaned up, so the run can't get further ahead of you than this.")
                     LabeledContent("Branches") {
                         Text(repo.map { $0.usesHook ? "Made by the project's WorktreeCreate hook" : Autopilot.usablePattern($0.pattern) } ?? "")
                     }
@@ -157,8 +164,11 @@ struct AutopilotSheet: View {
 
     private func start() {
         guard let repo, problem(issues) == nil else { return }
+        UserDefaults.standard.set(sessions, forKey: Prefs.autopilotSessions)
+        UserDefaults.standard.set(worktrees, forKey: Prefs.autopilotWorktrees)
         model.startAutopilot(Autopilot(project: request.project, issues: issues.map(\.id), finish: finish, target: repo.current,
-                                       permissionMode: mode, profile: profile, branchPattern: repo.pattern))
+                                       permissionMode: mode, profile: profile, branchPattern: repo.pattern,
+                                       sessionsAtOnce: sessions, worktreesAtMost: worktrees))
         dismiss()
     }
 }
@@ -191,7 +201,7 @@ struct AutopilotCard: View {
                             .accessibilityLabel("Dismiss")
                     }
                 }
-                ForEach(pilot.handled.filter { $0 != running?.current }.compactMap { model.issues.issue($0) }) { issue in
+                ForEach(pilot.handled.filter { !pilot.active.contains($0) }.compactMap { model.issues.issue($0) }) { issue in
                     handledRow(issue)
                 }
                 if running != nil {
@@ -228,22 +238,22 @@ struct AutopilotCard: View {
         .font(.callout)
     }
 
-    /// When the current session carries on by itself, once the usage limit that stopped it resets.
-    private var waitingAt: Date? { model.autopilotPane(project)?.continueAt }
+    /// When a session carries on by itself, once the usage limit that stopped it resets.
+    private var waitingAt: Date? { model.autopilotPanes(project).compactMap(\.continueAt).min() }
 
     private func counts(_ pilot: Autopilot) -> String {
         let left = pilot.upcoming(in: model.issues).count
-        return "· \(pilot.tally) · \(left) to go"
+        let at = pilot.sessionsAtOnce > 1 && !pilot.active.isEmpty ? " · \(pilot.active.count) at once" : ""
+        return "· \(pilot.tally) · \(left) to go\(at)"
     }
 
     @ViewBuilder
     private func status(_ pilot: Autopilot) -> some View {
-        let issue = pilot.current.flatMap { model.issues.issue($0) }
-        let pane = model.autopilotPane(project)
         if let reason = pilot.paused {
             Text(reason).foregroundStyle(.secondary)
         }
-        if let issue {
+        ForEach(pilot.active.compactMap { model.issues.issue($0) }) { issue in
+            let pane = issue.sessionID.flatMap(model.pane)
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 if let pane {
                     Text(doing(pane, issue: issue)).foregroundStyle(pane.state.needsYou ? .orange : .primary)
@@ -253,10 +263,18 @@ struct AutopilotCard: View {
                 } else {
                     Text("Making a worktree for “\(issue.title)”…")
                 }
+                Spacer(minLength: 4)
+                Button("Skip") { model.skipAutopilotIssue(issue.id, project: project) }
+                    .buttonStyle(.link)
+                    .foregroundStyle(.secondary)
+                    .help("Give up on this issue; its session stays open")
             }
         }
+        if let wait = model.autopilotWait(project) {
+            Text(wait).foregroundStyle(.secondary)
+        }
         if pilot.stopping {
-            Text("Stops after this issue.").foregroundStyle(.secondary)
+            Text(pilot.active.count == 1 ? "Stops after this issue." : "Stops after these issues.").foregroundStyle(.secondary)
         }
     }
 
@@ -278,14 +296,12 @@ struct AutopilotCard: View {
             Button("Resume") { model.resumeAutopilot(project) }
                 .controlSize(.small)
                 .help(waitingAt != nil ? "Carry on now instead of when the limit resets"
-                      : pilot.current != nil ? "Tell the session to carry on with its issue" : "Start the next issue")
+                      : !pilot.active.isEmpty ? "Tell the sessions to carry on with their issues" : "Start the next issue")
         }
         Menu {
-            if pilot.paused == nil, pilot.current != nil {
-                Button(pilot.stopping ? "Keep Going After This Issue" : "Stop After This Issue") { model.toggleStopAfterCurrent(project) }
-            }
-            if pilot.current != nil {
-                Button("Skip to the Next Issue") { model.skipAutopilotIssue(project) }
+            if pilot.paused == nil, !pilot.active.isEmpty {
+                let these = pilot.active.count == 1 ? "This Issue" : "These Issues"
+                Button(pilot.stopping ? "Keep Going After \(these)" : "Stop After \(these)") { model.toggleStopAfterCurrent(project) }
             }
             Divider()
             Button("Stop Now") { model.stopAutopilot(project) }
@@ -295,6 +311,6 @@ struct AutopilotCard: View {
         .menuStyle(.borderlessButton)
         .fixedSize()
         .controlSize(.small)
-        .help("Stop after this issue, skip it, or stop now (its session stays open)")
+        .help("Stop after the issues it is on, or stop now (their sessions stay open)")
     }
 }

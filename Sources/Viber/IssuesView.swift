@@ -436,7 +436,7 @@ struct IssueChips: View {
     /// Where the project's autopilot has this issue: on it now, or in line.
     private var autopilotPlace: String? {
         guard let pilot = model.autopilots[issue.project] else { return nil }
-        if pilot.current == issue.id { return "on autopilot" }
+        if pilot.active.contains(issue.id) { return "on autopilot" }
         guard let index = pilot.upcoming(in: model.issues).firstIndex(where: { $0.id == issue.id }) else { return nil }
         return index == 0 ? "next on autopilot" : "#\(index + 1) on autopilot"
     }
@@ -761,7 +761,7 @@ private struct IssueCard: View {
             HStack(spacing: 6) {
                 Text(issue.key).font(.caption.monospaced()).foregroundStyle(.secondary)
                 Spacer()
-                if model.autopilots[issue.project].map({ $0.current == issue.id || $0.queue.contains(issue.id) }) == true {
+                if model.autopilots[issue.project].map({ $0.active.contains(issue.id) || $0.queue.contains(issue.id) }) == true {
                     Image(systemName: "airplane").font(.caption2).foregroundStyle(Color.accentColor)
                 }
                 if let report = issue.report, !report.finished {
