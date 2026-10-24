@@ -6,6 +6,7 @@ import ViberCore
 
 let usage = """
 usage: viber close [--remove-worktree] [--delete-branch]
+       viber worktree
        viber notify <text...>
        viber rename <title...>
        viber idea [list | add <text...> | add -]
@@ -15,6 +16,8 @@ Talks to the Viber app that runs this Claude Code session.
   close    Close this session once the current reply finishes.
            --remove-worktree  also remove its git worktree (refused if it has uncommitted changes)
            --delete-branch    also delete its branch with `git branch -d` (kept if not merged)
+  worktree Print the worktree Viber made for this session: its path, the branch it was created on
+           (the one --delete-branch deletes), and the repository. Exits 1 if Viber made none.
   notify   Show a macOS notification for this session.
   rename   Set this session's title in the sidebar.
   idea     This project's ideas: things to do later that nobody has planned yet.
@@ -62,6 +65,16 @@ case "close":
     case (false, false): extras = ""
     }
     confirmation = "Viber will close this session when the current reply finishes\(extras)."
+case "worktree":
+    guard args.isEmpty else { fail("viber: worktree takes no arguments\n\n\(usage)", code: 64) }
+    guard let info = RecordedSessions.worktree(paneID: paneID) else {
+        fail("viber: Viber made no worktree for this session", code: 1)
+    }
+    print("path: \(info.path)")
+    print("branch: \(info.branch.isEmpty ? "(none)" : info.branch)")
+    print("repo: \(info.repo)")
+    print("made by: \(info.madeByHook ? "the project's WorktreeCreate hook" : "git")")
+    exit(0)
 case "notify", "rename":
     let text = args.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
     guard !text.isEmpty else { fail("viber: \(command) needs text\n\n\(usage)", code: 64) }
