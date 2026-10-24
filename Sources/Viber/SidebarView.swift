@@ -147,8 +147,8 @@ struct PaneRow: View {
                 Text(pane.title).lineLimit(1).fontWeight(.medium)
                 HStack(spacing: 5) {
                     Chip(text: pane.profileLabel)
-                    if let worktree = pane.worktree {
-                        Chip(text: "⑂ " + worktree.branch.replacingOccurrences(of: "viber/", with: ""))
+                    if pane.worktree != nil {
+                        if let branch = pane.branchName { Chip(text: "⑂ " + branch.replacingOccurrences(of: "viber/", with: "")).help(branch) }
                         if let diff = pane.diffStat { Text(diff).font(.caption2.monospaced()).foregroundStyle(.secondary) }
                     } else {
                         Text(pane.state.label).font(.caption).foregroundStyle(.secondary)

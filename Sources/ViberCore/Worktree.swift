@@ -113,6 +113,25 @@ public enum Worktree {
         return r.output
     }
 
+    /// What the worktree has checked out now, for showing: the branch, or `detached at <commit>`.
+    /// Nil when it can't be read. Sessions switch branches, so this can differ from `WorktreeInfo.branch`.
+    public static func headName(_ path: String) -> String? {
+        let r = Shell.run("git", ["-C", path, "rev-parse", "--abbrev-ref", "HEAD"])
+        guard r.ok, !r.output.isEmpty else { return nil }
+        guard r.output == "HEAD" else { return r.output }
+        let commit = Shell.run("git", ["-C", path, "rev-parse", "--short", "HEAD"]).output
+        return commit.isEmpty ? "detached HEAD" : "detached at \(commit)"
+    }
+
+    /// What the close dialog says when the worktree is no longer on the branch it was created on:
+    /// only that recorded branch is ever deleted. Nil when there's nothing to say.
+    public static func branchDeletionNote(recorded: String, live: String?) -> String? {
+        guard let live, live != recorded else { return nil }
+        let now = live.hasPrefix("detached") ? "The worktree is \(live) now" : "The worktree is on \(live) now"
+        guard !recorded.isEmpty else { return now + ", and Viber recorded no branch for it, so no branch is deleted." }
+        return now + ". Only \(recorded), the branch it was created on, is deleted (if merged); \(live.hasPrefix("detached") ? "nothing else is" : "\(live) is kept")."
+    }
+
     public static func slug(_ title: String) -> String {
         let lowered = title.lowercased().map { $0.isLetter || $0.isNumber ? $0 : "-" }
         let collapsed = String(lowered).split(separator: "-").joined(separator: "-")

@@ -208,6 +208,7 @@ final class AppModel {
             saveIdeas()
         }
         if selecting { select(.pane(pane.id)) }
+        if worktree != nil { refreshDiff(pane) }
         let text = firstMessage.trimmingCharacters(in: .whitespacesAndNewlines)
         if !text.isEmpty { submit(text, in: pane) }
         return pane
@@ -475,7 +476,7 @@ final class AppModel {
                     }
                 }.joined(separator: "\n")
                 return RelayCandidate(id: pane.id, title: pane.title, project: pane.projectName,
-                                      branch: pane.worktree?.branch, context: String(recentText.suffix(4000)))
+                                      branch: pane.branchName, context: String(recentText.suffix(4000)))
             }
     }
 
@@ -654,11 +655,16 @@ final class AppModel {
         save()
     }
 
+    /// Re-reads the worktree's diff stat and the branch it has checked out (sessions switch branches).
     func refreshDiff(_ pane: Pane) {
         guard let info = pane.worktree else { return }
         Task.detached {
             let stat = Worktree.diffStat(info)
-            await MainActor.run { pane.diffStat = stat }
+            let head = Worktree.headName(info.path)
+            await MainActor.run {
+                pane.diffStat = stat
+                if let head { pane.liveBranch = head }
+            }
         }
     }
 

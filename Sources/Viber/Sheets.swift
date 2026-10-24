@@ -586,8 +586,12 @@ struct CloseSheet: View {
             }
 
             if let worktree = pane.worktree {
+                let branchNote = Worktree.branchDeletionNote(recorded: worktree.branch, live: pane.liveBranch)
                 VStack(alignment: .leading, spacing: 4) {
-                    LabeledContent("Branch") { Text(worktree.branch).font(.callout.monospaced()).textSelection(.enabled) }
+                    LabeledContent("Branch") { Text(pane.branchName ?? "none").font(.callout.monospaced()).textSelection(.enabled) }
+                    if branchNote != nil, !worktree.branch.isEmpty {
+                        LabeledContent("Created on") { Text(worktree.branch).font(.callout.monospaced()).textSelection(.enabled) }
+                    }
                     LabeledContent("Worktree") {
                         Text((worktree.path as NSString).abbreviatingWithTildeInPath)
                             .font(.callout.monospaced())
@@ -616,6 +620,11 @@ struct CloseSheet: View {
                         .foregroundStyle(.red)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                if let branchNote {
+                    Label(branchNote, systemImage: "arrow.triangle.branch")
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 Text(removalNote(worktree))
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -626,6 +635,9 @@ struct CloseSheet: View {
                         .keyboardShortcut(.cancelAction)
                     Spacer()
                     Button("Remove worktree and branch") { close(removeWorktree: true, deleteBranch: true) }
+                        .disabled(worktree.branch.isEmpty)
+                        .help(worktree.branch.isEmpty ? "Viber recorded no branch for this worktree"
+                              : "Also delete \(worktree.branch) with git branch -d, if it is merged")
                     Button("Remove worktree") { close(removeWorktree: true) }
                     Button("Keep worktree") { close() }
                         .keyboardShortcut(.defaultAction)
@@ -644,13 +656,15 @@ struct CloseSheet: View {
         .frame(width: 520)
         .task {
             guard let worktree = pane.worktree else { return }
-            let (changes, hooks, problem) = await Task.detached { () -> (Bool, [HookCommand], String?) in
+            let (changes, head, hooks, problem) = await Task.detached { () -> (Bool, String?, [HookCommand], String?) in
                 let changes = Worktree.hasUncommittedChanges(worktree.path)
-                guard worktree.madeByHook else { return (changes, [], nil) }
-                do { return (changes, try WorktreeHooks.hooks(.remove, folder: worktree.folder ?? worktree.repo), nil) }
-                catch { return (changes, [], error.localizedDescription) }
+                let head = Worktree.headName(worktree.path)
+                guard worktree.madeByHook else { return (changes, head, [], nil) }
+                do { return (changes, head, try WorktreeHooks.hooks(.remove, folder: worktree.folder ?? worktree.repo), nil) }
+                catch { return (changes, head, [], error.localizedDescription) }
             }.value
             hasChanges = changes
+            if let head { pane.liveBranch = head }
             teardown = hooks
             teardownProblem = problem
         }

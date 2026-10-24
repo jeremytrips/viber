@@ -350,6 +350,28 @@ final class BranchNameTests: XCTestCase {
         XCTAssertEqual(URL(fileURLWithPath: second.path).lastPathComponent, "login-2")
     }
 
+    func testLiveBranch() throws {
+        let repo = try temporaryRepo()
+        let info = try Worktree.create(repoDir: repo.path, name: "Live")
+        XCTAssertEqual(Worktree.headName(info.path), "viber/live")
+        XCTAssertTrue(Shell.run("git", ["-C", info.path, "checkout", "-q", "-b", "feat/NEX-5-live"]).ok)
+        XCTAssertEqual(Worktree.headName(info.path), "feat/NEX-5-live", "a session that switches branch shows the new one")
+        XCTAssertEqual(info.branch, "viber/live", "the recorded branch stays the one Viber created")
+        XCTAssertTrue(Shell.run("git", ["-C", info.path, "checkout", "-q", "--detach"]).ok)
+        XCTAssertTrue(Worktree.headName(info.path)?.hasPrefix("detached at ") == true)
+        XCTAssertNil(Worktree.headName(repo.appendingPathComponent("missing").path))
+    }
+
+    func testBranchDeletionNote() {
+        XCTAssertNil(Worktree.branchDeletionNote(recorded: "viber/x", live: "viber/x"))
+        XCTAssertNil(Worktree.branchDeletionNote(recorded: "viber/x", live: nil))
+        XCTAssertEqual(Worktree.branchDeletionNote(recorded: "viber/x", live: "feat/NEX-1-x"),
+                       "The worktree is on feat/NEX-1-x now. Only viber/x, the branch it was created on, is deleted (if merged); feat/NEX-1-x is kept.")
+        XCTAssertEqual(Worktree.branchDeletionNote(recorded: "viber/x", live: "detached at abc1234"),
+                       "The worktree is detached at abc1234 now. Only viber/x, the branch it was created on, is deleted (if merged); nothing else is.")
+        XCTAssertNotNil(Worktree.branchDeletionNote(recorded: "", live: "feat/y"))
+    }
+
     func testRecordedWorktree() throws {
         let file = try temporaryFolder().appendingPathComponent("panes.json")
         let info = WorktreeInfo(repo: "/r", path: "/w", branch: "feat/x", base: "main", createdByHook: true, folder: "/r")
