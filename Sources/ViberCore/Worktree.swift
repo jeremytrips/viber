@@ -92,12 +92,20 @@ public enum Worktree {
         return "+\(number(before: "insertion")) −\(number(before: "deletion"))"
     }
 
+    /// The branch checked out in `path` now, which Claude may have switched away from the one Viber created.
+    /// Nil when HEAD is detached or git fails.
+    public static func currentBranch(_ path: String) -> String? {
+        let branch = Shell.run("git", ["-C", path, "rev-parse", "--abbrev-ref", "HEAD"]).output
+        return branch.isEmpty || branch == "HEAD" ? nil : branch
+    }
+
     public static func hasUncommittedChanges(_ path: String) -> Bool {
         !Shell.run("git", ["-C", path, "status", "--porcelain"]).output.isEmpty
     }
 
-    /// Removes the worktree (refusing if it has uncommitted changes) and optionally its merged branch.
-    /// Uses `branch -d`, never `-D`, so unmerged work is never thrown away.
+    /// Removes the worktree (refusing if it has uncommitted changes) and optionally the merged branch Viber created.
+    /// Uses `branch -d`, never `-D`, so unmerged work is never thrown away. Branches Claude switched to are kept,
+    /// and a created branch that no longer exists (renamed, say) is skipped.
     public static func remove(_ info: WorktreeInfo, deleteBranch: Bool) throws {
         if FileManager.default.fileExists(atPath: info.path) {
             if hasUncommittedChanges(info.path) {
@@ -106,7 +114,7 @@ public enum Worktree {
             let r = Shell.run("git", ["-C", info.repo, "worktree", "remove", info.path])
             guard r.ok else { throw WorktreeError(message: "git worktree remove failed: \(r.stderr.trimmingCharacters(in: .whitespacesAndNewlines))") }
         }
-        if deleteBranch {
+        if deleteBranch, Shell.run("git", ["-C", info.repo, "rev-parse", "--verify", "--quiet", "refs/heads/\(info.branch)"]).ok {
             let r = Shell.run("git", ["-C", info.repo, "branch", "-d", info.branch])
             guard r.ok else { throw WorktreeError(message: "Kept branch \(info.branch): \(r.stderr.trimmingCharacters(in: .whitespacesAndNewlines))") }
         }

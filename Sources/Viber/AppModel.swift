@@ -378,7 +378,7 @@ final class AppModel {
                     }
                 }.joined(separator: "\n")
                 return RelayCandidate(id: pane.id, title: pane.title, project: pane.projectName,
-                                      branch: pane.worktree?.branch, context: String(recentText.suffix(4000)))
+                                      branch: pane.branch, context: String(recentText.suffix(4000)))
             }
     }
 
@@ -488,12 +488,18 @@ final class AppModel {
         save()
         guard removeWorktree, let info = pane.worktree else { return }
         Task.detached {
+            // Only the branch Viber created is deleted; one Claude switched to is kept.
+            let switched = Worktree.currentBranch(info.path).flatMap { $0 == info.branch ? nil : $0 }
             do {
                 try Worktree.remove(info, deleteBranch: deleteBranch)
+                let body = switch (deleteBranch, switched) {
+                case (true, nil): "\(info.branch) and its worktree are gone."
+                case (true, let kept?): "\(info.branch) and its worktree are gone. \(kept) was kept."
+                case (false, nil): "Kept branch \(info.branch)."
+                case (false, let kept?): "Kept \(info.branch) and \(kept)."
+                }
                 await MainActor.run {
-                    self.notifier.post(id: UUID().uuidString, title: "Worktree removed",
-                                       body: deleteBranch ? "\(info.branch) and its worktree are gone." : "Kept branch \(info.branch).",
-                                       target: "", sound: false)
+                    self.notifier.post(id: UUID().uuidString, title: "Worktree removed", body: body, target: "", sound: false)
                 }
             } catch {
                 await MainActor.run { self.errorMessage = error.localizedDescription }
@@ -556,15 +562,17 @@ final class AppModel {
             close(pane, removeWorktree: request.removeWorktree, deleteBranch: request.deleteBranch)
             return
         }
-        refreshDiff(pane)
+        refreshWorktree(pane)
         save()
     }
 
-    func refreshDiff(_ pane: Pane) {
+    /// Reads the worktree's diff stat and the branch checked out in it.
+    func refreshWorktree(_ pane: Pane) {
         guard let info = pane.worktree else { return }
         Task.detached {
             let stat = Worktree.diffStat(info)
-            await MainActor.run { pane.diffStat = stat }
+            let branch = Worktree.currentBranch(info.path)
+            await MainActor.run { pane.diffStat = stat; pane.liveBranch = branch }
         }
     }
 
@@ -585,7 +593,7 @@ final class AppModel {
                 Task { @MainActor in self?.reloadStatus(); self?.deviceHub.reap() }
             }
         ]
-        for pane in panes where pane.worktree != nil { refreshDiff(pane) }
+        for pane in panes where pane.worktree != nil { refreshWorktree(pane) }
     }
 
     private func tick() {

@@ -37,15 +37,15 @@ Show a short checklist, one line each, with the evidence:
 
 **Not clean:** list exactly what blocks cleanup (files, commits, stashes, unmerged PR) and stop. Do not offer to discard anything.
 
-**Clean, and running in Viber** (`VIBER_PANE_ID` is set), **in a Viber worktree** (path contains `/.claude/worktrees/` and branch starts with `viber/`):
+**Clean, and running in Viber** (`VIBER_PANE_ID` is set), **in a Viber worktree** (path contains `/.claude/worktrees/`):
 
 ```
 viber close --remove-worktree --delete-branch
 ```
 
-Tell the user Viber will close this session and remove the worktree and branch after this reply. Mention that Viber deletes the branch with `git branch -d`, so a squash-merged branch may be kept; they can delete it later with `git branch -D <branch>` if they are sure.
+Tell the user Viber will close this session and remove the worktree and branch after this reply. Mention that Viber deletes the branch with `git branch -d`, so a squash-merged branch may be kept; they can delete it later with `git branch -D <branch>` if they are sure. Viber only deletes the `viber/…` branch it created the worktree on: if the current branch is another one (the session switched branches), say that it is kept.
 
-**Clean, but not a Viber worktree** (path or branch does not match): say it is clean and that Viber only removes worktrees it created. Do not run `viber close`.
+**Clean, but not a Viber worktree** (path does not match): say it is clean and that Viber only removes worktrees it created. Do not run `viber close`.
 
 **Clean, but not in Viber** (`VIBER_PANE_ID` unset): print the manual commands for the user to run from the main checkout, and do not run them:
 

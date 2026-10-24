@@ -148,8 +148,10 @@ struct PaneRow: View {
                 Text(pane.title).lineLimit(1).fontWeight(.medium)
                 HStack(spacing: 5) {
                     Chip(text: pane.profileLabel)
-                    if let worktree = pane.worktree {
-                        Chip(text: "⑂ " + worktree.branch.replacingOccurrences(of: "viber/", with: ""))
+                    if let worktree = pane.worktree, let branch = pane.branch {
+                        // The last part, so "feat/NEX-705-…" shows its ticket in the narrow chip.
+                        Chip(text: "⑂ " + (branch.split(separator: "/").last.map(String.init) ?? branch))
+                            .help(branch == worktree.branch ? branch : "\(branch), created as \(worktree.branch)")
                         if let diff = pane.diffStat { Text(diff).font(.caption2.monospaced()).foregroundStyle(.secondary) }
                     } else {
                         Text(pane.state.label).font(.caption).foregroundStyle(.secondary)

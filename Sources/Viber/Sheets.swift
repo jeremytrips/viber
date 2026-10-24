@@ -488,8 +488,13 @@ struct CloseSheet: View {
             }
 
             if let worktree = pane.worktree {
+                let branch = pane.branch ?? worktree.branch
+                let switched = branch != worktree.branch
                 VStack(alignment: .leading, spacing: 4) {
-                    LabeledContent("Branch") { Text(worktree.branch).font(.callout.monospaced()).textSelection(.enabled) }
+                    LabeledContent("Branch") { Text(branch).font(.callout.monospaced()).textSelection(.enabled) }
+                    if switched {
+                        LabeledContent("Created as") { Text(worktree.branch).font(.callout.monospaced()).textSelection(.enabled) }
+                    }
                     LabeledContent("Worktree") {
                         Text((worktree.path as NSString).abbreviatingWithTildeInPath)
                             .font(.callout.monospaced())
@@ -503,7 +508,9 @@ struct CloseSheet: View {
                     Label("Has uncommitted changes", systemImage: "exclamationmark.circle.fill")
                         .foregroundStyle(.red)
                 }
-                Text("Removal is refused if there are uncommitted changes, and the branch is only deleted if it is merged.")
+                Text(switched
+                     ? "Removal is refused if there are uncommitted changes. Only \(worktree.branch), the branch Viber created, is deleted, and only if it is merged; \(branch) is kept."
+                     : "Removal is refused if there are uncommitted changes, and the branch is only deleted if it is merged.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -528,9 +535,10 @@ struct CloseSheet: View {
             }
         }
         .padding(20)
-        .frame(width: 520)
+        .frame(width: 580)
         .task {
             guard let path = pane.worktree?.path else { return }
+            model.refreshWorktree(pane)
             hasChanges = await Task.detached { Worktree.hasUncommittedChanges(path) }.value
         }
     }
