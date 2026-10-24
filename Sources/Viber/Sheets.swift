@@ -78,6 +78,8 @@ struct NewSessionSheet: View {
     @State private var editingPattern = false
     /// The idea this session is started for, when planning it opened the sheet.
     @State private var ideaID: String?
+    @State private var base = WorktreeBase.originDefault
+    @State private var baseChoices = BaseChoices(hasOrigin: false, originDefault: nil, current: nil)
 
     /// What makes the worktree for this folder: git, or the project's WorktreeCreate hook.
     enum WorktreeMaker: Equatable {
@@ -91,7 +93,7 @@ struct NewSessionSheet: View {
                 return "Creates .claude/worktrees/<name> on a new branch, so parallel sessions don't collide"
                     + (include ? ". Copies the gitignored files .worktreeinclude lists." : "")
             case .hooks:
-                return "The project's WorktreeCreate hook makes it, as in Claude Code. Its output shows in the sidebar while it runs."
+                return "The project's WorktreeCreate hook makes it and chooses where its branch starts, as in Claude Code. Its output shows in the sidebar while it runs."
             case .unsupported(let message):
                 return message
             }
@@ -193,6 +195,7 @@ struct NewSessionSheet: View {
                                     .fixedSize(horizontal: false, vertical: true)
                             }
                         }
+                        if !maker.usesHook { basePicker }
                     }
                     Picker("Mode", selection: $permissionMode) {
                         ForEach(PermissionMode.offered, id: \.self) { Text($0.label).tag($0.rawValue) }
@@ -226,6 +229,22 @@ struct NewSessionSheet: View {
         .task(id: folder) { await checkRepo() }
         .onChange(of: defaultBranch) { if !branchEdited { branch = defaultBranch } }
         .task(id: "\(folder)|\(branch)|\(branchEdited)|\(useWorktree)|\(maker.usesHook)|\(pattern)") { await checkBranch() }
+    }
+
+    /// Where a git worktree's branch starts: origin's default branch (fetched first) or what is checked out here.
+    /// A WorktreeCreate hook decides that itself, so this isn't shown then.
+    @ViewBuilder private var basePicker: some View {
+        let origin = baseChoices.originDefault ?? "origin's default branch"
+        if baseChoices.hasOrigin, let current = baseChoices.current {
+            Picker("Start from", selection: $base) {
+                Text("\(origin) (fetched first)").tag(WorktreeBase.originDefault)
+                Text("\(current) (checked out here)").tag(WorktreeBase.current)
+            }
+        } else if baseChoices.hasOrigin {
+            LabeledContent("Start from") { Text("\(origin) (fetched first)") }
+        } else if let current = baseChoices.current {
+            LabeledContent("Start from") { Text(current) }
+        }
     }
 
     /// The name the session will get, chosen as `createSession` chooses its title.
@@ -291,9 +310,11 @@ struct NewSessionSheet: View {
         let dir = folder
         repoError = nil
         guard !dir.isEmpty else { repoRoot = nil; useWorktree = false; return }
-        let (root, found, project) = await Task.detached { () -> (String?, WorktreeMaker, String?) in
-            guard let root = Worktree.repoRoot(dir) else { return (nil, .git(include: false), nil) }
-            return (root, WorktreeMaker.find(folder: dir, root: root), WorktreeHooks.mainCheckout(dir) ?? root)
+        let none = BaseChoices(hasOrigin: false, originDefault: nil, current: nil)
+        let (root, found, project, choices) = await Task.detached { () -> (String?, WorktreeMaker, String?, BaseChoices) in
+            guard let root = Worktree.repoRoot(dir) else { return (nil, .git(include: false), nil, none) }
+            return (root, WorktreeMaker.find(folder: dir, root: root), WorktreeHooks.mainCheckout(dir) ?? root,
+                    Worktree.baseChoices(root))
         }.value
         guard !Task.isCancelled, dir == folder else { return }
         repoRoot = root
@@ -304,6 +325,8 @@ struct NewSessionSheet: View {
             branchEdited = false
             branch = Worktree.defaultBranch(forName: sessionTitle, pattern: pattern)
         }
+        baseChoices = choices
+        base = choices.available(.originDefault)
         guard let root else { useWorktree = false; return }
         // Default to a worktree when another open session already works in this repo. Planning an idea always uses one.
         useWorktree = ideaID != nil || model.panes.contains { pane in
@@ -343,6 +366,7 @@ struct NewSessionSheet: View {
             useWorktree: useWorktree && repoRoot != nil,
             name: name.trimmingCharacters(in: .whitespacesAndNewlines),
             branch: useWorktree ? chosenBranch : nil,
+            base: baseChoices.available(base),
             permissionMode: permissionMode,
             firstMessage: firstMessage,
             ideaID: ideaID,

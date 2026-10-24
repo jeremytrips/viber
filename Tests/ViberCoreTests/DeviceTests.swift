@@ -399,6 +399,45 @@ final class DeviceArtifactTests: XCTestCase {
         XCTAssertNil(DeviceArtifact.detect(in: "nothing here"))
         XCTAssertEqual(DeviceArtifact.app("/x/Debug-iphonesimulator/MyApp.app").label, "Run MyApp.app on device")
     }
+
+    static let devClient = "exp+nexus://expo-development-client/?url=http%3A%2F%2F192.168.1.20%3A8081"
+
+    func testDetectsDevelopmentBuildLinks() {
+        // `expo start --dev-client` in a terminal: chalk underlines the URL.
+        XCTAssertEqual(DeviceArtifact.detect(in: "› Scan the QR code above to open in a development build.\n› Metro: \u{1B}[4m\(Self.devClient)\u{1B}[24m\n› Web: http://localhost:8081"),
+                       .devClient(Self.devClient))
+        // Narrow terminals wrap the URL onto its own line; `--ios` prints it with the simulator's name.
+        XCTAssertEqual(DeviceArtifact.detect(in: "› Metro:\n\u{1B}[4m\(Self.devClient)\u{1B}[24m"), .devClient(Self.devClient))
+        XCTAssertEqual(DeviceArtifact.detect(in: "› Opening \(Self.devClient) on iPhone 17"), .devClient(Self.devClient))
+        let tunnel = "exp+nexus://expo-development-client/?url=https%3A%2F%2Fabc-anonymous-8081.exp.direct"
+        XCTAssertEqual(DeviceArtifact.detect(in: "› Metro: \(tunnel)"), .devClient(tunnel))
+        let custom = "nexus://expo-development-client/?url=http%3A%2F%2F127.0.0.1%3A8081"
+        XCTAssertEqual(DeviceArtifact.detect(in: "› Metro: \(custom)"), .devClient(custom), "--scheme nexus")
+        XCTAssertEqual(DeviceArtifact.detect(in: "myexp://expo-development-client/?url=http%3A%2F%2F127.0.0.1%3A8081"),
+                       .devClient("myexp://expo-development-client/?url=http%3A%2F%2F127.0.0.1%3A8081"), "not exp:// inside a longer scheme")
+        XCTAssertNil(DeviceArtifact.detect(in: "exp+nexus://expo-development-client/"), "no dev server to load")
+        XCTAssertEqual(DeviceArtifact.devClient(Self.devClient).label, "Open in the development build on device")
+    }
+
+    func testTheLastLinkWins() {
+        let expoGo = "› Metro: \u{1B}[4mexp://192.168.1.20:8081\u{1B}[24m"
+        let devBuild = "› Metro: \u{1B}[4m\(Self.devClient)\u{1B}[24m"
+        // `s` in `expo start` switches between Expo Go and a development build, then prints the new link.
+        XCTAssertEqual(DeviceArtifact.detect(in: "\(expoGo)\n› Switching to --dev-client\n\(devBuild)"), .devClient(Self.devClient))
+        XCTAssertEqual(DeviceArtifact.detect(in: "\(devBuild)\n› Switching to --go\n\(expoGo)"), .expo("exp://192.168.1.20:8081"))
+        XCTAssertEqual(DeviceArtifact.detect(in: "exp://10.0.0.1:8081\nexp://10.0.0.2:8081"), .expo("exp://10.0.0.2:8081"))
+        XCTAssertEqual(DeviceArtifact.detect(in: "/a/Debug-iphonesimulator/First.app\n/b/Debug-iphonesimulator/Second.app"),
+                       .app("/b/Debug-iphonesimulator/Second.app"))
+        // A link beats a build wherever it is: opening the link also loads the JavaScript from Metro.
+        XCTAssertEqual(DeviceArtifact.detect(in: "› Opening \(Self.devClient) on iPhone 17\n/x/Debug-iphonesimulator/NEXUS.app"),
+                       .devClient(Self.devClient))
+    }
+
+    func testNoAppForALink() {
+        XCTAssertEqual(Simctl.noAppMessage(for: Self.devClient), "No app on the simulator opens exp+nexus:// links. Install the development build first.")
+        XCTAssertEqual(Simctl.noAppMessage(for: "exp://192.168.1.20:8081"), "No app on the simulator opens exp:// links. Install Expo Go first.")
+        XCTAssertEqual(Simctl.noAppMessage(for: "myapp://home"), "No app on the simulator opens myapp:// links. Install the app first.")
+    }
 }
 
 /// Boots a real simulator. Run with VIBER_LIVE_TEST=1 (needs Xcode and an iOS runtime).

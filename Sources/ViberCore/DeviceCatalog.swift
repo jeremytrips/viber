@@ -121,11 +121,15 @@ public enum DeviceArtifact: Equatable, Sendable {
     case apk(String)
     /// An `exp://` URL that opens the project in Expo Go.
     case expo(String)
+    /// A link that opens the project in its development build, as `expo start --dev-client` prints it:
+    /// `exp+<slug>://expo-development-client/?url=<encoded dev server URL>`, or with another scheme the app registers.
+    case devClient(String)
 
     public var label: String {
         switch self {
         case .app(let path), .apk(let path): return "Run \((path as NSString).lastPathComponent) on device"
         case .expo: return "Open in Expo Go on device"
+        case .devClient: return "Open in the development build on device"
         }
     }
 
@@ -134,22 +138,36 @@ public enum DeviceArtifact: Equatable, Sendable {
         switch self {
         case .app: return .ios
         case .apk: return .android
-        case .expo: return nil
+        case .expo, .devClient: return nil
         }
     }
 
-    /// The last simulator app, Android build or Expo URL the output mentions.
+    /// The last simulator app, Android build or Expo URL the output mentions; an Expo URL wins over a build.
+    /// The last Expo URL counts because Expo prints it again when it switches between Expo Go and a development build.
     public static func detect(in text: String) -> DeviceArtifact? {
         let plain = text.replacingOccurrences(of: "\u{1B}\\[[0-9;]*[A-Za-z]", with: "", options: .regularExpression)
-        if let range = plain.range(of: #"exp://[A-Za-z0-9.\-]+(?::\d{2,5})?(?:/[^\s"'`<>)\]]*)?"#, options: [.regularExpression, .backwards]) {
-            return .expo(String(plain[range]))
+        if let match = lastMatch(expoLink, in: plain), let range = Range(match.range, in: plain) {
+            let url = String(plain[range])
+            return match.range(at: 1).location != NSNotFound ? .devClient(url) : .expo(url)
         }
-        if let range = plain.range(of: #"/[^\s"'`<>]*-iphonesimulator/[^\s"'`<>/]+\.app(?=[\s"'`<>/]|$)"#, options: [.regularExpression, .backwards]) {
+        if let match = lastMatch(#"/[^\s"'`<>]*-iphonesimulator/[^\s"'`<>/]+\.app(?=[\s"'`<>/]|$)"#, in: plain),
+           let range = Range(match.range, in: plain) {
             return .app(String(plain[range]))
         }
-        if let range = plain.range(of: #"/[^\s"'`<>]*/build/outputs/apk/[^\s"'`<>]*?\.apk(?=[\s"'`<>]|$)"#, options: [.regularExpression, .backwards]) {
+        if let match = lastMatch(#"/[^\s"'`<>]*/build/outputs/apk/[^\s"'`<>]*?\.apk(?=[\s"'`<>]|$)"#, in: plain),
+           let range = Range(match.range, in: plain) {
             return .apk(String(plain[range]))
         }
         return nil
+    }
+
+    /// Group 1 is a development build's link, group 2 an Expo Go URL. Neither starts inside a longer scheme,
+    /// so `myexp://…` is not taken for `exp://…`.
+    static let expoLink = #"(?<![A-Za-z0-9+.\-])(?:([A-Za-z][A-Za-z0-9+.\-]*://expo-development-client/?\?url=[^\s"'`<>)\]]+)|(exp://[A-Za-z0-9.\-]+(?::\d{2,5})?(?:/[^\s"'`<>)\]]*)?))"#
+
+    /// `range(of:options:)` ignores `.backwards` for regular expressions and returns the first match.
+    static func lastMatch(_ pattern: String, in text: String) -> NSTextCheckingResult? {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        return regex.matches(in: text, range: NSRange(text.startIndex..., in: text)).last
     }
 }
