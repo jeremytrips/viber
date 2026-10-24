@@ -46,13 +46,21 @@ final class DeviceCatalogTests: XCTestCase {
         XCTAssertEqual(DeviceCatalog.preferred(devices)?.id, "B2")
     }
 
-    func testSimctlArguments() {
+    func testSimctlArguments() throws {
         XCTAssertEqual(Simctl.launchArguments("U", app: "com.x", arguments: ["-a"], terminateRunning: true),
                        ["launch", "--terminate-running-process", "U", "com.x", "-a"])
         XCTAssertEqual(Simctl.logArguments("U", process: "My \"App\"", seconds: 30),
                        ["spawn", "U", "log", "show", "--last", "30s", "--style", "compact",
                         "--predicate", #"process == "My \"App\"" OR subsystem == "My \"App\"""#])
         XCTAssertEqual(Simctl.logArguments("U", process: nil, seconds: 0).suffix(4), ["--last", "1s", "--style", "compact"])
+        XCTAssertEqual(Simctl.settingArguments("U", .appearance(dark: true)), ["ui", "U", "appearance", "dark"])
+        XCTAssertEqual(Simctl.settingArguments("U", .location(latitude: 52.3731, longitude: -4.5)), ["location", "U", "set", "52.373100,-4.500000"])
+        XCTAssertEqual(Simctl.settingArguments("U", .grant(.contacts_limited, app: "com.x")), ["privacy", "U", "grant", "contacts-limited", "com.x"])
+        XCTAssertNil(Simctl.settingArguments("U", .grant(.camera, app: "com.x")))
+        let clean = try XCTUnwrap(Simctl.settingArguments("U", .statusBar(clean: true)))
+        XCTAssertEqual(Array(clean.prefix(5)), ["status_bar", "U", "override", "--time", "9:41"])
+        XCTAssertEqual(clean.firstIndex(of: "--operatorName").map { clean[$0 + 1] }, "")
+        XCTAssertEqual(Simctl.settingArguments("U", .statusBar(clean: false)), ["status_bar", "U", "clear"])
     }
 }
 
@@ -130,6 +138,12 @@ final class FakeDevice: DeviceDriver {
     func openURL(_ url: String) async throws {}
     var logText = "Timestamp Ty Process\nline one\nline two"
     func logs(process: String?, seconds: Int) async throws -> String { logText }
+    var settings: [DeviceSetting] = []
+    var failingSetting: DeviceSetting?
+    func set(_ setting: DeviceSetting) async throws {
+        if setting == failingSetting { throw DeviceError.failed("Could not \(setting.what): no.") }
+        settings.append(setting)
+    }
     func settle(afterAction: Bool) async {}
 }
 
@@ -257,6 +271,30 @@ final class DeviceToolboxTests: XCTestCase {
         XCTAssertTrue(gone.isError)
     }
 
+    func testSetAppliesSettingsInOrderAndChecksInputFirst() async throws {
+        let host = host()
+        let result = await DeviceToolbox.call("device_set", ["status_bar": "clean", "grant": ["photos", "location"], "app_id": "com.x",
+                                                             "latitude": 52.3731, "longitude": 4.8922, "appearance": "dark"], host: host)
+        XCTAssertEqual(result.text, "Changed: dark appearance; location 52.3731, 4.8922; granted photos, location to com.x; clean status bar.\nDevice: iPhone 17 Pro · iOS 26.5")
+        let driver = try XCTUnwrap(host.drivers["P"])
+        XCTAssertEqual(driver.settings, [.appearance(dark: true), .location(latitude: 52.3731, longitude: 4.8922),
+                                         .grant(.photos, app: "com.x"), .grant(.location, app: "com.x"), .statusBar(clean: true)])
+        let single = await DeviceToolbox.call("device_set", ["grant": "contacts-limited", "app_id": "com.x"], host: host)
+        XCTAssertTrue(single.text.hasPrefix("Changed: granted contacts_limited to com.x."), single.text)
+        driver.settings = []
+        for bad: JSON in [[:], ["latitude": 1], ["latitude": 120, "longitude": 0], ["grant": ["photos"]], ["grant": ["teleport"], "app_id": "com.x"],
+                          ["appearance": "sepia"], ["status_bar": "messy"], ["appearance": "dark", "grant": ["camera"], "app_id": "com.x"]] {
+            let result = await DeviceToolbox.call("device_set", bad, host: host)
+            XCTAssertTrue(result.isError, "\(bad): \(result.text)")
+        }
+        XCTAssertEqual(driver.settings, [], "a bad argument changes nothing")
+        let camera = await DeviceToolbox.call("device_set", ["grant": ["camera"], "app_id": "com.x"], host: host)
+        XCTAssertEqual(camera.text, "iOS simulators can't grant camera (simctl privacy has no such service). Nothing was changed.")
+        driver.failingSetting = .grant(.photos, app: "com.x")
+        let partial = await DeviceToolbox.call("device_set", ["appearance": "light", "grant": ["photos"], "app_id": "com.x"], host: host)
+        XCTAssertEqual(partial.text, "Could not grant photos to com.x: no. Already changed: light appearance.")
+    }
+
     func testPolicy() {
         let sim = DeviceInfo(id: "P", name: "iPhone", platform: .ios, kind: .simulator, os: "iOS 26.5", state: .booted)
         let phone = DeviceInfo(id: "X", name: "Pixel", platform: .android, kind: .physical, os: "Android 15", state: .booted)
@@ -274,6 +312,10 @@ final class DeviceToolboxTests: XCTestCase {
         XCTAssertFalse(allow("device_open", phone))
         XCTAssertFalse(allow("device_tap", phone, chose: true))
         XCTAssertTrue(allow("device_list", phone))
+        // Changing settings is an action: automatic on a simulator when actions are, never on a phone.
+        XCTAssertTrue(allow("device_set", sim))
+        XCTAssertFalse(allow("device_set", sim, actions: false))
+        XCTAssertFalse(allow("device_set", phone, chose: true))
     }
 
     func testTargetMirrorsOpenAndResolve() {
@@ -308,6 +350,10 @@ final class DeviceToolboxTests: XCTestCase {
         XCTAssertFalse(devices.tools.contains { $0.name.hasPrefix("preview_") })
         XCTAssertEqual(ToolSummary.displayName("mcp__viber__device_open_url"), "Device · open url")
         XCTAssertEqual(ToolSummary.summary(name: "mcp__viber__device_press", input: ["button": "volume_up"]), "volume up")
+        XCTAssertEqual(ToolSummary.summary(name: "mcp__viber__device_set", input: ["appearance": "dark", "latitude": 52.37, "longitude": 4.89,
+                                                                              "grant": ["photos", "location"], "app_id": "com.x", "status_bar": "clean"]),
+                       "dark · 52.37, 4.89 · photos, location · clean status bar")
+        XCTAssertTrue(devices.tools.contains { $0.name == "device_set" })
     }
 }
 
@@ -366,5 +412,31 @@ final class LiveSimctlTests: XCTestCase {
         XCTAssertGreaterThan(png.count, 10_000)
         let after = try await Simctl.devices()
         XCTAssertTrue(after.first { $0.id == phone.id }?.isBooted == true)
+    }
+
+    func testSettings() async throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["VIBER_LIVE_TEST"] == "1", "set VIBER_LIVE_TEST=1 to run")
+        let devices = try await Simctl.devices()
+        let phone = try XCTUnwrap(devices.first { $0.isBooted && $0.isPhone } ?? DeviceCatalog.match("iPhone 17", in: devices), "no iPhone simulator")
+        try await Simctl.boot(phone.id)
+        func appearance() async -> String { await Simctl.run(["ui", phone.id, "appearance"]).stdout.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let before = await appearance()
+        let keep = ProcessInfo.processInfo.environment["VIBER_KEEP_SETTINGS"] == "1"
+        defer {
+            if !keep {
+                // Put the simulator back the way it was.
+                _ = Shell.run("xcrun", ["simctl", "ui", phone.id, "appearance", before == "dark" ? "dark" : "light"])
+                _ = Shell.run("xcrun", ["simctl", "status_bar", phone.id, "clear"])
+                _ = Shell.run("xcrun", ["simctl", "location", phone.id, "clear"])
+            }
+        }
+        try await Simctl.set(phone.id, .appearance(dark: true))
+        let dark = await appearance()
+        XCTAssertEqual(dark, "dark")
+        try await Simctl.set(phone.id, .statusBar(clean: true))
+        let overrides = await Simctl.run(["status_bar", phone.id, "list"]).stdout
+        XCTAssertTrue(overrides.contains("9:41"), overrides)
+        try await Simctl.set(phone.id, .location(latitude: 52.3731, longitude: 4.8922))
+        try await Simctl.set(phone.id, .grant(.location, app: "com.apple.Maps"))
     }
 }
