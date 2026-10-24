@@ -28,8 +28,8 @@ Launch Viber from /Applications and allow notifications when asked. Notification
 ## Features
 
 - **Sessions sidebar**: every open session with its state (working, waiting for you, finished, failed). Sessions started outside Viber show up too.
-- **Chat**: streamed replies, tool calls summarized inline, Claude's thinking folded into a row you can open, stop with ⌘.
-- **Agents**: each subagent Claude starts gets a card. While it runs, the card shows its last step, tool count, tokens and time, and a Stop button. A background agent stays running after the turn that started it. When it ends, its report shows on the card, Markdown-formatted and cut to a preview you can expand. Open the card to see the prompt Claude gave it and every tool call it made. When a background agent finishes, Claude reads its report in a turn of its own, which shows as working. Permission requests from an agent say which agent asks. Resumed sessions rebuild the cards from the agents' own transcripts.
+- **Chat**: streamed replies, tool calls summarized inline, Claude's thinking folded into a row you can open, stop with ⌘. Return sends; Shift-Return (or Option-Return) starts a new line. Hover a message to copy it: the button sits left of your messages and in the margin of Claude's (your messages also have Copy Message on right-click).
+- **Agents**: each subagent Claude starts gets a card. While it runs, the card shows its last step, tool count, tokens and time, and a Stop button. A smaller copy of the card stays pinned above the message box until the agent ends, so you can follow it without scrolling. A background agent stays running after the turn that started it. When it ends, its report shows on the card, Markdown-formatted and cut to a preview you can expand. Open the card to see the prompt Claude gave it and every tool call it made. When a background agent finishes, Claude reads its report in a turn of its own, which shows as working. Permission requests from an agent say which agent asks. Resumed sessions rebuild the cards from the agents' own transcripts.
 - **Checklist**: when Claude keeps a task list (`TaskCreate`/`TaskUpdate`, or `TodoWrite` on older setups), it stays pinned above the message box until everything on it is done. Claude Code only offers these tools to current models when `CLAUDE_CODE_ENABLE_TODO_TOOLS=1` is set (for example under `env` in `~/.claude/settings.json`).
 - **Rewind files**: hover a message you sent (or right-click it) and choose rewind to put files back the way they were before it, like Esc Esc → restore code in the terminal. Viber shows which files would change and asks first; the conversation itself is left as it is.
 - **Images and files**: paste (⌘V), drop or attach (paperclip) images to send them with a message; they are scaled to at most 2000 px. Other files and folders are mentioned as `@path`, and typing `@` offers the project's files (from `git ls-files`).
@@ -102,6 +102,7 @@ Launch Viber from /Applications and allow notifications when asked. Notification
 | ⌘J | Next session waiting for you |
 | ⌘1–⌘9 | Select session 1–9 |
 | ⌘. | Stop Claude |
+| ⇧↩ | New line in the message box |
 | ⌘⇧O | Open folder in VS Code |
 | ⌘⇧W | Close session |
 | ⌘⇧R | Resume a past session |

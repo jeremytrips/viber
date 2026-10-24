@@ -14,7 +14,7 @@ struct ComposerView: View {
     @State private var menuDismissed = false
     @State private var fileMenuDismissed = false
     @State private var dropTargeted = false
-    @State private var pasteMonitor: Any?
+    @State private var keyMonitor: Any?
     @FocusState private var focused: Bool
 
     private var suggestions: [SlashCommand] {
@@ -80,11 +80,11 @@ struct ComposerView: View {
         .frame(maxWidth: .infinity)
         .onAppear {
             focused = true
-            installPasteMonitor()
+            installKeyMonitor()
         }
         .onDisappear {
-            if let pasteMonitor { NSEvent.removeMonitor(pasteMonitor) }
-            pasteMonitor = nil
+            if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+            keyMonitor = nil
         }
         .onChange(of: pane.pickedElements.count) { old, new in if new > old { focused = true } }
         // Screenshots attached from the device panel.
@@ -258,7 +258,7 @@ struct ComposerView: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(canSend ? Color.accentColor : Color.secondary)
                 .disabled(!canSend)
-                .help("Send (Return)")
+                .help("Send (Return). Shift-Return starts a new line.")
         }
         .font(.caption)
         .padding(.horizontal, 10).padding(.bottom, 8)
@@ -367,11 +367,18 @@ struct ComposerView: View {
     }
 
     /// ⌘V with files or an image on the pasteboard attaches them; text pastes as usual.
-    private func installPasteMonitor() {
-        guard pasteMonitor == nil else { return }
-        pasteMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            guard focused, event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
-                  event.charactersIgnoringModifiers == "v" else { return event }
+    /// Shift-Return starts a new line, as Option-Return does; Return alone sends.
+    private func installKeyMonitor() {
+        guard keyMonitor == nil else { return }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard focused else { return event }
+            let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            // Return or the keypad's Enter. The field editor inserts at the cursor, replacing any selection.
+            if modifiers == .shift, [36, 76].contains(event.keyCode), let editor = event.window?.firstResponder as? NSTextView {
+                editor.insertNewlineIgnoringFieldEditor(nil)
+                return nil
+            }
+            guard modifiers == .command, event.charactersIgnoringModifiers == "v" else { return event }
             let board = NSPasteboard.general
             if let urls = board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty {
                 add(urls)

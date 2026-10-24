@@ -13,6 +13,7 @@ struct PaneView: View {
                 VStack(spacing: 0) {
                     ChatList(pane: pane, readOnly: false)
                     ChecklistPanel(pane: pane)
+                    RunningAgentsPanel(pane: pane)
                     ComposerView(pane: pane)
                 }
                 .frame(minWidth: 320, maxWidth: .infinity)
@@ -155,6 +156,8 @@ struct ChatList: View {
     init(chat: ChatTranscript) { self.pane = nil; self.readOnlyChat = chat; self.readOnly = true }
 
     private var chat: ChatTranscript { pane?.chat ?? readOnlyChat ?? ChatTranscript() }
+    /// A scroll to the bottom is queued.
+    @State private var following = false
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -176,10 +179,23 @@ struct ChatList: View {
                 .padding(.horizontal, 24).padding(.vertical, 20)
                 .frame(maxWidth: .infinity)
             }
-            .onAppear { proxy.scrollTo("bottom", anchor: .bottom) }
-            .onChange(of: chat.items.count) { withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("bottom", anchor: .bottom) } }
-            .onChange(of: chat.streamingText) { proxy.scrollTo("bottom", anchor: .bottom) }
-            .onChange(of: chat.state) { proxy.scrollTo("bottom", anchor: .bottom) }
+            .onAppear { follow(proxy) }
+            .onChange(of: chat.items.count) { follow(proxy) }
+            .onChange(of: chat.streamingText) { follow(proxy) }
+            .onChange(of: chat.state) { follow(proxy) }
+        }
+    }
+
+    /// Scrolls to the latest message. Scrolling lays out the whole conversation, which is slow when it is long,
+    /// so changes in quick succession (each word of a reply) share one scroll. The short wait also lets a chat
+    /// you just switched to lay out first; scrolling right away left it at the top.
+    private func follow(_ proxy: ScrollViewProxy) {
+        guard !following else { return }
+        following = true
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(80))
+            following = false
+            proxy.scrollTo("bottom", anchor: .bottom)
         }
     }
 }
@@ -222,21 +238,24 @@ struct ChatItemView: View {
     var body: some View {
         switch item.kind {
         case .user(let text):
+            let shown = ElementReference.displayText(text)
             HStack(alignment: .center, spacing: 6) {
                 Spacer(minLength: 60)
+                CopyButton(text: shown).opacity(hovering ? 1 : 0)
                 if rewindable {
                     Button(action: rewind) { Image(systemName: "arrow.uturn.backward.circle") }
                         .buttonStyle(.plain).foregroundStyle(.secondary)
                         .opacity(hovering ? 1 : 0)
                         .help("Rewind files to before this message")
                 }
-                Text(ElementReference.displayText(text))
+                Text(shown)
                     .textSelection(.enabled)
                     .padding(.horizontal, 13).padding(.vertical, 9)
                     .background(RoundedRectangle(cornerRadius: 14).fill(Color(nsColor: .quaternaryLabelColor).opacity(0.6)))
             }
             .onHover { hovering = $0 }
             .contextMenu {
+                Button("Copy Message") { CopyButton.copy(shown) }
                 if rewindable { Button("Rewind Files to Before This Message…", action: rewind) }
             }
         case .attachments(let labels):
@@ -249,7 +268,7 @@ struct ChatItemView: View {
                 }
             }
         case .assistant(let text):
-            MarkdownText(text: text)
+            AssistantMessage(text: text)
         case .thinking(let text):
             FoldedText(title: "Thinking", icon: "brain", text: text)
         case .tool(let call):
@@ -297,6 +316,52 @@ struct ChatItemView: View {
                 .foregroundStyle(isError ? Color.red : Color.secondary)
                 .textSelection(.enabled)
         }
+    }
+}
+
+/// One of Claude's messages, with a copy button in the left margin while the pointer is over it.
+struct AssistantMessage: View {
+    let text: String
+    @State private var hovering = false
+
+    private static let gutter: CGFloat = 22
+
+    var body: some View {
+        MarkdownText(text: text)
+            .padding(.leading, Self.gutter)
+            .overlay(alignment: .topLeading) {
+                if hovering { CopyButton(text: text).padding(.top, 1) }
+            }
+            // The margin counts as part of the message, so the pointer can reach the button.
+            .contentShape(Rectangle())
+            .onHover { hovering = $0 }
+            .padding(.leading, -Self.gutter)
+    }
+}
+
+/// Copies a message's text, then shows a check for a moment.
+struct CopyButton: View {
+    let text: String
+    @State private var copied = false
+
+    static func copy(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    var body: some View {
+        Button {
+            Self.copy(text)
+            copied = true
+            Task {
+                try? await Task.sleep(for: .seconds(1.5))
+                copied = false
+            }
+        } label: {
+            Image(systemName: copied ? "checkmark" : "doc.on.doc")
+        }
+        .buttonStyle(.plain).foregroundStyle(.secondary)
+        .help(copied ? "Copied" : "Copy message")
     }
 }
 
@@ -413,6 +478,8 @@ struct AgentCard: View {
     let call: ToolCall
     let run: AgentRun
     let pane: Pane?
+    /// The smaller copy pinned above the message box while the agent runs: no report or steps.
+    var compact = false
     @State private var showSteps = false
     @State private var showFullReport = false
     @State private var reportHeight: CGFloat = 0
@@ -459,7 +526,7 @@ struct AgentCard: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: compact ? 3 : 8) {
             HStack(spacing: 8) {
                 if run.isRunning { ProgressView().controlSize(.mini) } else { Circle().fill(color).frame(width: 7, height: 7) }
                 Text(run.type ?? "Agent").fontWeight(.semibold)
@@ -479,7 +546,7 @@ struct AgentCard: View {
                 Text(latest).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)
                     .lineLimit(1).truncationMode(.middle)
             }
-            if let report = run.report, !report.isEmpty {
+            if !compact, let report = run.report, !report.isEmpty {
                 let cut = !showFullReport && reportHeight > Self.reportPreview
                 MarkdownText(text: report)
                     .foregroundStyle(run.status == "failed" ? Color.red : Color.primary)
@@ -499,15 +566,17 @@ struct AgentCard: View {
                     .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .textBackgroundColor)))
                 if reportHeight > Self.reportPreview { ExpandButton(expanded: $showFullReport) }
             }
-            Button { withAnimation(.easeOut(duration: 0.12)) { showSteps.toggle() } } label: {
-                HStack(spacing: 6) {
-                    Text(stepsLabel)
-                    Image(systemName: showSteps ? "chevron.down" : "chevron.right").font(.caption2)
+            if !compact {
+                Button { withAnimation(.easeOut(duration: 0.12)) { showSteps.toggle() } } label: {
+                    HStack(spacing: 6) {
+                        Text(stepsLabel)
+                        Image(systemName: showSteps ? "chevron.down" : "chevron.right").font(.caption2)
+                    }
+                    .font(.caption).foregroundStyle(.secondary)
+                    .contentShape(Rectangle())
                 }
-                .font(.caption).foregroundStyle(.secondary)
-                .contentShape(Rectangle())
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
             if showSteps {
                 VStack(alignment: .leading, spacing: 6) {
                     if let prompt = call.input["prompt"]?.string { FoldedText(title: "Prompt", icon: "text.bubble", text: prompt) }
@@ -517,9 +586,36 @@ struct AgentCard: View {
                 .overlay(alignment: .leading) { Rectangle().fill(Color(nsColor: .separatorColor)).frame(width: 2) }
             }
         }
-        .padding(12)
+        .padding(.horizontal, compact ? 10 : 12).padding(.vertical, compact ? 7 : 12)
         .background(RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .controlBackgroundColor)))
         .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(color.opacity(0.35)))
+    }
+}
+
+/// Subagents still at work, pinned above the message box as smaller copies of their cards in the chat.
+struct RunningAgentsPanel: View {
+    let pane: Pane
+
+    var body: some View {
+        let agents = pane.chat.runningAgents
+        if !agents.isEmpty {
+            ViewThatFits(in: .vertical) {
+                cards(agents)
+                ScrollView { cards(agents) }
+            }
+            .frame(maxHeight: 180)
+            .frame(maxWidth: 760)
+            .padding(.horizontal, 24).padding(.top, 6)
+            .frame(maxWidth: .infinity)
+        }
+    }
+
+    private func cards(_ agents: [ToolCall]) -> some View {
+        VStack(spacing: 6) {
+            ForEach(agents, id: \.id) { call in
+                if let run = call.agent { AgentCard(call: call, run: run, pane: pane, compact: true) }
+            }
+        }
     }
 }
 

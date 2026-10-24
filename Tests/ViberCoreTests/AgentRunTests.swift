@@ -90,6 +90,7 @@ final class AgentRunTests: XCTestCase {
 
         chat.apply(["type": "result", "subtype": "success", "is_error": false])
         XCTAssertEqual(chat.state, .finished)
+        XCTAssertEqual(chat.runningAgents.map(\.id), ["toolu_agent"], "still running after the turn that started it")
         chat.apply(subagent("toolu_agent", [["type": "tool_use", "id": "toolu_ls", "name": "Bash", "input": ["command": "ls -1 | wc -l"]]], id: "s1"))
         chat.apply(subagent("toolu_agent", [["type": "tool_result", "tool_use_id": "toolu_ls", "content": "2"]], id: "r1", role: "user"))
         chat.apply(subagent("toolu_agent", [["type": "text", "text": "I found 2 entries."]], id: "s2"))
@@ -100,6 +101,7 @@ final class AgentRunTests: XCTestCase {
         chat.apply(["type": "system", "subtype": "task_notification", "task_id": "a98", "tool_use_id": "toolu_agent", "status": "completed",
                     "summary": "Found 2", "usage": ["total_tokens": 24146, "tool_uses": 2, "duration_ms": 5000]])
         guard let finished = card(chat) else { return XCTFail() }
+        XCTAssertTrue(chat.runningAgents.isEmpty)
         XCTAssertTrue(finished.call.done)
         XCTAssertEqual(finished.run.status, "completed")
         XCTAssertEqual(finished.run.report, "I found 2 entries.", "the agent's own last message beats the summary")

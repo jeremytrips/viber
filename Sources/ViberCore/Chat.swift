@@ -237,6 +237,14 @@ public struct ChatTranscript {
         }
     }
 
+    /// Agent calls whose subagent is still at work, oldest first. Agents an agent started are left to its card.
+    public var runningAgents: [ToolCall] {
+        items.compactMap { item in
+            guard case .tool(let call) = item.kind, call.agent?.isRunning == true else { return nil }
+            return call
+        }
+    }
+
     // MARK: Outgoing
 
     /// A message typed by the user. Images go first, as the API recommends, then the text.
