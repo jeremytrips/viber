@@ -138,7 +138,7 @@ Skills in `plugin/skills`:
 
 - `/cleanup`: checks that the branch is merged (including squash merges via `gh`), with no uncommitted changes, unpushed commits, or stashes, then asks Viber to remove the worktree and branch. It only does so for the worktree Viber made for this session (`viber worktree`), wherever it is and whatever its branch is called. It never deletes anything itself.
 - `/ship`: reviews the diff, runs the project's required checks, commits, asks before pushing, then opens a PR with `gh` on GitHub, or gives the pull or merge request link on Bitbucket and GitLab. Commit format, checks and push rules from the project's `CLAUDE.md`, `AGENT.md` or skills come first.
-- `/sync`: rebases onto the latest base branch and resolves conflicts carefully; never force-pushes without asking.
+- `/sync`: brings the branch up to date with the latest base branch: rebases a branch that was never pushed, and merges the base into one that was (unless the project's rules say otherwise). Resolves conflicts carefully, runs the project's checks, and never force-pushes without asking.
 - `/handoff`: writes a status note (goal, done, in progress, next steps, open questions, files touched).
 - `/idea`: saves an idea, follow-up or out-of-scope task to the project's idea list, written so a later session can plan it without this conversation. Claude also uses it on its own when it notices work outside the current task.
 
