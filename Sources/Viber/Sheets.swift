@@ -67,6 +67,39 @@ struct NewSessionSheet: View {
     @State private var permissionMode = "auto"
     @State private var firstMessage = ""
     @State private var didLoad = false
+    @State private var maker = WorktreeMaker.git(include: false)
+
+    /// What makes the worktree for this folder: git, or the project's WorktreeCreate hook.
+    enum WorktreeMaker: Equatable {
+        case git(include: Bool)
+        case hooks([HookCommand])
+        case unsupported(String)
+
+        var note: String {
+            switch self {
+            case .git(let include):
+                return "Creates .claude/worktrees/<name> on branch viber/<name>, so parallel sessions don't collide"
+                    + (include ? ". Copies the gitignored files .worktreeinclude lists." : "")
+            case .hooks:
+                return "The project's WorktreeCreate hook makes it, as in Claude Code. Its output shows in the sidebar while it runs."
+            case .unsupported(let message):
+                return message
+            }
+        }
+
+        var blocksWorktree: Bool { if case .unsupported = self { return true }; return false }
+
+        /// Looks up the folder's Claude Code settings. Blocking: run it off the main thread.
+        static func find(folder: String, root: String) -> WorktreeMaker {
+            do {
+                let hooks = try WorktreeHooks.hooks(.create, folder: folder)
+                if !hooks.isEmpty { return .hooks(hooks) }
+            } catch {
+                return .unsupported(error.localizedDescription)
+            }
+            return .git(include: FileManager.default.fileExists(atPath: (root as NSString).appendingPathComponent(WorktreeInclude.fileName)))
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -105,9 +138,19 @@ struct NewSessionSheet: View {
                     } else {
                         Toggle(isOn: $useWorktree) {
                             Text("Run in a new git worktree")
-                            worktreeNote("Creates .claude/worktrees/<name> on branch viber/<name>, so parallel sessions don't collide")
+                            worktreeNote(maker.note)
                         }
                         .disabled(repoRoot == nil)
+                        if useWorktree, case .hooks(let hooks) = maker {
+                            LabeledContent("Setup") {
+                                VStack(alignment: .trailing, spacing: 2) {
+                                    ForEach(hooks, id: \.display) { hook in
+                                        Text(hook.display).font(.callout.monospaced()).lineLimit(2).truncationMode(.middle)
+                                            .textSelection(.enabled).help("From \(hook.source)")
+                                    }
+                                }
+                            }
+                        }
                     }
                     TextField("Name", text: $name, prompt: Text("Session name (used for the branch)"))
                     Picker("Mode", selection: $permissionMode) {
@@ -131,7 +174,7 @@ struct NewSessionSheet: View {
                     .keyboardShortcut(.cancelAction)
                 Button("Start", action: start)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(folder.isEmpty)
+                    .disabled(folder.isEmpty || (useWorktree && repoRoot != nil && maker.blocksWorktree))
             }
             .padding(16)
         }
@@ -151,17 +194,22 @@ struct NewSessionSheet: View {
 
     /// The worktree row's subtitle, or the error from creating a repository.
     private func worktreeNote(_ text: String) -> Text {
-        guard let repoError else { return Text(text) }
-        return Text(repoError).foregroundStyle(.red)
+        if let repoError { return Text(repoError).foregroundStyle(.red) }
+        if case .unsupported = maker { return Text(text).foregroundStyle(.red) }
+        return Text(text)
     }
 
     private func checkRepo() async {
         let dir = folder
         repoError = nil
         guard !dir.isEmpty else { repoRoot = nil; useWorktree = false; return }
-        let root = await Task.detached { Worktree.repoRoot(dir) }.value
+        let (root, found) = await Task.detached { () -> (String?, WorktreeMaker) in
+            guard let root = Worktree.repoRoot(dir) else { return (nil, .git(include: false)) }
+            return (root, WorktreeMaker.find(folder: dir, root: root))
+        }.value
         guard !Task.isCancelled, dir == folder else { return }
         repoRoot = root
+        maker = found
         guard let root else { useWorktree = false; return }
         // Default to a worktree when another open session already works in this repo.
         useWorktree = model.panes.contains { pane in
