@@ -123,6 +123,21 @@ struct WorktreeJobRow: View {
     }
 }
 
+/// A job row's right-click menu. Its own view, like `PaneRowMenu`: it reads the job's phase.
+struct WorktreeJobMenu: View {
+    @Environment(AppModel.self) private var model
+    let job: WorktreeJob
+
+    var body: some View {
+        if job.isRunning {
+            Button(job.isRemoval ? "Stop Teardown" : "Stop Setup") { model.cancel(job) }
+        } else {
+            Button("Try Again") { model.retry(job) }
+            Button("Dismiss") { model.dismiss(job) }
+        }
+    }
+}
+
 /// The detail view of a worktree being set up or removed: what runs, its output, and what to do if it failed.
 struct WorktreeJobView: View {
     @Environment(AppModel.self) private var model

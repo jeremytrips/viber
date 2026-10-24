@@ -39,14 +39,7 @@ struct SidebarView: View {
                     ForEach(group.jobs) { job in
                         WorktreeJobRow(job: job)
                             .tag(Target.job(job.id))
-                            .contextMenu {
-                                if job.isRunning {
-                                    Button(job.isRemoval ? "Stop Teardown" : "Stop Setup") { model.cancel(job) }
-                                } else {
-                                    Button("Try Again") { model.retry(job) }
-                                    Button("Dismiss") { model.dismiss(job) }
-                                }
-                            }
+                            .contextMenu { WorktreeJobMenu(job: job) }
                     }
                 } header: {
                     ProjectHeader(name: group.name, path: group.path)
