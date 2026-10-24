@@ -362,6 +362,7 @@ final class WorktreeRemoveHookTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: info.path))
         XCTAssertTrue(output.text.contains("docker compose down"))
         XCTAssertTrue(summary.contains("Deleted branch team/x"), summary)
+        XCTAssertFalse(summary.contains("docker compose down"), "The hook's last line is in the log, not the summary: \(summary)")
     }
 
     func testFailingHookKeepsTheWorktree() async throws {
