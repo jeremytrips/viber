@@ -1,0 +1,65 @@
+import Foundation
+
+/// USB HID keyboard usages (page 7), which is what simulators take as key input.
+public enum HIDKeyboard {
+    public static let returnKey: UInt32 = 0x28
+    public static let escape: UInt32 = 0x29
+    public static let delete: UInt32 = 0x2A
+    public static let tab: UInt32 = 0x2B
+    public static let leftControl: UInt32 = 0xE0
+    public static let leftShift: UInt32 = 0xE1
+    public static let leftOption: UInt32 = 0xE2
+    public static let leftCommand: UInt32 = 0xE3
+    public static let a: UInt32 = 0x04
+    public static let v: UInt32 = 0x19
+
+    public struct Stroke: Equatable, Sendable {
+        public var usage: UInt32
+        public var shift: Bool
+    }
+
+    private static let unshifted: [Character: UInt32] = {
+        var map: [Character: UInt32] = [:]
+        for (i, c) in "abcdefghijklmnopqrstuvwxyz".enumerated() { map[c] = 0x04 + UInt32(i) }
+        for (i, c) in "1234567890".enumerated() { map[c] = 0x1E + UInt32(i) }
+        let rest: [Character: UInt32] = ["\n": 0x28, "\t": 0x2B, " ": 0x2C, "-": 0x2D, "=": 0x2E, "[": 0x2F, "]": 0x30,
+                                         "\\": 0x31, ";": 0x33, "'": 0x34, "`": 0x35, ",": 0x36, ".": 0x37, "/": 0x38]
+        map.merge(rest) { $1 }
+        return map
+    }()
+
+    private static let shifted: [Character: UInt32] = {
+        var map: [Character: UInt32] = [:]
+        for (i, c) in "ABCDEFGHIJKLMNOPQRSTUVWXYZ".enumerated() { map[c] = 0x04 + UInt32(i) }
+        for (i, c) in "!@#$%^&*()".enumerated() { map[c] = 0x1E + UInt32(i) }
+        let rest: [Character: UInt32] = ["_": 0x2D, "+": 0x2E, "{": 0x2F, "}": 0x30, "|": 0x31, ":": 0x33, "\"": 0x34,
+                                         "~": 0x35, "<": 0x36, ">": 0x37, "?": 0x38]
+        map.merge(rest) { $1 }
+        return map
+    }()
+
+    /// Keystrokes for `text` on a US layout, or nil when some character has no key (accents, emoji…): paste those instead.
+    public static func strokes(for text: String) -> [Stroke]? {
+        var strokes: [Stroke] = []
+        for character in text.replacingOccurrences(of: "\r\n", with: "\n") {
+            if let usage = unshifted[character] { strokes.append(Stroke(usage: usage, shift: false)) }
+            else if let usage = shifted[character] { strokes.append(Stroke(usage: usage, shift: true)) }
+            else { return nil }
+        }
+        return strokes
+    }
+
+    /// The HID usage for a Mac virtual key code (`NSEvent.keyCode`), the physical key the user pressed.
+    public static func usage(macKeyCode code: UInt16) -> UInt32? { macKeys[code] }
+
+    private static let macKeys: [UInt16: UInt32] = [
+        0x00: 0x04, 0x0B: 0x05, 0x08: 0x06, 0x02: 0x07, 0x0E: 0x08, 0x03: 0x09, 0x05: 0x0A, 0x04: 0x0B, 0x22: 0x0C,
+        0x26: 0x0D, 0x28: 0x0E, 0x25: 0x0F, 0x2E: 0x10, 0x2D: 0x11, 0x1F: 0x12, 0x23: 0x13, 0x0C: 0x14, 0x0F: 0x15,
+        0x01: 0x16, 0x11: 0x17, 0x20: 0x18, 0x09: 0x19, 0x0D: 0x1A, 0x07: 0x1B, 0x10: 0x1C, 0x06: 0x1D,
+        0x12: 0x1E, 0x13: 0x1F, 0x14: 0x20, 0x15: 0x21, 0x17: 0x22, 0x16: 0x23, 0x1A: 0x24, 0x1C: 0x25, 0x19: 0x26, 0x1D: 0x27,
+        0x24: 0x28, 0x35: 0x29, 0x33: 0x2A, 0x30: 0x2B, 0x31: 0x2C, 0x1B: 0x2D, 0x18: 0x2E, 0x21: 0x2F, 0x1E: 0x30,
+        0x2A: 0x31, 0x29: 0x33, 0x27: 0x34, 0x32: 0x35, 0x2B: 0x36, 0x2F: 0x37, 0x2C: 0x38, 0x39: 0x39,
+        0x75: 0x4C, 0x7C: 0x4F, 0x7B: 0x50, 0x7D: 0x51, 0x7E: 0x52, 0x73: 0x4A, 0x77: 0x4D, 0x74: 0x4B, 0x79: 0x4E,
+        0x38: 0xE1, 0x3C: 0xE5, 0x3B: 0xE0, 0x3E: 0xE4, 0x3A: 0xE2, 0x3D: 0xE6, 0x37: 0xE3, 0x36: 0xE7,
+    ]
+}

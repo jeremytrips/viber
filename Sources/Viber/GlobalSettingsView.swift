@@ -33,6 +33,8 @@ private struct GeneralSettings: View {
     @AppStorage(Prefs.newSessionMode) private var newSessionMode = "auto"
     @AppStorage(Prefs.previewTools) private var previewTools = true
     @AppStorage(Prefs.previewLocalActions) private var previewLocalActions = true
+    @AppStorage(Prefs.deviceTools) private var deviceTools = true
+    @AppStorage(Prefs.deviceActions) private var deviceActions = true
 
     var body: some View {
         Form {
@@ -56,6 +58,16 @@ private struct GeneralSettings: View {
                 Text("Browser preview")
             } footer: {
                 Text("Screenshots, the console and page outlines never ask. The first setting applies to sessions started afterwards.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section {
+                Toggle("Give Claude tools to see and use devices", isOn: $deviceTools)
+                Toggle("Let Claude tap, type, install and launch apps on simulators without asking", isOn: $deviceActions)
+                    .disabled(!deviceTools)
+            } header: {
+                Text("Simulators")
+            } footer: {
+                Text("Screenshots, screen outlines and logs never ask. The first setting applies to sessions started afterwards.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }

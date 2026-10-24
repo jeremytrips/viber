@@ -68,14 +68,17 @@ public struct ShellResult {
     public var status: Int32
     public var stdout: String
     public var stderr: String
+    /// Standard output as bytes, for commands that print binary data such as images.
+    public var stdoutData = Data()
     public var ok: Bool { status == 0 }
     public var output: String { stdout.trimmingCharacters(in: .whitespacesAndNewlines) }
 }
 
 public enum Shell {
-    /// Run a command to completion. Blocking: call it off the main thread.
+    /// Run a command to completion. Blocking: call it off the main thread. `input` is written to its standard input.
     @discardableResult
-    public static func run(_ tool: String, _ arguments: [String], cwd: String? = nil, environment: [String: String]? = nil) -> ShellResult {
+    public static func run(_ tool: String, _ arguments: [String], cwd: String? = nil, environment: [String: String]? = nil,
+                           input: Data? = nil) -> ShellResult {
         guard let path = tool.hasPrefix("/") ? tool : Executables.find(tool) else {
             return ShellResult(status: 127, stdout: "", stderr: "\(tool) not found")
         }
@@ -87,9 +90,16 @@ public enum Shell {
         let out = Pipe(), err = Pipe()
         process.standardOutput = out
         process.standardError = err
-        process.standardInput = FileHandle.nullDevice
+        let stdin = input.map { _ in Pipe() }
+        process.standardInput = stdin ?? FileHandle.nullDevice
         do { try process.run() } catch {
             return ShellResult(status: 126, stdout: "", stderr: error.localizedDescription)
+        }
+        if let stdin, let input {
+            DispatchQueue.global().async {
+                try? stdin.fileHandleForWriting.write(contentsOf: input)
+                try? stdin.fileHandleForWriting.close()
+            }
         }
         // Read both pipes before waiting so a full pipe buffer cannot deadlock the child.
         var outData = Data(), errData = Data()
@@ -101,7 +111,7 @@ public enum Shell {
         process.waitUntilExit()
         return ShellResult(status: process.terminationStatus,
                            stdout: String(decoding: outData, as: UTF8.self),
-                           stderr: String(decoding: errData, as: UTF8.self))
+                           stderr: String(decoding: errData, as: UTF8.self), stdoutData: outData)
     }
 }
 

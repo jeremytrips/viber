@@ -16,6 +16,15 @@ public enum ToolSummary {
         case "TodoWrite": if let todos = input["todos"]?.array { return "\(todos.count) items" }
         default: break
         }
+        if name.hasPrefix(DeviceToolbox.toolPrefix) {
+            if let device = input["device"]?.string { return device }
+            if let button = input["button"]?.string { return button.replacingOccurrences(of: "_", with: " ") }
+            if let app = input["app_id"]?.string { return app }
+            if let path = input["path"]?.string { return short(path) }
+            if let direction = input["direction"]?.string { return direction }
+            if let x = input["x"]?.double, let y = input["y"]?.double { return "(\(Int(x)),\(Int(y)))" }
+            if let text = input["text"]?.string ?? input["field"]?.string { return firstLine(text, limit: 120) }
+        }
         if let path = input["file_path"]?.string ?? input["notebook_path"]?.string { return short(path) }
         if let command = input["command"]?.string { return firstLine(command, limit: 120) }
         if let pattern = input["pattern"]?.string {
@@ -33,13 +42,14 @@ public enum ToolSummary {
         return ""
     }
 
-    /// How a tool is named in the chat: "Preview · click" for Viber's preview, "server · tool" for other MCP tools.
+    /// How a tool is named in the chat: "Preview · click" and "Device · tap" for Viber's own tools, "server · tool" for other MCP tools.
     public static func displayName(_ name: String) -> String {
         guard name.hasPrefix("mcp__") else { return name }
         let parts = name.dropFirst(5).components(separatedBy: "__")
         guard parts.count >= 2 else { return name }
         let tool = parts.dropFirst().joined(separator: "__")
         if parts[0] == "viber", tool.hasPrefix("preview_") { return "Preview · " + tool.dropFirst("preview_".count) }
+        if parts[0] == "viber", tool.hasPrefix("device_") { return "Device · " + tool.dropFirst("device_".count).replacingOccurrences(of: "_", with: " ") }
         return "\(parts[0]) · \(tool)"
     }
 

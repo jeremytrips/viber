@@ -87,6 +87,13 @@ struct ComposerView: View {
             pasteMonitor = nil
         }
         .onChange(of: pane.pickedElements.count) { old, new in if new > old { focused = true } }
+        // Screenshots attached from the device panel.
+        .onChange(of: pane.pendingAttachments.count) {
+            guard !pane.pendingAttachments.isEmpty else { return }
+            attachments += pane.pendingAttachments
+            pane.pendingAttachments = []
+            focused = true
+        }
     }
 
     /// Elements picked in the preview; they go out with the next message.
@@ -95,7 +102,7 @@ struct ComposerView: View {
             HStack(spacing: 6) {
                 ForEach(pane.pickedElements) { reference in
                     HStack(spacing: 5) {
-                        Image(systemName: "cursorarrow.rays").font(.caption)
+                        Image(systemName: reference.device == nil ? "cursorarrow.rays" : "iphone").font(.caption)
                         Text(reference.label).font(.caption).lineLimit(1)
                         Button { pane.pickedElements.removeAll { $0.id == reference.id } } label: {
                             Image(systemName: "xmark").font(.caption2.weight(.semibold))
@@ -104,7 +111,7 @@ struct ComposerView: View {
                     }
                     .padding(.horizontal, 8).padding(.vertical, 4)
                     .background(Capsule().fill(Color.accentColor.opacity(0.12)))
-                    .help(reference.selector)
+                    .help(reference.device ?? reference.selector)
                 }
             }
             .padding(.horizontal, 10).padding(.top, 9)

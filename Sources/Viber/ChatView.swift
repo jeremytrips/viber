@@ -20,6 +20,10 @@ struct PaneView: View {
                     PreviewView(pane: pane, preview: preview)
                         .frame(minWidth: 300, idealWidth: 640, maxWidth: .infinity)
                 }
+                if pane.showDevice {
+                    DevicePanel(pane: pane, hub: model.deviceHub)
+                        .frame(minWidth: 260, idealWidth: 380, maxWidth: .infinity)
+                }
             }
         }
         .background(Color(nsColor: .textBackgroundColor))
@@ -95,6 +99,10 @@ struct PaneHeader: View {
                     }
             }
             .help(pane.showPreview ? "Hide the browser preview (⇧⌘B)" : "Show the browser preview (⇧⌘B)")
+            Button { pane.toggleDevice() } label: {
+                Image(systemName: "iphone").foregroundStyle(pane.showDevice ? Color.accentColor : Color.primary)
+            }
+            .help(pane.showDevice ? "Hide the device (⇧⌘D)" : "Show a simulator beside the chat (⇧⌘D)")
             Button { model.openSettings(.model, in: pane) } label: { Image(systemName: "slider.horizontal.3") }
                 .help("Session settings: MCP, context, permissions, hooks, model (⌥⌘,)")
             Button("Open in VS Code") { model.openInVSCode(pane.cwd) }
@@ -335,6 +343,13 @@ struct ToolRow: View {
         return PreviewURL.detect(in: String(result.prefix(4000))).first
     }
 
+    /// A simulator build or an Expo URL in a command's output, offered for the device panel.
+    private var artifact: DeviceArtifact? {
+        guard pane != nil, call.name == "Bash" || call.name.hasSuffix("Output") || call.name == "Monitor",
+              let result = call.result else { return nil }
+        return DeviceArtifact.detect(in: String(result.suffix(6000)))
+    }
+
     private var detail: Bool { !ToolSummary.diff(name: call.name, input: call.input).isEmpty || !(call.result ?? "").isEmpty || call.name == "Bash" }
 
     var body: some View {
@@ -345,6 +360,11 @@ struct ToolRow: View {
                     Button { pane.openPreview(url) } label: { Label("Open in preview", systemImage: "safari") }
                         .buttonStyle(.borderless).font(.caption)
                         .help("Open \(PreviewURL.short(url)) in the browser preview beside the chat")
+                }
+                if let artifact, let pane {
+                    Button { pane.runOnDevice(artifact) } label: { Label(artifact.label, systemImage: "iphone") }
+                        .buttonStyle(.borderless).font(.caption)
+                        .help("Show the simulator beside the chat and run this there")
                 }
             }
             if !call.done, let progress = call.progress, !progress.isEmpty {

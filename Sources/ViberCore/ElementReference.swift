@@ -1,8 +1,12 @@
 import Foundation
 
-/// An element the user picked in the preview, attached to their next message.
+/// An element the user picked in the preview or on a device, attached to their next message.
 public struct ElementReference: Equatable, Identifiable, Sendable {
     public var id = UUID()
+    /// The device it was picked on ("iPhone 17 · iOS 26.5"), or nil for the browser preview.
+    public var device: String?
+    /// For devices: the app in front.
+    public var app: String?
     public var url: String
     public var selector: String
     public var tag: String
@@ -35,6 +39,21 @@ public struct ElementReference: Equatable, Identifiable, Sendable {
         line = payload["line"]?.int
     }
 
+    /// An element of a device's screen. `selector` holds its accessibility identifier, `rect` its frame in points.
+    public init(device: String, app: String?, element: UIElement) {
+        self.device = device
+        self.app = app
+        url = ""
+        selector = element.identifier ?? ""
+        tag = element.role
+        text = Self.squash(element.label ?? element.value ?? "", limit: 120)
+        html = ""
+        rect = (Int(element.frame.minX), Int(element.frame.minY), Int(element.frame.width), Int(element.frame.height))
+        styles = []
+        components = []
+        if let value = element.value, value != element.label { styles = [("value", Self.squash(value, limit: 80))] }
+    }
+
     /// "src/App.tsx" from "/Users/me/app/src/App.tsx", "http://localhost:5173/src/App.tsx?t=1", or "/@fs/Users/me/app/src/App.tsx".
     public static func relativePath(_ raw: String, cwd: String) -> String? {
         var path = raw
@@ -54,6 +73,9 @@ public struct ElementReference: Equatable, Identifiable, Sendable {
 
     /// Short text for the composer chip: `button "Save" · SaveButton · App.tsx:24`.
     public var label: String {
+        if device != nil {
+            return ([text.isEmpty ? tag : "\(tag) \"\(Self.squash(text, limit: 32))\""] + (app.map { [$0] } ?? [])).joined(separator: " · ")
+        }
         var parts = [text.isEmpty ? tag : "\(tag) \"\(Self.squash(text, limit: 32))\""]
         if let component = components.first { parts.append(component) }
         if let file { parts.append(line.map { "\((file as NSString).lastPathComponent):\($0)" } ?? (file as NSString).lastPathComponent) }
@@ -62,6 +84,14 @@ public struct ElementReference: Equatable, Identifiable, Sendable {
 
     /// What goes into the message so Claude can find the element in the page and in the code.
     public var block: String {
+        if let device {
+            var open = "<device-element device=\"\(Self.attribute(device))\""
+            if let app { open += " app=\"\(Self.attribute(app))\"" }
+            var what = tag + (text.isEmpty ? "" : " \"\(text)\"")
+            if !selector.isEmpty { what += " id=\(selector)" }
+            if let value = styles.first(where: { $0.0 == "value" })?.1 { what += " value=\"\(value)\"" }
+            return [open + ">", what, "frame: \(rect.width)×\(rect.height) at \(rect.x),\(rect.y) (points)", "</device-element>"].joined(separator: "\n")
+        }
         var lines = ["<preview-element url=\"\(url)\" selector=\"\(selector.replacingOccurrences(of: "\"", with: "'"))\">", html]
         let location = file.map { file in line.map { "\(file):\($0)" } ?? file }
         if !components.isEmpty {
@@ -84,10 +114,15 @@ public struct ElementReference: Equatable, Identifiable, Sendable {
 
     /// A sent message as the chat shows it: each element block shrinks to one line.
     public static func displayText(_ message: String) -> String {
-        guard message.contains("<preview-element") else { return message }
-        return message.replacingOccurrences(of: #"<preview-element url="[^"]*" selector="([^"]*)">[\s\S]*?</preview-element>"#,
-                                            with: "◎ $1", options: .regularExpression)
+        guard message.contains("<preview-element") || message.contains("<device-element") else { return message }
+        return message
+            .replacingOccurrences(of: #"<preview-element url="[^"]*" selector="([^"]*)">[\s\S]*?</preview-element>"#,
+                                  with: "◎ $1", options: .regularExpression)
+            .replacingOccurrences(of: #"<device-element [^>]*>\n([^\n]*)[\s\S]*?</device-element>"#,
+                                  with: "◎ $1", options: .regularExpression)
     }
+
+    static func attribute(_ s: String) -> String { s.replacingOccurrences(of: "\"", with: "'") }
 
     static func squash(_ s: String, limit: Int) -> String {
         let one = s.split(whereSeparator: \.isWhitespace).joined(separator: " ")

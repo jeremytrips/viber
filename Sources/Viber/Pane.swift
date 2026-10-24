@@ -13,10 +13,16 @@ struct PaneRecord: Codable {
     /// Folders added with /add-dir, re-applied the same way.
     var extraDirs: [String]?
     var preview: PreviewRecord?
+    var device: DeviceRecord?
 }
 
 struct PreviewRecord: Codable {
     var url: String?
+    var open: Bool
+}
+
+struct DeviceRecord: Codable {
+    var id: String?
     var open: Bool
 }
 
@@ -50,8 +56,16 @@ final class Pane: Identifiable {
     var previewURL: URL?
     /// Created the first time the preview is shown or Claude uses a preview tool.
     private(set) var preview: PreviewController?
-    /// Elements picked in the preview, attached to the next message.
+    /// Elements picked in the preview or on the device, attached to the next message.
     var pickedElements: [ElementReference] = []
+    /// Whether the device panel shows beside the chat.
+    var showDevice = false { didSet { if showDevice != oldValue { onPersist?() } } }
+    /// The simulator this session shows and its device tools drive, kept across relaunches.
+    var deviceID: String? { didSet { if deviceID != oldValue { onPersist?() } } }
+    /// The device tool Claude is running, for the device panel.
+    var deviceActivity: String?
+    /// Images the device panel attached, picked up by the composer.
+    var pendingAttachments: [ImageAttachment] = []
     var extraDirs: [String] = []
     /// The project's files for `@` mentions, loaded when first asked for.
     var files: [String]?
@@ -61,8 +75,11 @@ final class Pane: Identifiable {
     /// sees a re-login; the next message restarts it.
     private(set) var authFailed = false
     @ObservationIgnored private var process: ClaudeProcess?
-    /// Preview tool calls in flight, by control request ID.
+    /// Preview and device tool calls in flight, by control request ID.
     @ObservationIgnored private var mcpTasks: [String: Task<Void, Never>] = [:]
+    /// Viber's MCP server as this process was told about it.
+    @ObservationIgnored private var mcpServer: SdkMcpServer?
+    @ObservationIgnored weak var deviceHub: DeviceHub?
     /// Something worth saving in panes.json changed.
     @ObservationIgnored var onPersist: (() -> Void)?
     @ObservationIgnored var onStateChange: ((Pane, PaneState) -> Void)?
@@ -81,12 +98,15 @@ final class Pane: Identifiable {
         extraDirs = record.extraDirs ?? []
         previewURL = record.preview?.url.flatMap(URL.init(string:))
         showPreview = record.preview?.open ?? false
+        deviceID = record.device?.id
+        showDevice = record.device?.open ?? false
     }
 
     var record: PaneRecord {
         let preview = previewURL != nil || showPreview ? PreviewRecord(url: previewURL?.absoluteString, open: showPreview) : nil
+        let device = deviceID != nil || showDevice ? DeviceRecord(id: deviceID, open: showDevice) : nil
         return PaneRecord(id: id, title: title, spec: spec, worktree: worktree, sessionRules: sessionRules.isEmpty ? nil : sessionRules,
-                          extraDirs: extraDirs.isEmpty ? nil : extraDirs, preview: preview)
+                          extraDirs: extraDirs.isEmpty ? nil : extraDirs, preview: preview, device: device)
     }
     var state: PaneState { chat.state }
     var profileLabel: String { spec.profile ?? "Default login" }
@@ -111,9 +131,12 @@ final class Pane: Identifiable {
             p.onMessage = { [weak self] message in self?.handle(message) }
             p.onExit = { [weak self] status, stderr in self?.exited(status: status, stderr: stderr) }
             process = p
-            // The browser preview's tools, served from this app over the same stdio channel.
-            let mcp = Prefs.bool(Prefs.previewTools)
-                ? SdkMcp.initializeFields([PreviewToolbox.serverName: ["disableAutoBackground": true, "timeout": 60000]]) : [:]
+            // The browser preview's and device panel's tools, served from this app over the same stdio channel.
+            // Booting a simulator for the first time can take a minute or two, hence the long timeout.
+            let preview = Prefs.bool(Prefs.previewTools), device = Prefs.bool(Prefs.deviceTools)
+            mcpServer = preview || device ? ViberMcp.server(preview: preview, device: device) : nil
+            let mcp = mcpServer != nil
+                ? SdkMcp.initializeFields([PreviewToolbox.serverName: ["disableAutoBackground": true, "timeout": 180000]]) : [:]
             p.send(chat.request("initialize", mcp))
             if !sessionRules.isEmpty || !extraDirs.isEmpty { p.send(chat.setSessionPermissions(rules: sessionRules, directories: extraDirs)) }
         } catch {
@@ -282,6 +305,70 @@ final class Pane: Identifiable {
         preview = nil
     }
 
+    // MARK: Device
+
+    var deviceController: SimulatorController? { deviceID.flatMap { deviceHub?.controllers[$0] } }
+
+    func toggleDevice() {
+        showDevice.toggle()
+    }
+
+    /// Shows `device` in this session's panel (booting it if asked) and makes it the one Claude's device tools use.
+    func chooseDevice(_ device: DeviceInfo, boot: Bool) {
+        guard let hub = deviceHub else { return }
+        deviceID = device.id
+        showDevice = true
+        let controller = hub.controller(for: device)
+        if boot, !device.isBooted {
+            Task {
+                try? await controller.boot()
+                _ = try? await hub.refresh()
+            }
+        }
+    }
+
+    func toggleDevicePicking() {
+        guard let controller = deviceController else { return }
+        if controller.picking { controller.picking = false; return }
+        // The controller is shared between sessions: picks go to the session that started picking.
+        controller.onPick = { [weak self] element, app in
+            guard let self, let controller = self.deviceController else { return }
+            self.pickedElements.append(ElementReference(device: controller.device.label, app: app, element: element))
+        }
+        controller.picking = true
+        controller.screenView.window?.makeFirstResponder(controller.screenView)
+    }
+
+    /// Runs a build or an Expo URL on this session's device, or on a running (else the newest) simulator.
+    func runOnDevice(_ artifact: DeviceArtifact) {
+        guard let hub = deviceHub else { return }
+        Task {
+            do {
+                let devices = try await hub.refresh(maxAge: 2)
+                guard let device = deviceID.flatMap({ id in devices.first { $0.id == id } }) ?? DeviceCatalog.preferred(devices) else {
+                    throw DeviceError.failed("No simulators found. Install an iOS simulator runtime in Xcode → Settings → Components.")
+                }
+                let driver = try use(device, reveal: true)
+                try await driver.boot()
+                switch artifact {
+                case .app(let path):
+                    let id = try await driver.install(path)
+                    try await driver.launch(id, arguments: [], terminateRunning: true)
+                case .expo(let url):
+                    try await driver.openURL(url)
+                }
+            } catch {
+                chat.note(error.localizedDescription, isError: true)
+            }
+        }
+    }
+
+    func attachDeviceScreenshot() {
+        guard let controller = deviceController, let png = controller.screenshotPNG(),
+              let image = ImageAttachment(data: png, label: "\(controller.device.name) screenshot") else { return }
+        pendingAttachments.append(image)
+    }
+
     /// Local URLs printed by recent tool calls, newest first: usually the dev server Claude started.
     var recentLocalURLs: [URL] {
         var urls: [URL] = []
@@ -292,16 +379,21 @@ final class Pane: Identifiable {
         return urls
     }
 
-    /// Answers a preview tool call. Replies only to the process that asked, in case it restarted meanwhile.
+    /// Answers a preview or device tool call. Replies only to the process that asked, in case it restarted meanwhile.
     private func answer(_ call: SdkMcp.Incoming) {
-        guard call.server == PreviewToolbox.serverName else {
+        guard call.server == PreviewToolbox.serverName, let server = mcpServer else {
             process?.send(ChatTranscript.controlError(call.requestID, "Viber has no MCP server named \(call.server)."))
             return
         }
         let asker = process
         mcpTasks[call.requestID] = Task { [weak self] in
             guard let self else { return }
-            let reply = await PreviewToolbox.server.handle(call.message) { name, args in
+            let reply = await server.handle(call.message) { name, args in
+                if name.hasPrefix("device_") {
+                    self.deviceActivity = DeviceToolbox.activity(name)
+                    defer { self.deviceActivity = nil }
+                    return await DeviceToolbox.call(name, args, host: self)
+                }
                 let preview = self.ensurePreview()
                 preview.activity = PreviewToolbox.activity(name)
                 defer { preview.activity = nil }
@@ -313,13 +405,17 @@ final class Pane: Identifiable {
         }
     }
 
-    /// Viber approves its own preview tools: looking always, acting on local pages when the setting allows.
+    /// Viber approves its own tools: looking always, acting on local pages and on simulators when the settings allow.
     private func previewPermission(_ message: JSON) -> JSON? {
         guard message["type"]?.string == "control_request", let request = message["request"],
               request["subtype"]?.string == "can_use_tool", let requestID = message["request_id"]?.string,
-              let tool = request["tool_name"]?.string, tool.hasPrefix(PreviewToolbox.toolPrefix),
-              PreviewPolicy.autoAllow(tool: tool, pageURL: preview?.pageURL ?? previewURL,
-                                      actionsOnLocalPages: Prefs.bool(Prefs.previewLocalActions)) else { return nil }
+              let tool = request["tool_name"]?.string, tool.hasPrefix(PreviewToolbox.toolPrefix) else { return nil }
+        let allowed = tool.hasPrefix(DeviceToolbox.toolPrefix)
+            ? DevicePolicy.autoAllow(tool: tool, device: deviceID.flatMap { deviceHub?.device($0) },
+                                     actionsOnVirtualDevices: Prefs.bool(Prefs.deviceActions))
+            : PreviewPolicy.autoAllow(tool: tool, pageURL: preview?.pageURL ?? previewURL,
+                                      actionsOnLocalPages: Prefs.bool(Prefs.previewLocalActions))
+        guard allowed else { return nil }
         var response: [String: JSON] = ["behavior": "allow", "updatedInput": request["input"] ?? [:]]
         if let toolUseID = request["tool_use_id"]?.string { response["toolUseID"] = .string(toolUseID) }
         return ChatTranscript.controlSuccess(requestID, .object(response))
@@ -348,5 +444,21 @@ final class Pane: Identifiable {
         // The folder name encoding is the CLI's business; fall back to a search by file name.
         guard let dirs = try? fm.contentsOfDirectory(at: Paths.projects, includingPropertiesForKeys: nil) else { return nil }
         return dirs.map { $0.appendingPathComponent("\(sessionID).jsonl") }.first { fm.fileExists(atPath: $0.path) }
+    }
+}
+
+extension Pane: DeviceHost {
+    func listDevices() async throws -> [DeviceInfo] {
+        guard let deviceHub else { throw DeviceError.failed("Devices are not available.") }
+        return try await deviceHub.refresh(maxAge: 2)
+    }
+
+    var sessionDeviceID: String? { deviceID }
+
+    func use(_ device: DeviceInfo, reveal: Bool) throws -> DeviceDriver {
+        guard let deviceHub else { throw DeviceError.failed("Devices are not available.") }
+        deviceID = device.id
+        if reveal { showDevice = true }
+        return deviceHub.controller(for: device)
     }
 }

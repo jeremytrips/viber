@@ -65,6 +65,17 @@ struct ViberApp: App {
                     .keyboardShortcut("c", modifiers: [.command, .shift])
                     .disabled(model.selectedPane?.showPreview != true || model.selectedPane?.preview?.pageURL == nil)
                 Divider()
+                Button(model.selectedPane?.showDevice == true ? "Hide Device" : "Show Device") {
+                    model.selectedPane?.toggleDevice()
+                }
+                .keyboardShortcut("d", modifiers: [.command, .shift])
+                .disabled(model.selectedPane == nil)
+                Button("Device Home") { Task { try? await model.selectedPane?.deviceController?.press(.home) } }
+                    .keyboardShortcut("h", modifiers: [.command, .shift])
+                    .disabled(model.selectedPane?.showDevice != true || model.selectedPane?.deviceController?.device.isBooted != true)
+                Button("Attach Device Screenshot") { model.selectedPane?.attachDeviceScreenshot() }
+                    .disabled(model.selectedPane?.showDevice != true || model.selectedPane?.deviceController?.isStreaming != true)
+                Divider()
                 ForEach(1..<10) { n in
                     Button("Session \(n)") { model.select(index: n - 1) }.keyboardShortcut(KeyEquivalent(Character("\(n)")))
                 }

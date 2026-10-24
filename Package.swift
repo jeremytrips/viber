@@ -10,7 +10,9 @@ let package = Package(
     ],
     targets: [
         .target(name: "ViberCore"),
-        .executableTarget(name: "Viber", dependencies: ["ViberCore"]),
+        /// Apple's private simulator frameworks, reached through the Objective-C runtime only.
+        .target(name: "SimulatorBridge"),
+        .executableTarget(name: "Viber", dependencies: ["ViberCore", "SimulatorBridge"]),
         .executableTarget(name: "ViberCtl", dependencies: ["ViberCore"]),
         .testTarget(name: "ViberCoreTests", dependencies: ["ViberCore"])
     ]

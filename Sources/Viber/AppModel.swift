@@ -68,6 +68,8 @@ final class AppModel {
     var relayLog = RelayLog()
     var cacheWarning: TimeInterval { TimeInterval(max(Prefs.int(Prefs.cacheWarningMinutes), 1) * 60) }
     var ideas = IdeaList()
+    /// Simulators, shared by every session's device panel and device tools.
+    let deviceHub = DeviceHub()
     /// Ideas whose session is being created, so Plan can't start two.
     var planningIdeas: Set<String> = []
 
@@ -217,6 +219,7 @@ final class AppModel {
         pane.onRelayUpdate = { [weak self] pane, update in self?.relayUpdate(update, in: pane) }
         pane.onOpenURL = { NSWorkspace.shared.open($0) }
         pane.onPersist = { [weak self] in self?.save() }
+        pane.deviceHub = deviceHub
     }
 
     /// Routes composer text: skills go to the CLI, terminal-only commands are handled here.
@@ -595,7 +598,7 @@ final class AppModel {
                 Task { @MainActor in self?.pollExternal(); self?.drainRequests(); self?.pollSignIns() }
             },
             Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-                Task { @MainActor in self?.reloadStatus() }
+                Task { @MainActor in self?.reloadStatus(); self?.deviceHub.reap() }
             }
         ]
         for pane in panes where pane.worktree != nil { refreshDiff(pane) }

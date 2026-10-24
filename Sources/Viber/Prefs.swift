@@ -13,11 +13,16 @@ enum Prefs {
     static let previewTools = "previewTools"
     /// Approve preview clicks, typing and scripts on local pages without a permission card.
     static let previewLocalActions = "previewLocalActions"
+    /// Serve the device panel's MCP tools to sessions started from now on.
+    static let deviceTools = "deviceTools"
+    /// Approve taps, typing, installs and launches on simulators and emulators without a permission card.
+    static let deviceActions = "deviceActions"
 
     static func register() {
         UserDefaults.standard.register(defaults: [
             notifyFinished: true, notifyNeedsYou: true, notifyCache: true, cacheWarningMinutes: 2,
-            newSessionMode: "auto", newSessionModel: "", previewTools: true, previewLocalActions: true
+            newSessionMode: "auto", newSessionModel: "", previewTools: true, previewLocalActions: true,
+            deviceTools: true, deviceActions: true
         ])
     }
 
