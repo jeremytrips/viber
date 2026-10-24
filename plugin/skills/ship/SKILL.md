@@ -23,7 +23,7 @@ Project rules come first. Before committing, look in `CLAUDE.md`, `AGENT.md` or 
 
 ## 3. Push
 
-1. Show what would go out: the branch, the remote (`git remote get-url origin`) and the commits (`git log --oneline @{u}..`, or `git log --oneline origin/<base>..` with no upstream). If the upstream already has them all, skip to step 4.
+1. Show what would go out: the branch, the remote (`git remote get-url origin`) and the commits (`git log --oneline @{u}..`, or `git log --oneline origin/<base>..` with no upstream). If the upstream already has them all, skip to section 4.
 2. Ask the user before pushing, and push only on a yes.
 3. No upstream (`git rev-parse --abbrev-ref @{u}` fails): `git push -u origin HEAD`. Otherwise: `git push`. If it is rejected, do not force-push; suggest running sync first.
 4. Keep the push output: Bitbucket and GitLab print the link that opens the pull request.
