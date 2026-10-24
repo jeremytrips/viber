@@ -99,6 +99,42 @@ final class AdbCatalogTests: XCTestCase {
         XCTAssertTrue(Adb.uiDumpCommand(thorough: false).contains("uiautomator dump --compressed /data/local/tmp/viber-ui.xml"))
     }
 
+    func testSettingCommands() {
+        XCTAssertEqual(Adb.nightModeCommand(dark: true), "cmd uimode night yes")
+        XCTAssertEqual(Adb.geoFixArguments(latitude: 52.3731, longitude: 4.8922), ["emu", "geo", "fix", "4.892200", "52.373100"], "longitude first")
+        XCTAssertEqual(Adb.permissions(for: .camera), ["android.permission.CAMERA"])
+        XCTAssertEqual(Adb.permissions(for: .location_always).last, "android.permission.ACCESS_BACKGROUND_LOCATION")
+        XCTAssertEqual(Adb.permissions(for: .reminders), [])
+        let all = Adb.permissions(for: .all)
+        XCTAssertEqual(Set(all).count, all.count, "no duplicates")
+        for service in PrivacyService.allCases { XCTAssertTrue(Set(Adb.permissions(for: service)).isSubset(of: all), "\(service)") }
+        let clean = Adb.statusBarCommand(clean: true)
+        XCTAssertTrue(clean.hasPrefix("settings put global sysui_demo_allowed 1 && am broadcast -a com.android.systemui.demo -e command enter && "), clean)
+        XCTAssertTrue(clean.contains("-e command clock -e hhmm 0941"))
+        XCTAssertEqual(Adb.statusBarCommand(clean: false), "am broadcast -a com.android.systemui.demo -e command exit")
+    }
+
+    func testRequestedPermissionsFromDumpsys() {
+        let dumpsys = """
+            Packages:
+              Package [com.x] (6fa6d3e):
+                requested permissions:
+                  android.permission.CAMERA
+                  android.permission.READ_EXTERNAL_STORAGE, maxSdkVersion=32
+                install permissions:
+                  android.permission.INTERNET: granted=true
+              Package [com.x] (1b2c3d4):
+                requested permissions:
+                  android.permission.ACCESS_FINE_LOCATION
+                User 0: ceDataInode=0 installed=true
+                  runtime permissions:
+                    android.permission.RECORD_AUDIO: granted=false
+            """
+        XCTAssertEqual(Adb.requestedPermissions(dumpsys: dumpsys),
+                       ["android.permission.CAMERA", "android.permission.READ_EXTERNAL_STORAGE", "android.permission.ACCESS_FINE_LOCATION"])
+        XCTAssertEqual(Adb.requestedPermissions(dumpsys: "Unable to find package: com.nope"), [])
+    }
+
     func testDetectsAPKs() {
         let gradle = "> Task :app:assembleDebug\nAPK: /Users/me/app/app/build/outputs/apk/debug/app-debug.apk\nBUILD SUCCESSFUL in 9s"
         XCTAssertEqual(DeviceArtifact.detect(in: gradle), .apk("/Users/me/app/app/build/outputs/apk/debug/app-debug.apk"))
@@ -266,6 +302,22 @@ final class AndroidToolboxTests: XCTestCase {
         let list = await DeviceToolbox.call("device_list", [:], host: host)
         XCTAssertTrue(list.text.contains("Pixel 8 · Android 17 · running · id Pixel_8"), list.text)
     }
+
+    func testSetOnAndroid() async throws {
+        let pixel = DeviceInfo(id: "Pixel_8", name: "Pixel 8", platform: .android, kind: .emulator, os: "Android 17", state: .booted, serial: "emulator-5554")
+        let phone = DeviceInfo(id: "R58M", name: "Galaxy", platform: .android, kind: .physical, os: "Android 15", state: .booted, serial: "R58M")
+        let host = FakeHost([pixel, phone])
+        let camera = await DeviceToolbox.call("device_set", ["grant": ["camera"], "app_id": "com.x", "latitude": 1, "longitude": 2], host: host)
+        XCTAssertFalse(camera.isError, camera.text)
+        XCTAssertEqual(host.drivers["Pixel_8"]?.settings, [.location(latitude: 1, longitude: 2), .grant(.camera, app: "com.x")])
+        let reminders = await DeviceToolbox.call("device_set", ["grant": ["reminders"], "app_id": "com.x"], host: host)
+        XCTAssertEqual(reminders.text, "Android has no permission matching reminders. Nothing was changed.")
+        host.sessionDeviceID = "R58M"
+        let location = await DeviceToolbox.call("device_set", ["latitude": 1, "longitude": 2], host: host)
+        XCTAssertEqual(location.text, "The location can only be set on simulators and emulators. Nothing was changed.")
+        let dark = await DeviceToolbox.call("device_set", ["appearance": "dark"], host: host)
+        XCTAssertFalse(dark.isError, "a phone can switch to dark mode (after the user approves)")
+    }
 }
 
 /// Drives a running Android emulator. Run with VIBER_LIVE_ANDROID=1 (needs the Android SDK and a booted AVD).
@@ -293,6 +345,49 @@ final class LiveAdbTests: XCTestCase {
         XCTAssertFalse(tree.isEmpty)
         let logs = try await Adb.logs(serial, process: "com.android.settings", seconds: 30)
         XCTAssertFalse(logs.isEmpty)
+    }
+
+    func testSettings() async throws {
+        let (_, serial) = try await runningEmulator()
+        func shell(_ command: String) async -> String { await Adb.run(serial, ["shell", command]).output }
+        let maps = "com.google.android.apps.maps"
+        func mapsHasLocation() async -> Bool { await shell("dumpsys package \(maps)").contains("ACCESS_FINE_LOCATION: granted=true") }
+        let wasDark = await shell("cmd uimode night").contains("yes")
+        let hadLocation = await mapsHasLocation()
+        var failure: Error?
+        do {
+            try await Adb.set(serial, .appearance(dark: true))
+            let night = await shell("cmd uimode night")
+            XCTAssertTrue(night.contains("Night mode: yes"), night)
+            try await Adb.set(serial, .location(latitude: 52.3731, longitude: 4.8922))
+            try await Adb.set(serial, .grant(.location, app: maps))
+            let granted = await mapsHasLocation()
+            XCTAssertTrue(granted)
+            do {
+                try await Adb.set(serial, .grant(.motion, app: "com.android.camera2"))
+                XCTFail("Camera2 doesn't ask for ACTIVITY_RECOGNITION, so nothing can be granted")
+            } catch {
+                XCTAssertTrue(error.localizedDescription.hasPrefix("com.android.camera2 doesn't ask for motion"), error.localizedDescription)
+            }
+            do {
+                try await Adb.set(serial, .grant(.camera, app: "com.example.nope"))
+                XCTFail("not installed")
+            } catch {
+                XCTAssertEqual(error.localizedDescription, "com.example.nope is not installed on the device.")
+            }
+            try await Adb.set(serial, .statusBar(clean: true))
+            let demo = await shell("settings get global sysui_demo_allowed")
+            XCTAssertEqual(demo, "1")
+        } catch {
+            failure = error
+        }
+        if ProcessInfo.processInfo.environment["VIBER_KEEP_SETTINGS"] != "1" {
+            // Put the emulator back the way it was.
+            _ = await shell(Adb.nightModeCommand(dark: wasDark))
+            _ = await shell(Adb.statusBarCommand(clean: false))
+            if !hadLocation { _ = await shell("pm revoke \(maps) android.permission.ACCESS_FINE_LOCATION; pm revoke \(maps) android.permission.ACCESS_COARSE_LOCATION") }
+        }
+        if let failure { throw failure }
     }
 
     func testScrcpyStreamsDecodedFrames() async throws {

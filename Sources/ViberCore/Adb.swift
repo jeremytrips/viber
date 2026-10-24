@@ -435,6 +435,104 @@ public enum Adb {
         return output.split(separator: "\n").filter { $0.localizedCaseInsensitiveContains(process) }.joined(separator: "\n")
     }
 
+    // MARK: Settings
+
+    public static func nightModeCommand(dark: Bool) -> String { "cmd uimode night \(dark ? "yes" : "no")" }
+
+    /// The emulator console takes longitude first. Phones have no console.
+    public static func geoFixArguments(latitude: Double, longitude: Double) -> [String] {
+        ["emu", "geo", "fix", String(format: "%.6f", longitude), String(format: "%.6f", latitude)]
+    }
+
+    /// The runtime permissions a service stands for. The lists span Android versions (READ_EXTERNAL_STORAGE before 13,
+    /// READ_MEDIA_* from 13), and `set` grants the ones the app asks for.
+    public static func permissions(for service: PrivacyService) -> [String] {
+        let names: [String]
+        switch service {
+        case .all:
+            var seen = Set<String>()
+            return PrivacyService.allCases.filter { $0 != .all }.flatMap { permissions(for: $0) }.filter { seen.insert($0).inserted }
+        case .calendar: names = ["READ_CALENDAR", "WRITE_CALENDAR"]
+        case .contacts: names = ["READ_CONTACTS", "WRITE_CONTACTS"]
+        case .contacts_limited: names = ["READ_CONTACTS"]
+        case .location: names = ["ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION"]
+        case .location_always: names = ["ACCESS_FINE_LOCATION", "ACCESS_COARSE_LOCATION", "ACCESS_BACKGROUND_LOCATION"]
+        case .photos: names = ["READ_MEDIA_IMAGES", "READ_MEDIA_VIDEO", "READ_EXTERNAL_STORAGE"]
+        case .media_library: names = ["READ_MEDIA_AUDIO", "READ_EXTERNAL_STORAGE"]
+        case .microphone: names = ["RECORD_AUDIO"]
+        case .motion: names = ["ACTIVITY_RECOGNITION"]
+        case .camera: names = ["CAMERA"]
+        case .notifications: names = ["POST_NOTIFICATIONS"]
+        case .photos_add, .reminders, .siri: names = []
+        }
+        return names.map { "android.permission." + $0 }
+    }
+
+    /// SystemUI's demo mode: a fixed clock, full battery and signal, no notification icons. Android 17's SystemUI ignores
+    /// the mobile part, so the cell type and bars stay real there.
+    public static func statusBarCommand(clean: Bool) -> String {
+        let demo = "am broadcast -a com.android.systemui.demo -e command"
+        guard clean else { return "\(demo) exit" }
+        return ["settings put global sysui_demo_allowed 1", "\(demo) enter", "\(demo) clock -e hhmm 0941",
+                "\(demo) network -e wifi show -e level 4 -e fully true", "\(demo) network -e mobile show -e datatype none -e level 4 -e fully true",
+                "\(demo) battery -e level 100 -e plugged false", "\(demo) notifications -e visible false"].joined(separator: " && ")
+    }
+
+    public static func set(_ serial: String, _ setting: DeviceSetting) async throws {
+        switch setting {
+        case .appearance(let dark):
+            try await shell(serial, nightModeCommand(dark: dark), what: setting.what)
+        case .location(let latitude, let longitude):
+            let result = try await check(serial, geoFixArguments(latitude: latitude, longitude: longitude), timeout: 10, what: setting.what)
+            // The console answers KO and a reason instead of failing.
+            if let ko = result.output.split(whereSeparator: \.isNewline).first(where: { $0.hasPrefix("KO") }) {
+                throw DeviceError.failed("Could not \(setting.what): \(ko)")
+            }
+        case .grant(let service, let app):
+            try await grant(serial, service, app: app)
+        case .statusBar(let clean):
+            try await shell(serial, statusBarCommand(clean: clean), what: setting.what)
+        }
+    }
+
+    /// The permissions in the "requested permissions:" sections of `dumpsys package` (one per installed version of the app).
+    public static func requestedPermissions(dumpsys output: String) -> Set<String> {
+        var found = Set<String>()
+        var sectionIndent: Int?
+        for line in output.split(whereSeparator: \.isNewline) {
+            let indent = line.prefix { $0 == " " }.count
+            let text = line.trimmingCharacters(in: .whitespaces)
+            if text == "requested permissions:" { sectionIndent = indent; continue }
+            guard let section = sectionIndent else { continue }
+            guard indent > section else { sectionIndent = nil; continue }
+            // "android.permission.X" or "android.permission.X, maxSdkVersion=32"
+            if let name = text.split(whereSeparator: { $0 == "," || $0 == " " || $0 == ":" }).first { found.insert(String(name)) }
+        }
+        return found
+    }
+
+    /// Grants the service's permissions that the app asks for in its manifest. `pm grant` quietly does nothing for one
+    /// the app doesn't ask for, so the manifest decides what is granted, and asking for none of them is an error.
+    static func grant(_ serial: String, _ service: PrivacyService, app: String) async throws {
+        let dumpsys = await run(serial, ["shell", "dumpsys package \(quote(app))"], timeout: 20).stdout
+        guard dumpsys.contains("Package [\(app)]") else { throw DeviceError.failed("\(app) is not installed on the device.") }
+        let wanted = permissions(for: service)
+        let requested = requestedPermissions(dumpsys: dumpsys)
+        let asked = wanted.filter(requested.contains)
+        guard !asked.isEmpty else {
+            throw DeviceError.failed("\(app) doesn't ask for \(service.rawValue) in its manifest (none of \(wanted.joined(separator: ", "))), and Android only grants permissions an app asks for.")
+        }
+        var granted = 0, lastError = ""
+        for permission in asked {
+            let result = await run(serial, ["shell", "pm grant \(quote(app)) \(permission)"], timeout: 10)
+            if result.ok, !result.output.contains("Exception") { granted += 1 } else { lastError = result.output }
+        }
+        guard granted == 0 else { return }
+        // pm prints a stack trace; its message is the line naming the exception.
+        let detail = lastError.split(whereSeparator: \.isNewline).first { $0.contains("Exception: ") }.map(String.init) ?? String(lastError.suffix(300))
+        throw DeviceError.failed("Could not grant \(service.rawValue) to \(app): \(detail.trimmingCharacters(in: .whitespaces))")
+    }
+
     // MARK: Screen
 
     public static func screencap(_ serial: String) async throws -> Data {

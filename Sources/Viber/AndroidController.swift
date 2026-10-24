@@ -402,6 +402,8 @@ final class AndroidController: DeviceController {
         try await Adb.logs(try await prepare(), process: process, seconds: seconds)
     }
 
+    func set(_ setting: DeviceSetting) async throws { try await Adb.set(try await prepare(), setting) }
+
     func settle(afterAction: Bool) async {
         _ = try? await prepare()
         _ = await control()
