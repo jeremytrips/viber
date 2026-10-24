@@ -105,6 +105,9 @@ final class AdbCatalogTests: XCTestCase {
         XCTAssertEqual(DeviceArtifact.apk("/x/app-debug.apk").label, "Run app-debug.apk on device")
         XCTAssertEqual(DeviceArtifact.apk("/x/app-debug.apk").platform, .android)
         XCTAssertNil(DeviceArtifact.expo("exp://x").platform)
+        XCTAssertNil(DeviceArtifact.devClient("exp+x://expo-development-client/?url=x").platform)
+        let both = "/a/build/outputs/apk/debug/app-debug.apk\n/a/build/outputs/apk/release/app-release.apk"
+        XCTAssertEqual(DeviceArtifact.detect(in: both), .apk("/a/build/outputs/apk/release/app-release.apk"))
     }
 }
 

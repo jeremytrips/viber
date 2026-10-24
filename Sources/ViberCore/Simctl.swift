@@ -81,7 +81,18 @@ public enum Simctl {
     }
 
     public static func openURL(_ udid: String, _ url: String) async throws {
-        try await check(["openurl", udid, url], what: "open \(url)")
+        do {
+            try await check(["openurl", udid, url], what: "open \(url)")
+        } catch DeviceError.failed(let message) where message.contains("-10814") {
+            // LaunchServices' "application not found" (simctl exits 194): nothing installed handles the scheme.
+            throw DeviceError.failed(noAppMessage(for: url))
+        }
+    }
+
+    static func noAppMessage(for url: String) -> String {
+        let scheme = String(url.prefix { $0 != ":" })
+        let app = scheme == "exp" ? "Expo Go" : scheme.hasPrefix("exp+") ? "the development build" : "the app"
+        return "No app on the simulator opens \(scheme):// links. Install \(app) first."
     }
 
     /// The screen as PNG, without the live stream. Slower (a few hundred ms) but needs nothing private.
