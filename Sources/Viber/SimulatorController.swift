@@ -75,6 +75,9 @@ final class SimulatorController: DeviceController {
             isStreaming = true
             failure = nil
             if let surface = screen.surface { surfaceChanged(surface) }
+            // Xcode 27's dtuhidd starts on demand and can take seconds; starting it now keeps the first click quick.
+            // A failure here stays quiet and shows when input is first used.
+            if input == nil { input = try? SimInputFactory.make(udid: device.id) }
         } catch {
             failure = error.localizedDescription
         }
@@ -301,12 +304,24 @@ final class SimulatorController: DeviceController {
 
     func userTouch(_ phase: TouchPhase, at ratio: CGPoint) {
         lastUsed = Date()
-        do { try readyInput().touch(Self.phase(phase), x: ratio.x, y: ratio.y) } catch {}
+        userInput { try $0.touch(Self.phase(phase), x: ratio.x, y: ratio.y) }
     }
 
     func userKey(_ event: NSEvent, down: Bool) {
         guard let usage = HIDKeyboard.usage(macKeyCode: event.keyCode) else { return }
-        do { try readyInput().key(usage: usage, down: down) } catch {}
+        userInput { try $0.key(usage: usage, down: down) }
+    }
+
+    /// Sends one of the user's touches or keys, and says on the screen why it couldn't be sent. Only assigns when
+    /// the note changes, so mouse moves don't redraw the overlay.
+    private func userInput(_ send: (SimInput) throws -> Void) {
+        do {
+            try send(readyInput())
+            if inputFailure != nil { inputFailure = nil }
+        } catch {
+            let note = error.localizedDescription
+            if inputFailure != note { inputFailure = note }
+        }
     }
 
     /// Mac clipboard text into the simulator, pasted where the cursor is.

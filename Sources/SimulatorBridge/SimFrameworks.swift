@@ -38,12 +38,18 @@ public enum SimFrameworks {
         return dir
     }
 
-    /// CoreSimulator's version, e.g. "1051.55". Xcode 27 (1155 and later) stopped accepting Indigo input.
-    public static var coreSimulatorVersion: Double? {
-        let plist = "/Library/Developer/PrivateFrameworks/CoreSimulator.framework/Versions/A/Resources/Info.plist"
-        guard let info = NSDictionary(contentsOfFile: plist), let version = info["CFBundleVersion"] as? String else { return nil }
-        let parts = version.split(separator: ".").prefix(2).joined(separator: ".")
-        return Double(parts)
+    /// The loaded CoreSimulator's version, e.g. "1051.55". An Xcode install replaces the framework on disk, so the
+    /// running process can differ from the plist; what's loaded is what talks to the simulators.
+    public static var coreSimulatorVersion: String? {
+        guard (try? load()) != nil, let simDevice = NSClassFromString("SimDevice") else { return nil }
+        return Bundle(for: simDevice).infoDictionary?["CFBundleVersion"] as? String
+    }
+
+    /// From CoreSimulator 1155.4 (Xcode 27) the guest ignores Indigo input and runs `dtuhidd` instead.
+    /// Compared numerically, so 1155.10 is above 1155.4.
+    static func usesDTUHID(_ coreSimulatorVersion: String?) -> Bool {
+        guard let coreSimulatorVersion else { return false }
+        return coreSimulatorVersion.compare("1155.4", options: .numeric) != .orderedAscending
     }
 
     public static func load() throws {
