@@ -18,12 +18,13 @@ final class DeviceHub {
         if Date().timeIntervalSince(listedAt) < maxAge, listError == nil { return devices }
         if let listing { return try await listing.value }
         let task = Task { () throws -> [DeviceInfo] in
-            // Android listing never throws: a Mac without the SDK simply has no Android devices.
+            // Android and iPhone listing never throw: a Mac without the SDK or a phone simply has none of those.
             async let android = Adb.devices()
+            async let phones = Devicectl.devices()
             do {
-                return DeviceCatalog.sorted(try await Simctl.devices() + (await android))
+                return DeviceCatalog.sorted(try await Simctl.devices() + (await phones) + (await android))
             } catch {
-                let others = await android
+                let others = (await phones) + (await android)
                 if others.isEmpty { throw error }
                 return DeviceCatalog.sorted(others)
             }
@@ -36,6 +37,13 @@ final class DeviceHub {
             listedAt = Date()
             listError = nil
             for device in list { controllers[device.id]?.update(device) }
+            // A phone that was unplugged or walked away is no longer listed: its controller should not think it is still there.
+            for (id, controller) in controllers where controller.device.kind == .physical && controller.device.state != .unknown
+                && !list.contains(where: { $0.id == id }) {
+                var gone = controller.device
+                gone.state = .unknown
+                controller.update(gone)
+            }
             return list
         } catch {
             listError = error.localizedDescription
@@ -52,7 +60,11 @@ final class DeviceHub {
             controller.update(device)
             return controller
         }
-        let controller: any DeviceController = device.platform == .android ? AndroidController(device: device) : SimulatorController(device: device)
+        let controller: any DeviceController = switch (device.platform, device.kind) {
+        case (.android, _): AndroidController(device: device)
+        case (.ios, .physical): IPhoneController(device: device)
+        case (.ios, _): SimulatorController(device: device)
+        }
         controllers[device.id] = controller
         return controller
     }

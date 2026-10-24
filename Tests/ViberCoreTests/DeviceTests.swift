@@ -115,6 +115,7 @@ final class FakeDevice: DeviceDriver {
     var pressed: [DeviceButton] = []
     var booted = false
     var launched: [String] = []
+    var canInteract = true
 
     init(_ device: DeviceInfo) { self.device = device }
 

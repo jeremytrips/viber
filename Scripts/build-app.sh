@@ -49,6 +49,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>NSAllowsArbitraryLoadsInWebContent</key><true/>
 </dict>
 <key>NSLocalNetworkUsageDescription</key><string>The browser preview opens dev servers on your local network.</string>
+<key>NSCameraUsageDescription</key><string>Viber shows a USB-connected iPhone's screen beside the chat; macOS hands that video to apps as a camera.</string>
 </dict></plist>
 PLIST
 plutil -lint "$APP/Contents/Info.plist" >/dev/null

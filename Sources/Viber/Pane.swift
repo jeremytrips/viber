@@ -354,7 +354,11 @@ final class Pane: Identifiable {
         Task {
             do {
                 let devices = try await hub.refresh(maxAge: 2)
-                let fits = { (d: DeviceInfo) in artifact.platform.map { d.platform == $0 } ?? true }
+                let fits = { (d: DeviceInfo) -> Bool in
+                    // A simulator build can't run on a physical iPhone.
+                    if case .app = artifact, !d.isVirtual { return false }
+                    return artifact.platform.map { d.platform == $0 } ?? true
+                }
                 let mine = deviceID.flatMap { id in devices.first { $0.id == id } }.flatMap { fits($0) ? $0 : nil }
                 guard let device = mine ?? DeviceCatalog.preferred(devices.filter(fits)) else {
                     throw DeviceError.failed(artifact.platform == .android

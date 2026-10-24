@@ -4,9 +4,11 @@ public enum DevicePlatform: String, Codable, Sendable { case ios, android }
 public enum DeviceKind: String, Codable, Sendable { case simulator, emulator, physical }
 public enum DeviceState: String, Sendable { case booted, booting, shutdown, shuttingDown, unknown }
 
-/// A phone or tablet Viber can show and Claude can drive: an iOS simulator, an Android emulator or a USB phone.
+/// A phone or tablet Viber can show and Claude can drive: an iOS simulator, an Android emulator, an Android phone
+/// on USB, or an iPhone or iPad on USB or Wi-Fi.
 public struct DeviceInfo: Equatable, Identifiable, Sendable {
-    /// A simulator's UDID, an emulator's AVD name (stable across boots) or a phone's adb serial.
+    /// A simulator's UDID, an emulator's AVD name (stable across boots), an Android phone's adb serial, or an iPhone's
+    /// CoreDevice identifier.
     public var id: String
     public var name: String
     public var platform: DevicePlatform
@@ -16,13 +18,15 @@ public struct DeviceInfo: Equatable, Identifiable, Sendable {
     public var state: DeviceState
     /// e.g. com.apple.CoreSimulator.SimDeviceType.iPhone-17, or an AVD's hardware profile (pixel_8)
     public var typeIdentifier: String
-    /// Android: the adb serial while it is connected (emulator-5554).
+    /// Android: the adb serial while it is connected (emulator-5554). A physical iPhone: its hardware UDID.
     public var serial: String?
+    /// A physical device reached over the network instead of USB.
+    public var wireless: Bool
 
     public init(id: String, name: String, platform: DevicePlatform, kind: DeviceKind, os: String, state: DeviceState,
-                typeIdentifier: String = "", serial: String? = nil) {
+                typeIdentifier: String = "", serial: String? = nil, wireless: Bool = false) {
         self.id = id; self.name = name; self.platform = platform; self.kind = kind; self.os = os; self.state = state
-        self.typeIdentifier = typeIdentifier; self.serial = serial
+        self.typeIdentifier = typeIdentifier; self.serial = serial; self.wireless = wireless
     }
 
     public var isBooted: Bool { state == .booted }

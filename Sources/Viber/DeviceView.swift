@@ -43,11 +43,13 @@ struct DevicePanel: View {
                 Button { pane.attachDeviceScreenshot() } label: { Image(systemName: "camera") }
                     .disabled(!controller.isStreaming)
                     .help("Attach a screenshot to your message")
-                Button { pane.toggleDevicePicking() } label: {
-                    Image(systemName: "cursorarrow.rays").foregroundStyle(controller.picking ? Color.accentColor : Color.primary)
+                if controller.canInteract {
+                    Button { pane.toggleDevicePicking() } label: {
+                        Image(systemName: "cursorarrow.rays").foregroundStyle(controller.picking ? Color.accentColor : Color.primary)
+                    }
+                    .disabled(!controller.isStreaming)
+                    .help("Pick an element to attach to your message")
                 }
-                .disabled(!controller.isStreaming)
-                .help("Pick an element to attach to your message")
             }
             Menu {
                 if let controller {
@@ -105,6 +107,11 @@ struct DevicePanel: View {
         return device.kind == .physical ? "cable.connector" : "smartphone"
     }
 
+    /// The command line tool behind a device's apps, logs and screenshots.
+    static func tool(_ device: DeviceInfo) -> String {
+        device.platform == .android ? "adb" : device.isVirtual ? "simctl" : "devicectl"
+    }
+
     static func icon(_ button: DeviceButton) -> String {
         switch button {
         case .home: return "house"
@@ -147,13 +154,14 @@ struct DevicePanel: View {
                     }
                 } else {
                     PreviewMessage(icon: "cable.connector.slash", title: "\(device.name) is not ready",
-                                   detail: controller.failure ?? "Connect it with USB, unlock it and allow USB debugging.") {
+                                   detail: controller.failure ?? (device.platform == .android ? "Connect it with USB, unlock it and allow USB debugging."
+                                                                                              : "Connect it with USB, or unlock it on the same Wi-Fi, and trust this Mac.")) {
                         Button("Retry") { Task { try? await controller.boot(); _ = try? await hub.refresh() } }.keyboardShortcut(.defaultAction)
                     }
                 }
             } else if let failure = controller.failure, !controller.isStreaming {
                 PreviewMessage(icon: "exclamationmark.triangle", title: "The live screen is not available",
-                               detail: failure + "\n\nClaude's device tools still work through \(device.platform == .android ? "adb" : "simctl") where they can.") {
+                               detail: failure + "\n\nClaude's device tools still work through \(Self.tool(device)) where they can.") {
                     Button("Retry") { controller.startStream() }
                     if let title = controller.externalApp { Button(title) { controller.openExternally() } }
                 }
