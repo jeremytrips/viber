@@ -1,18 +1,24 @@
 import SwiftUI
 import ViberCore
 
-/// Making a worktree for a new session. With a project hook (`pnpm install`, Docker…) this can take minutes,
-/// so it shows in the sidebar with its output until the session opens.
+/// Making a worktree for a new session, or removing a closed session's worktree. With a project hook
+/// (`pnpm install`, Docker…) this can take minutes, so it shows in the sidebar with its output while it runs,
+/// and stays there with that output if it fails.
 @MainActor @Observable
 final class WorktreeJob: Identifiable {
+    enum Kind {
+        case create(NewSessionRequest)
+        case remove(WorktreeInfo, deleteBranch: Bool)
+    }
+
     enum Phase: Equatable {
         case running
         case failed(String)
     }
 
     let id = UUID().uuidString
-    let request: NewSessionRequest
-    /// The session's title once it opens.
+    let kind: Kind
+    /// The session's title.
     let title: String
     /// The sidebar section it shows in.
     let project: String
@@ -25,13 +31,37 @@ final class WorktreeJob: Identifiable {
     @ObservationIgnored private var pending = ""
     @ObservationIgnored private var flushScheduled = false
 
-    init(request: NewSessionRequest, title: String) {
-        self.request = request
+    init(creating request: NewSessionRequest, title: String) {
+        kind = .create(request)
         self.title = title
-        self.project = request.folder
+        project = request.folder
+    }
+
+    init(removing info: WorktreeInfo, deleteBranch: Bool, title: String, project: String) {
+        kind = .remove(info, deleteBranch: deleteBranch)
+        self.title = title
+        self.project = project
     }
 
     var isRunning: Bool { phase == .running }
+    var isRemoval: Bool { if case .remove = kind { return true }; return false }
+    var ideaID: String? { if case .create(let request) = kind { return request.ideaID }; return nil }
+    /// The folder the session started from, or the worktree being removed.
+    var location: String {
+        switch kind {
+        case .create(let request): return request.folder
+        case .remove(let info, _): return info.path
+        }
+    }
+
+    var statusText: String {
+        switch (isRemoval, isRunning) {
+        case (false, true): return "Setting up the worktree…"
+        case (false, false): return "Worktree setup failed"
+        case (true, true): return "Removing the worktree…"
+        case (true, false): return "Worktree removal failed"
+        }
+    }
 
     func reset() {
         phase = .running
@@ -82,7 +112,7 @@ struct WorktreeJobRow: View {
             .frame(width: 18)
             VStack(alignment: .leading, spacing: 3) {
                 Text(job.title).lineLimit(1).fontWeight(.medium)
-                Text(job.isRunning ? "Setting up the worktree…" : "Worktree setup failed")
+                Text(job.statusText)
                     .font(.caption).foregroundStyle(job.isRunning ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.red))
                     .lineLimit(1)
             }
@@ -93,7 +123,7 @@ struct WorktreeJobRow: View {
     }
 }
 
-/// The detail view of a worktree being set up: what runs, its output, and what to do if it failed.
+/// The detail view of a worktree being set up or removed: what runs, its output, and what to do if it failed.
 struct WorktreeJobView: View {
     @Environment(AppModel.self) private var model
     let job: WorktreeJob
@@ -103,8 +133,9 @@ struct WorktreeJobView: View {
             HStack(alignment: .center, spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(job.title).font(.headline).lineLimit(1)
-                    Text((job.request.folder as NSString).abbreviatingWithTildeInPath)
+                    Text((job.location as NSString).abbreviatingWithTildeInPath)
                         .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                        .help(job.location)
                 }
                 Spacer()
                 if job.isRunning {
@@ -112,7 +143,8 @@ struct WorktreeJobView: View {
                         Stat(label: "Running", value: AppModel.duration(context.date.timeIntervalSince(job.startedAt)))
                     }
                     Button("Stop", role: .destructive) { model.cancel(job) }
-                        .help("Stop the setup. A hook that is stopped may leave a partly made worktree behind.")
+                        .help(job.isRemoval ? "Stop the teardown. A hook that is stopped may leave the worktree half removed."
+                              : "Stop the setup. A hook that is stopped may leave a partly made worktree behind.")
                 } else {
                     Button("Dismiss") { model.dismiss(job) }
                     Button("Try Again") { model.retry(job) }.keyboardShortcut(.defaultAction)
@@ -130,7 +162,9 @@ struct WorktreeJobView: View {
                     } icon: {
                         Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
                     }
-                    Text("No session was started. Fix the problem, then try again; or turn off the worktree option in New Session.")
+                    Text(job.isRemoval
+                         ? "The session is closed; its worktree is still on disk. Fix the problem, then try again."
+                         : "No session was started. Fix the problem, then try again; or turn off the worktree option in New Session.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 LogView(text: job.log, placeholder: job.isRunning ? "Waiting for output…" : "No output.")

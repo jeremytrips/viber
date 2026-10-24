@@ -25,6 +25,12 @@ public struct WorktreeError: Error, LocalizedError {
     public init(message: String) { self.message = message }
 }
 
+/// The worktree is gone, but `git branch -d` kept its branch (usually because it isn't merged).
+public struct BranchKept: Error, LocalizedError {
+    public var message: String
+    public var errorDescription: String? { message }
+}
+
 /// What a new worktree session asked for.
 public struct WorktreeRequest: Sendable {
     public var folder: String
@@ -180,19 +186,60 @@ public enum Worktree {
         !Shell.run("git", ["-C", path, "status", "--porcelain"]).output.isEmpty
     }
 
-    /// Removes the worktree (refusing if it has uncommitted changes) and optionally its merged branch.
-    /// Uses `branch -d`, never `-D`, so unmerged work is never thrown away.
-    public static func remove(_ info: WorktreeInfo, deleteBranch: Bool) throws {
-        if FileManager.default.fileExists(atPath: info.path) {
+    /// Removes the worktree, refusing if it has uncommitted changes, and optionally its merged branch.
+    /// A worktree a WorktreeCreate hook made is removed by the project's WorktreeRemove hook when there is one
+    /// (as in Claude Code, which only runs that hook for worktrees a hook made); otherwise by `git worktree remove`.
+    /// If the hook fails and the worktree is still there, it is kept and the error says why.
+    /// The branch is deleted with `branch -d`, never `-D`, so unmerged work is never thrown away.
+    /// Returns a sentence saying what was done.
+    @discardableResult
+    public static func remove(_ info: WorktreeInfo, deleteBranch: Bool,
+                              progress: @escaping @Sendable (WorktreeProgress) -> Void = { _ in }) async throws -> String {
+        let fm = FileManager.default
+        var said: [String] = []
+        if fm.fileExists(atPath: info.path) {
             if hasUncommittedChanges(info.path) {
                 throw WorktreeError(message: "\(info.path) has uncommitted changes. Commit or discard them first.")
             }
-            let r = Shell.run("git", ["-C", info.repo, "worktree", "remove", info.path])
-            guard r.ok else { throw WorktreeError(message: "git worktree remove failed: \(r.stderr.trimmingCharacters(in: .whitespacesAndNewlines))") }
+            let folder = info.folder ?? info.repo
+            let hooks = info.madeByHook ? try WorktreeHooks.hooks(.remove, folder: folder) : []
+            if hooks.isEmpty {
+                progress(.step("Removing the worktree with git"))
+                let r = Shell.run("git", ["-C", info.repo, "worktree", "remove", info.path])
+                guard r.ok else { throw WorktreeError(message: "git worktree remove failed: \(r.stderr.trimmingCharacters(in: .whitespacesAndNewlines))") }
+                said.append("Removed the worktree.")
+            } else {
+                let input = WorktreeHooks.input(.remove, cwd: folder, worktreePath: info.path)
+                var failure: String?
+                var lastLine: String?
+                for hook in hooks {
+                    progress(.step("Running the WorktreeRemove hook: \(hook.display)"))
+                    let result = await WorktreeHooks.run(hook, input: input, folder: folder) { progress(.output($0)) }
+                    if !result.ok, failure == nil { failure = WorktreeHooks.failure(hook, result, event: .remove) }
+                    lastLine = WorktreeHooks.printedPath(result.output) ?? lastLine
+                }
+                // Like Claude Code: a failed hook that still removed the directory counts as removed.
+                if let failure {
+                    if fm.fileExists(atPath: info.path) {
+                        throw WorktreeError(message: "Kept the worktree at \(info.path).\n\n\(failure)")
+                    }
+                    said.append("The WorktreeRemove hook failed, but the worktree is gone.")
+                } else {
+                    said.append("The WorktreeRemove hook removed the worktree" + (lastLine.map { ": \($0)" } ?? "."))
+                }
+            }
         }
-        if deleteBranch {
-            let r = Shell.run("git", ["-C", info.repo, "branch", "-d", info.branch])
-            guard r.ok else { throw WorktreeError(message: "Kept branch \(info.branch): \(r.stderr.trimmingCharacters(in: .whitespacesAndNewlines))") }
+        guard !info.branch.isEmpty else { return said.joined(separator: " ") }
+        guard deleteBranch else { return (said + ["Kept branch \(info.branch)."]).joined(separator: " ") }
+        // A hook may have deleted just the folder; git still counts the branch as checked out there until pruned.
+        Shell.run("git", ["-C", info.repo, "worktree", "prune"])
+        guard Shell.run("git", ["-C", info.repo, "rev-parse", "--verify", "--quiet", "refs/heads/\(info.branch)"]).ok else {
+            return (said + ["Branch \(info.branch) was already gone."]).joined(separator: " ")
         }
+        let r = Shell.run("git", ["-C", info.repo, "branch", "-d", info.branch])
+        guard r.ok else {
+            throw BranchKept(message: (said + ["Kept branch \(info.branch): \(r.stderr.trimmingCharacters(in: .whitespacesAndNewlines))"]).joined(separator: " "))
+        }
+        return (said + ["Deleted branch \(info.branch)."]).joined(separator: " ")
     }
 }

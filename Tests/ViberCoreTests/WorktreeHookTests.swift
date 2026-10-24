@@ -297,6 +297,104 @@ final class WorktreeCreateHookTests: XCTestCase {
     }
 }
 
+final class WorktreeRemoveHookTests: XCTestCase {
+    var home: URL!
+    var savedHome: URL!
+    var savedManaged: URL!
+    var repo: URL!
+    var marker: URL!
+
+    override func setUpWithError() throws {
+        home = try temporaryFolder()
+        savedHome = WorktreeHooks.userHome
+        savedManaged = WorktreeHooks.managedDirectory
+        WorktreeHooks.userHome = home
+        WorktreeHooks.managedDirectory = home.appendingPathComponent("managed")
+        repo = try temporaryRepo()
+        marker = home.appendingPathComponent("ran")
+    }
+
+    override func tearDown() {
+        WorktreeHooks.userHome = savedHome
+        WorktreeHooks.managedDirectory = savedManaged
+    }
+
+    /// A worktree outside the repository, as a WorktreeCreate hook would make it.
+    private func hookWorktree(branch: String = "team/x") throws -> WorktreeInfo {
+        let path = repo.deletingLastPathComponent().appendingPathComponent("hooked-\(UUID().uuidString)").path
+        XCTAssertTrue(Shell.run("git", ["-C", repo.path, "worktree", "add", "-q", "-b", branch, path]).ok)
+        return WorktreeInfo(repo: repo.path, path: path, branch: branch, base: "main", createdByHook: true, folder: repo.path)
+    }
+
+    private func setRemoveHook(_ command: String) throws {
+        let dir = repo.appendingPathComponent(".claude")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let settings = ["hooks": ["WorktreeRemove": [["hooks": [["type": "command", "command": command]]]]]]
+        try JSONSerialization.data(withJSONObject: settings).write(to: dir.appendingPathComponent("settings.local.json"))
+    }
+
+    func testHookRemovesAHookMadeWorktree() async throws {
+        let info = try hookWorktree()
+        // Reads worktree_path from stdin, as a teardown script would, then removes it with git.
+        try setRemoveHook("""
+        path=$(sed -n 's/.*"worktree_path":"\\([^"]*\\)".*/\\1/p'); echo "stopping stack in $path" > '\(marker.path)'; \
+        echo 'docker compose down'; git -C "$CLAUDE_PROJECT_DIR" worktree remove "$path"
+        """)
+        let output = Collector()
+        let summary = try await Worktree.remove(info, deleteBranch: true) { if case .output(let t) = $0 { output.add(t) } }
+        XCTAssertEqual(try String(contentsOf: marker, encoding: .utf8), "stopping stack in \(info.path)\n")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: info.path))
+        XCTAssertTrue(output.text.contains("docker compose down"))
+        XCTAssertTrue(summary.contains("Deleted branch team/x"), summary)
+    }
+
+    func testFailingHookKeepsTheWorktree() async throws {
+        let info = try hookWorktree()
+        try setRemoveHook("echo 'containers still running' >&2; exit 2")
+        do {
+            try await Worktree.remove(info, deleteBranch: true)
+            XCTFail("a failed teardown keeps the worktree")
+        } catch {
+            XCTAssertFalse(error is BranchKept)
+            XCTAssertTrue(error.localizedDescription.contains("Kept the worktree"))
+            XCTAssertTrue(error.localizedDescription.contains("containers still running"))
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: info.path))
+        XCTAssertTrue(Shell.run("git", ["-C", repo.path, "rev-parse", "--verify", "--quiet", "refs/heads/team/x"]).ok, "the branch is kept too")
+
+        // A hook that deleted the folder before failing counts as removed, as in Claude Code.
+        try setRemoveHook("rm -rf '\(info.path)'; exit 1")
+        let summary = try await Worktree.remove(info, deleteBranch: true)
+        XCTAssertTrue(summary.contains("failed, but the worktree is gone"), summary)
+        XCTAssertTrue(summary.contains("Deleted branch team/x"), "git forgets the deleted worktree, so the branch can go")
+    }
+
+    func testUncommittedChangesStopTheHookFromRunning() async throws {
+        let info = try hookWorktree()
+        try "dirty\n".write(to: URL(fileURLWithPath: info.path).appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+        try setRemoveHook("touch '\(marker.path)'")
+        do { try await Worktree.remove(info, deleteBranch: false); XCTFail("dirty worktrees are refused") } catch {}
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+    }
+
+    func testGitHandlesWhatTheHookDidNotMake() async throws {
+        try setRemoveHook("touch '\(marker.path)'; exit 1")
+        // Viber made this one with git, so the WorktreeRemove hook is not for it (Claude Code works the same way).
+        let gitMade = try Worktree.create(repoDir: repo.path, name: "plain")
+        try await Worktree.remove(gitMade, deleteBranch: true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: gitMade.path))
+
+        // A hook-made worktree with no WorktreeRemove hook falls back to git, and a branch that is gone is fine.
+        try FileManager.default.removeItem(at: repo.appendingPathComponent(".claude/settings.local.json"))
+        var hooked = try hookWorktree(branch: "team/y")
+        hooked.branch = "team/already-deleted"
+        let summary = try await Worktree.remove(hooked, deleteBranch: true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: hooked.path))
+        XCTAssertTrue(summary.contains("already gone"), summary)
+    }
+}
+
 func temporaryFolder() throws -> URL {
     let dir = FileManager.default.temporaryDirectory.appendingPathComponent("viber-test-\(UUID().uuidString)")
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
