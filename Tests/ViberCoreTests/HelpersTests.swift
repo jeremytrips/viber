@@ -131,6 +131,40 @@ final class WorktreeTests: XCTestCase {
         XCTAssertEqual(second.branch, "viber/login-screen-2", "names never collide with a kept branch")
     }
 
+    func testRemoveDeletesBranchMergedWhileMainCheckoutIsElsewhere() async throws {
+        func git(_ path: String, _ args: String...) { XCTAssertTrue(Shell.run("git", ["-C", path] + args).ok, args.joined(separator: " ")) }
+        func exists(_ branch: String) -> Bool { Shell.run("git", ["-C", repo.path, "rev-parse", "--verify", "--quiet", "refs/heads/\(branch)"]).ok }
+        func commit(_ info: WorktreeInfo) throws {
+            try UUID().uuidString.write(to: URL(fileURLWithPath: info.path).appendingPathComponent("\(info.branch.split(separator: "/").last!).txt"),
+                                        atomically: true, encoding: .utf8)
+            git(info.path, "add", "."); git(info.path, "commit", "-qm", info.branch)
+        }
+
+        // Started from main, merged into main, while the main checkout is on another session's branch.
+        let fromMain = try Worktree.create(repoDir: repo.path, name: "Sheets")
+        try commit(fromMain)
+        git(repo.path, "switch", "-qc", "viber/issues")
+        git(repo.path, "branch", "-f", "main", fromMain.branch)
+        let summary = try await Worktree.remove(fromMain, deleteBranch: true)
+        XCTAssertTrue(summary.contains("Deleted branch viber/sheets"), summary)
+
+        // Started from that other branch, merged into main: main is the default branch, so it counts too.
+        let fromOther = try Worktree.create(repoDir: repo.path, name: "Limits")
+        XCTAssertEqual(fromOther.base, "viber/issues")
+        try commit(fromOther)
+        git(repo.path, "branch", "-f", "main", fromOther.branch)
+        _ = try await Worktree.remove(fromOther, deleteBranch: true)
+        XCTAssertFalse(exists("viber/limits"))
+
+        // Merged nowhere: kept.
+        let unmerged = try Worktree.create(repoDir: repo.path, name: "Draft")
+        try commit(unmerged)
+        do { try await Worktree.remove(unmerged, deleteBranch: true); XCTFail("unmerged branch is kept") } catch {
+            XCTAssertTrue(error is BranchKept)
+        }
+        XCTAssertTrue(exists("viber/draft"))
+    }
+
     func testSwitchedBranch() async throws {
         func git(_ path: String, _ args: String...) { XCTAssertTrue(Shell.run("git", ["-C", path] + args).ok, args.joined(separator: " ")) }
         func exists(_ branch: String) -> Bool { Shell.run("git", ["-C", repo.path, "rev-parse", "--verify", "--quiet", "refs/heads/\(branch)"]).ok }

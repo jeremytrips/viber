@@ -403,7 +403,8 @@ public enum Worktree {
     /// A worktree a WorktreeCreate hook made is removed by the project's WorktreeRemove hook when there is one
     /// (as in Claude Code, which only runs that hook for worktrees a hook made); otherwise by `git worktree remove`.
     /// If the hook fails and the worktree is still there, it is kept and the error says why.
-    /// The branch is deleted with `branch -d`, never `-D`, so unmerged work is never thrown away.
+    /// The branch is only deleted when it is merged: into the branch it started from or the default branch, else
+    /// `branch -d`'s own check (the main checkout's HEAD), so unmerged work is never thrown away.
     /// Only the branch the worktree was created on is deleted; one the session switched to is kept, and said so.
     /// Returns a sentence saying what was done.
     @discardableResult
@@ -451,10 +452,21 @@ public enum Worktree {
         guard Shell.run("git", ["-C", info.repo, "rev-parse", "--verify", "--quiet", "refs/heads/\(info.branch)"]).ok else {
             return (said + ["Branch \(info.branch) was already gone."]).joined(separator: " ")
         }
-        let r = Shell.run("git", ["-C", info.repo, "branch", "-d", info.branch])
+        // `branch -d` only counts a branch as merged into the main checkout's HEAD, which may be on another branch.
+        let r = Shell.run("git", ["-C", info.repo, "branch", isMerged(info) ? "-D" : "-d", info.branch])
         guard r.ok else {
             throw BranchKept(message: (said + ["Kept branch \(info.branch): \(r.stderr.trimmingCharacters(in: .whitespacesAndNewlines))"]).joined(separator: " "))
         }
         return (said + ["Deleted branch \(info.branch)."]).joined(separator: " ")
+    }
+
+    /// Whether the worktree's branch is merged into the branch it started from or the repository's default branch
+    /// (origin's, else a local main or master).
+    static func isMerged(_ info: WorktreeInfo) -> Bool {
+        let targets = [info.base, originDefaultBranch(info.repo), "main", "master"].compactMap { $0 }
+        return targets.contains { target in
+            target != info.branch && target != "HEAD"
+                && Shell.run("git", ["-C", info.repo, "merge-base", "--is-ancestor", "refs/heads/\(info.branch)", target]).ok
+        }
     }
 }

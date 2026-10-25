@@ -20,7 +20,7 @@ usage: viber close [--remove-worktree] [--delete-branch]
 Talks to the Viber app that runs this Claude Code session.
   close    Close this session once the current reply finishes.
            --remove-worktree  also remove its git worktree (refused if it has uncommitted changes)
-           --delete-branch    also delete its branch with `git branch -d` (kept if not merged)
+           --delete-branch    also delete its branch if it is merged (kept if not)
   worktree Print the worktree Viber made for this session: its path, the branch it was created on
            (the one --delete-branch deletes), and the repository. Exits 1 if Viber made none.
   notify   Show a macOS notification for this session.
