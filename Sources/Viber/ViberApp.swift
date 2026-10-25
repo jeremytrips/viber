@@ -95,6 +95,7 @@ struct ViberApp: App {
 struct ContentView: View {
     @Environment(AppModel.self) private var model
     @State private var renameDraft = ""
+    @State private var sheetRoom: CGFloat?
 
     var body: some View {
         @Bindable var model = model
@@ -121,6 +122,8 @@ struct ContentView: View {
                 ToolbarItem(placement: .primaryAction) { UsageBar() }
             }
         }
+        // Sheets hang from the toolbar; leave a margin under them.
+        .onGeometryChange(for: CGFloat.self, of: \.size.height) { sheetRoom = max($0 - 40, 360) }
         .sheet(isPresented: $model.showNewSession) { NewSessionSheet() }
         .sheet(isPresented: $model.showResume) { ResumeSheet() }
         .sheet(isPresented: $model.showSwitcher) { QuickSwitcher() }
@@ -130,6 +133,7 @@ struct ContentView: View {
         .sheet(item: $model.settingsSheet) { request in
             if let pane = model.pane(request.paneID) { SessionSettingsSheet(pane: pane, tab: request.tab) }
         }
+        .environment(\.sheetRoom, sheetRoom)
         .alert("Rename Project", isPresented: Binding(get: { model.renamingProject != nil }, set: { if !$0 { model.renamingProject = nil } })) {
             TextField("Name", text: $renameDraft)
             Button("Rename") {

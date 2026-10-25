@@ -38,6 +38,27 @@ struct AccountPicker: View {
     }
 }
 
+extension EnvironmentValues {
+    /// How tall a sheet can be and still fit in the main window. Nil until the window is measured.
+    @Entry var sheetRoom: CGFloat?
+}
+
+extension View {
+    /// Sizes a sheet to its content, but no taller than the window: past that its Form scrolls and the buttons under
+    /// it stay in view. Sized to its content alone, a long sheet ran off the screen, which cut off its top and bottom.
+    func fitsWindow() -> some View { modifier(FitsWindow()) }
+}
+
+private struct FitsWindow: ViewModifier {
+    @Environment(\.sheetRoom) private var room
+
+    func body(content: Content) -> some View {
+        content
+            .frame(maxHeight: room)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
 private enum Relative {
     static let formatter: RelativeDateTimeFormatter = {
         let f = RelativeDateTimeFormatter()
@@ -222,7 +243,7 @@ struct NewSessionSheet: View {
             .padding(16)
         }
         .frame(width: 520)
-        .fixedSize(horizontal: false, vertical: true)
+        .fitsWindow()
         .onAppear(perform: load)
         .task(id: folder) { await checkRepo() }
         .onChange(of: defaultBranch) { if !branchEdited { branch = defaultBranch } }

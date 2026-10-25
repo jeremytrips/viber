@@ -99,7 +99,7 @@ struct JiraRunSheet: View {
             .padding(16)
         }
         .frame(width: 560)
-        .fixedSize(horizontal: false, vertical: true)
+        .fitsWindow()
         .task {
             let tracker = model.trackers.tracker(for: request.project)
             profile = tracker?.profile.flatMap { name in model.profiles.contains { $0.name == name && $0.loginProblem == nil } ? name : nil }
