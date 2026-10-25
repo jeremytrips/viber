@@ -189,6 +189,8 @@ public enum ViberPaths {
     /// Issues were ideas; read once to turn them into issues.
     public static var ideas: URL { support.appendingPathComponent("ideas.json") }
     public static var projects: URL { support.appendingPathComponent("projects.json") }
+    /// Which projects read their issues from Jira, and how.
+    public static var trackers: URL { support.appendingPathComponent("trackers.json") }
     /// Project notes from before ideas, read once to turn them into ideas.
     public static var notes: URL { support.appendingPathComponent("notes.json") }
     public static var clauthStatus: URL {

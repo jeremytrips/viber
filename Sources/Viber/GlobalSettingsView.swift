@@ -11,6 +11,7 @@ struct GlobalSettingsView: View {
             UserHooksSettings().tabItem { Label("Hooks", systemImage: "point.3.connected.trianglepath.dotted") }
             UserMcpSettings().tabItem { Label("MCP", systemImage: "server.rack") }
             ModelDefaultsSettings().tabItem { Label("Model", systemImage: "cpu") }
+            JiraSettings().tabItem { Label("Jira", systemImage: "rectangle.3.group") }
         }
         .frame(width: 640, height: 480)
     }

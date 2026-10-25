@@ -99,6 +99,11 @@ final class AppModel {
     var settingsSheet: SettingsSheetRequest?
     var cacheWarning: TimeInterval { TimeInterval(max(Prefs.int(Prefs.cacheWarningMinutes), 1) * 60) }
     var issues = IssueList()
+    /// Projects whose issues come from Jira.
+    var trackers = TrackerList()
+    var jiraSites: [JiraSite] = []
+    /// What each Jira project's Planning tab shows, kept while the app runs.
+    var jiraBoards: [String: JiraBoard] = [:]
     /// Simulators, shared by every session's device panel and device tools.
     let deviceHub = DeviceHub()
     /// Issues whose session is being created, so Plan can't start two.
@@ -806,6 +811,87 @@ final class AppModel {
         return hit
     }
 
+    // MARK: Jira
+
+    func addJiraSite(_ site: JiraSite, token: String) {
+        JiraKeychain.set(token, for: site.host)
+        jiraSites.removeAll { $0.host == site.host }
+        jiraSites.append(site)
+        saveJiraSites()
+    }
+
+    func updateJiraSite(_ site: JiraSite, displayName: String) {
+        guard let index = jiraSites.firstIndex(where: { $0.host == site.host }) else { return }
+        jiraSites[index].displayName = displayName
+        saveJiraSites()
+    }
+
+    func removeJiraSite(_ site: JiraSite) {
+        JiraKeychain.remove(for: site.host)
+        jiraSites.removeAll { $0.host == site.host }
+        saveJiraSites()
+        for (project, board) in jiraBoards where board.site?.host == site.host { board.update(tracker: board.tracker, site: nil); _ = project }
+    }
+
+    private func saveJiraSites() {
+        UserDefaults.standard.set(try? JSONEncoder().encode(jiraSites), forKey: Prefs.jiraSites)
+    }
+
+    func setTracker(_ tracker: ProjectTracker?, for project: String) {
+        trackers.set(tracker, for: project)
+        do { try trackers.save() } catch { errorMessage = "Could not save the project's tracker: \(error.localizedDescription)" }
+        if let tracker {
+            if let board = jiraBoards[project] { board.update(tracker: tracker, site: jiraSites.first { $0.host == tracker.site }) }
+        } else {
+            jiraBoards[project] = nil
+        }
+    }
+
+    /// The Jira board of a project that reads its issues from Jira, loading it the first time.
+    func jiraBoard(for project: String) -> JiraBoard? {
+        guard let tracker = trackers.tracker(for: project) else { return nil }
+        if let board = jiraBoards[project] { return board }
+        let board = JiraBoard(project: project, tracker: tracker, site: jiraSites.first { $0.host == tracker.site })
+        jiraBoards[project] = board
+        board.load()
+        return board
+    }
+
+    /// The Jira key a session's branch names, in a project that uses Jira.
+    func jiraKey(for pane: Pane) -> String? {
+        guard trackers.tracker(for: pane.projectPath) != nil, let branch = pane.branch else { return nil }
+        return JiraIssue.key(inBranch: branch)
+    }
+
+    /// The Jira issue a session is on, as far as its project's board knows it; the board fetches it if needed.
+    func jiraIssue(for pane: Pane) -> (key: String, issue: JiraIssue?)? {
+        guard let key = jiraKey(for: pane), let board = jiraBoard(for: pane.projectPath) else { return nil }
+        board.ensure(key)
+        return (key, board.known[key])
+    }
+
+    /// Start on a Jira issue: a session in a new worktree whose first message is the tracker's, such as
+    /// `/work-issue NEX-233`, so the repository's own skill takes it from there (and moves the issue in Jira).
+    func startJiraIssue(_ issue: JiraIssue, project: String) {
+        guard let tracker = trackers.tracker(for: project) else { return }
+        Task.detached {
+            let root = Worktree.repoRoot(project)
+            let key = root.map { WorktreeHooks.mainCheckout($0) ?? $0 }
+            await MainActor.run {
+                let pattern = key.map { Prefs.branchPattern(project: $0) } ?? Worktree.defaultBranchPattern
+                let profile = tracker.profile.flatMap { name in self.profiles.contains { $0.name == name && $0.loginProblem == nil } ? name : nil }
+                    ?? AccountPicker.usableDefault(self)
+                let request = NewSessionRequest(folder: project, profile: profile, useWorktree: root != nil,
+                                                name: "\(issue.key) \(issue.summary)", permissionMode: Prefs.string(Prefs.newSessionMode),
+                                                firstMessage: tracker.firstMessage(for: issue), issueID: nil, issueKey: issue.key,
+                                                branchPattern: pattern)
+                guard root != nil, Worktree.needsInput(pattern, key: issue.key) else { self.createSession(request); return }
+                self.newSessionPrefill = request
+                self.showNewSession = true
+            }
+        }
+    }
+
     // MARK: Autopilot
 
     /// Opens the Autopilot sheet on a project's issues to plan, or on one issue.
@@ -1198,10 +1284,17 @@ final class AppModel {
                 Task { @MainActor in self?.pollExternal(); self?.drainRequests(); self?.pollSignIns() }
             },
             Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-                Task { @MainActor in self?.reloadStatus(); self?.deviceHub.reap(); self?.checkStalledAutopilots() }
+                Task { @MainActor in self?.reloadStatus(); self?.deviceHub.reap(); self?.checkStalledAutopilots(); self?.refreshJira() }
             }
         ]
         for pane in panes where pane.worktree != nil { refreshWorktree(pane) }
+    }
+
+    /// Reads the shown Jira view again when it is stale: the selected project's, and those with sessions open.
+    private func refreshJira() {
+        var projects = Set(panes.map(\.projectPath))
+        if let selected = selectedProjectPage { projects.insert(selected) }
+        for project in projects { jiraBoards[project]?.refreshIfStale(now: now) }
     }
 
     private func tick() {
@@ -1406,6 +1499,10 @@ final class AppModel {
 
     private func restore() {
         issues = IssueList.load()
+        trackers = TrackerList.load()
+        if let data = UserDefaults.standard.data(forKey: Prefs.jiraSites), let sites = try? JSONDecoder().decode([JiraSite].self, from: data) {
+            jiraSites = sites
+        }
         // Issues were filed under a session's folder; a subfolder's or worktree's now belong to its repository.
         if issues.moveProjects(ProjectRoot.resolve) { saveIssues() }
         if let data = try? Data(contentsOf: ViberPaths.panes),

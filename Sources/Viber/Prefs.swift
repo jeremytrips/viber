@@ -24,6 +24,8 @@ enum Prefs {
     /// How many sessions an autopilot run keeps going at once, and the most worktrees it lets a project have open.
     static let autopilotSessions = "autopilotSessions"
     static let autopilotWorktrees = "autopilotWorktrees"
+    /// The Jira sites Viber reads, as JSON; their tokens are in the Keychain.
+    static let jiraSites = "jiraSites"
 
     /// New worktrees' branch patterns, by the repository's main checkout. A missing one is Worktree.defaultBranchPattern.
     static let branchPatterns = "branchPatterns"

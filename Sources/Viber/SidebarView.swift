@@ -242,8 +242,16 @@ struct PaneRow: View {
                 }
                 HStack(spacing: 5) {
                     Chip(text: pane.profileLabel)
-                    let issue = model.issue(for: pane)
-                    if let issue {
+                    let jira = model.jiraIssue(for: pane)
+                    let issue = jira == nil ? model.issue(for: pane) : nil
+                    if let jira {
+                        HStack(spacing: 3) {
+                            Circle().fill(jira.issue?.category.color ?? .secondary).frame(width: 6, height: 6)
+                            Text(jira.issue.map { "\(jira.key) · \($0.status)" } ?? jira.key)
+                        }
+                        .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                        .help((jira.issue.map { "\(jira.key): \($0.summary)" } ?? jira.key) + (pane.branch.map { "\n⑂ \($0)" } ?? ""))
+                    } else if let issue {
                         HStack(spacing: 3) {
                             Circle().fill(issue.status.color).frame(width: 6, height: 6)
                             Text("\(issue.key) · \(issue.status.label)")
@@ -252,13 +260,13 @@ struct PaneRow: View {
                         .help("\(issue.key): \(issue.title)" + (pane.branch.map { "\n⑂ \($0)" } ?? ""))
                     }
                     if let worktree = pane.worktree {
-                        if issue == nil, let branch = pane.branch {
+                        if issue == nil, jira == nil, let branch = pane.branch {
                             // The last part, so "feat/NEX-705-…" shows its ticket in the narrow chip.
                             Chip(text: "⑂ " + (branch.split(separator: "/").last.map(String.init) ?? branch))
                                 .help(worktree.branch.isEmpty || branch == worktree.branch ? branch : "\(branch), created as \(worktree.branch)")
                         }
-                        if issue == nil, let diff = pane.diffStat { Text(diff).font(.caption2.monospaced()).foregroundStyle(.secondary) }
-                    } else if issue == nil {
+                        if issue == nil, jira == nil, let diff = pane.diffStat { Text(diff).font(.caption2.monospaced()).foregroundStyle(.secondary) }
+                    } else if issue == nil, jira == nil {
                         Text(pane.continueAt == nil ? pane.state.label : "Usage limit").font(.caption).foregroundStyle(.secondary)
                     }
                 }

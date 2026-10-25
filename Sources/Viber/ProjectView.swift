@@ -161,7 +161,28 @@ struct ProjectView: View {
 
     // MARK: Issues
 
+    @ViewBuilder
     private var issues: some View {
+        if let board = model.jiraBoard(for: path) {
+            jiraIssues(board)
+        } else {
+            ownIssues
+        }
+    }
+
+    private func jiraIssues(_ board: JiraBoard) -> some View {
+        PageSection(title: "Issues", detail: board.view.map { "\($0.name) · \(board.site?.host ?? board.tracker.site)" }) {
+            HStack(spacing: 14) {
+                Button("All Issues") { model.select(.issues) }
+                    .buttonStyle(.link)
+                    .help("Every project's own issues (⇧⌘I)")
+            }
+        } content: {
+            JiraIssuesSection(project: path, board: board)
+        }
+    }
+
+    private var ownIssues: some View {
         let mine = model.issues.issues(in: path)
         let toDo = mine.filter { $0.status == .open }.count
         let counts = [(toDo, "to do"), (mine.filter { $0.status == .started }.count, "in progress"),
@@ -265,15 +286,20 @@ struct ProjectView: View {
 
     private var settings: some View {
         let prefix = model.issues.prefix(for: path)
+        let jira = model.trackers.tracker(for: path) != nil
         return PageSection(title: "Settings") {
             PageCard {
-                SettingRow(label: "Issue keys",
-                           note: "\(prefix)-1, \(prefix)-2… Branch names carry them, and sessions and commits refer to issues by them. Issues live in Viber, not in the repository.") {
-                    Text(prefix).font(.callout.monospaced()).textSelection(.enabled)
-                    Button("Edit…") { editingPrefix = true }
-                        .popover(isPresented: $editingPrefix, arrowEdge: .bottom) {
-                            IssuePrefixEditor(project: path, isPresented: $editingPrefix)
-                        }
+                TrackerSettingsRows(project: path)
+                if !jira {
+                    Divider()
+                    SettingRow(label: "Issue keys",
+                               note: "\(prefix)-1, \(prefix)-2… Branch names carry them, and sessions and commits refer to issues by them.") {
+                        Text(prefix).font(.callout.monospaced()).textSelection(.enabled)
+                        Button("Edit…") { editingPrefix = true }
+                            .popover(isPresented: $editingPrefix, arrowEdge: .bottom) {
+                                IssuePrefixEditor(project: path, isPresented: $editingPrefix)
+                            }
+                    }
                 }
                 Divider()
                 if summary?.isRepo == true {
