@@ -162,13 +162,13 @@ struct ProjectRow: View {
                 Text("\(panes.count)").font(.caption).monospacedDigit().foregroundStyle(.secondary)
                     .help("\(panes.count) open session\(panes.count == 1 ? "" : "s")")
             }
-            if let pilot = model.autopilots[project.path] {
+            if let paused = model.autopilots[project.path].map(\.paused) ?? model.jiraRuns[project.path].map(\.paused) {
                 Button { model.select(.project(project.path)) } label: {
-                    Image(systemName: "airplane").foregroundStyle(pilot.paused == nil ? Color.accentColor : Color.orange)
+                    Image(systemName: "airplane").foregroundStyle(paused == nil ? Color.accentColor : Color.orange)
                 }
                 .buttonStyle(.borderless)
-                .help(pilot.paused.map { "Autopilot paused: \($0)" } ?? "The autopilot is implementing \(project.name)'s issues")
-                .accessibilityLabel(pilot.paused == nil ? "Autopilot running" : "Autopilot paused")
+                .help(paused.map { "Autopilot paused: \($0)" } ?? "The autopilot is implementing \(project.name)'s issues")
+                .accessibilityLabel(paused == nil ? "Autopilot running" : "Autopilot paused")
             }
             if issues > 0 || hovering || showingIdeas {
                 Button { showingIdeas = true } label: {
@@ -234,7 +234,7 @@ struct PaneRow: View {
             CacheRing(cache: pane.chat.cache, now: model.now)
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 4) {
-                    if model.isAutopilotSession(pane) {
+                    if model.isAutopilotSession(pane) || model.isJiraRunSession(pane) {
                         Image(systemName: "airplane").font(.caption).foregroundStyle(Color.accentColor)
                             .help("The autopilot started this session for an issue")
                     }

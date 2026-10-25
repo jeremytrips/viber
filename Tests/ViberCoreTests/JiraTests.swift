@@ -78,3 +78,53 @@ final class JiraTests: XCTestCase {
         XCTAssertEqual(TrackerList.load(from: dir.appendingPathComponent("trackers.json")), list)
     }
 }
+
+final class JiraRunTests: XCTestCase {
+    private func issue(_ key: String, _ summary: String = "x", status: String = "To Do", category: JiraCategory = .todo, type: String = "Story",
+                       epic: Bool = false, assignee: String? = nil, labels: [String] = []) -> JiraIssue {
+        JiraIssue(key: key, summary: summary, status: status, category: category, type: type, isEpic: epic, assignee: assignee, labels: labels)
+    }
+
+    func testEligibility() {
+        XCTAssertNil(JiraRun.ineligible(issue("NEX-1"), mine: false), "unassigned is fine")
+        XCTAssertNil(JiraRun.ineligible(issue("NEX-1", assignee: "Jeremy"), mine: true))
+        XCTAssertEqual(JiraRun.ineligible(issue("NEX-1", assignee: "Sofie"), mine: false), "Assigned to Sofie.")
+        XCTAssertEqual(JiraRun.ineligible(issue("NEX-1", "DECISION: keep history?"), mine: true), "A decision: it needs you, not code.")
+        XCTAssertNotNil(JiraRun.ineligible(issue("NEX-1", labels: ["decision"]), mine: true))
+        XCTAssertNotNil(JiraRun.ineligible(issue("NEX-1", status: "In Progress", category: .progress), mine: true))
+        XCTAssertNotNil(JiraRun.ineligible(issue("NEX-1", epic: true), mine: true))
+    }
+
+    func testTakesKeysThatAreStillToDo() {
+        var run = JiraRun(project: "/repo", keys: ["NEX-1", "NEX-2", "NEX-3"], epicKey: "NEX-30", label: "E14", sessionsAtOnce: 2,
+                          worktreesAtMost: 8, permissionMode: "auto", profile: nil, branchPattern: "feat/<key>-<slug>")
+        let known = ["NEX-1": issue("NEX-1"), "NEX-2": issue("NEX-2", status: "In Progress", category: .progress), "NEX-3": issue("NEX-3")]
+        XCTAssertEqual(run.takeNext(known: known, openWorktrees: 0), "NEX-1")
+        XCTAssertEqual(run.takeNext(known: known, openWorktrees: 1), "NEX-3", "NEX-2 was taken meanwhile")
+        XCTAssertTrue(run.reports["NEX-2"]?.text.contains("Skipped") == true)
+        XCTAssertNil(run.takeNext(known: known, openWorktrees: 2))
+        run.finish("NEX-1", stuck: false, report: "Landed")
+        XCTAssertEqual(run.tally, "1 in review")
+        XCTAssertEqual(run.active, ["NEX-3"])
+        XCTAssertEqual(run.branchPattern, "feat/<key>-<slug>")
+        run.enqueue("NEX-1")
+        XCTAssertTrue(run.queue.isEmpty, "a handled key isn't queued again")
+    }
+
+    func testWhatTheRunAllows() {
+        XCTAssertEqual(JiraRun.mcpTool("mcp__atlassian__transitionJiraIssue", servers: ProjectTracker.defaultMcpServers), "transitionJiraIssue")
+        XCTAssertNil(JiraRun.mcpTool("Bash", servers: ProjectTracker.defaultMcpServers))
+        XCTAssertEqual(JiraRun.decide(tool: "getJiraIssue", input: ["issueIdOrKey": "NEX-9"], key: "NEX-1"), .allow)
+        XCTAssertEqual(JiraRun.decide(tool: "searchJiraIssuesUsingJql", input: [:], key: "NEX-1"), .allow)
+        XCTAssertEqual(JiraRun.decide(tool: "transitionJiraIssue", input: ["issueIdOrKey": "nex-1", "transition": ["id": "21"]], key: "NEX-1"), .allow)
+        XCTAssertEqual(JiraRun.decide(tool: "addCommentToJiraIssue", input: ["issueIdOrKey": "NEX-1"], key: "NEX-1"), .allow)
+        XCTAssertEqual(JiraRun.decide(tool: "transitionJiraIssue", input: ["issueIdOrKey": "NEX-2"], key: "NEX-1"), .ask, "another issue")
+        XCTAssertEqual(JiraRun.decide(tool: "createJiraIssue", input: ["projectKey": "NEX"], key: "NEX-1"), .ask)
+        XCTAssertEqual(JiraRun.decide(tool: "editJiraIssue", input: ["issueIdOrKey": "NEX-1"], key: "NEX-1"), .ask)
+        XCTAssertEqual(JiraRun.askRules(servers: ["atlassian"]), [RuleEdit(behavior: "ask", rule: "mcp__atlassian")])
+        let prompt = JiraRun.prompt(for: issue("NEX-233", "Paginate"), tracker: ProjectTracker(site: "x"), startBranch: "feat/nex-251-api")
+        XCTAssertTrue(prompt.hasPrefix("Autopilot: NEX-233 Paginate\n\n/work-issue NEX-233"))
+        XCTAssertTrue(prompt.contains("starts from `feat/nex-251-api`"))
+        XCTAssertTrue(prompt.contains("Don't push or merge."))
+    }
+}

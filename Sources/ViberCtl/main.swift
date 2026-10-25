@@ -219,6 +219,20 @@ case "issue", "idea":
         if action == "failed", body.isEmpty { fail("viber: issue failed needs the reason\n\n\(usage)", code: 64) }
         checkLength(body, what: "report")
         guard let issue = ownIssue(in: list) else {
+            // A project on Jira: the session's issue is the key in its branch, and Viber's autopilot reads the report.
+            if TrackerList.load().tracker(for: projectPath()) != nil {
+                let head = Shell.run("git", ["rev-parse", "--abbrev-ref", "HEAD"], timeout: 5)
+                guard head.ok, let key = JiraIssue.key(inBranch: head.output) else {
+                    fail("viber: this session's branch names no Jira issue, so there is none to report on", code: 1)
+                }
+                switch action {
+                case "done": request = ViberRequest(paneID: paneID, command: .issueDone, text: body, key: key)
+                case "failed": request = ViberRequest(paneID: paneID, command: .issueFailed, text: body, key: key)
+                default: print("\(key) is in Jira; the project's skill moves it there."); exit(0)
+                }
+                confirmation = "Viber will note that \(key) \(action == "done" ? "landed" : "got stuck")."
+                break
+            }
             fail("viber: this session has no issue of its own (it wasn't started for one, and its branch names none), so there is none to mark", code: 1)
         }
         switch action {

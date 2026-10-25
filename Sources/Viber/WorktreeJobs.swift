@@ -46,6 +46,7 @@ final class WorktreeJob: Identifiable {
     var isRunning: Bool { phase == .running }
     var isRemoval: Bool { if case .remove = kind { return true }; return false }
     var issueID: String? { if case .create(let request) = kind { return request.issueID }; return nil }
+    var jiraRunKey: String? { if case .create(let request) = kind { return request.jiraRunKey }; return nil }
     /// The folder the session started from, or the worktree being removed.
     var location: String {
         switch kind {

@@ -178,7 +178,10 @@ struct ProjectView: View {
                     .help("Every project's own issues (⇧⌘I)")
             }
         } content: {
-            JiraIssuesSection(project: path, board: board)
+            VStack(alignment: .leading, spacing: 10) {
+                JiraRunCard(project: path)
+                JiraIssuesSection(project: path, board: board)
+            }
         }
     }
 

@@ -42,6 +42,14 @@ struct AutopilotSheetRequest: Identifiable {
     var id: String { project + "|" + (issueID ?? "") }
 }
 
+/// The Autopilot sheet on a Jira project: an epic's issues, or chosen ones.
+struct JiraRunSheetRequest: Identifiable {
+    var project: String
+    var epic: JiraIssue?
+    var keys: [String]
+    var id: String { project + "|" + (epic?.key ?? keys.joined(separator: ",")) }
+}
+
 /// The settings sheet of one session, opened on a tab.
 struct SettingsSheetRequest: Identifiable {
     var paneID: String
@@ -60,6 +68,9 @@ struct NewSessionRequest {
     var base: WorktreeBase = .originDefault
     /// A branch to start from instead: what an autopilot issue builds on when that isn't merged yet.
     var startBranch: String? = nil
+    /// The Jira issue a Jira autopilot run starts this session for, and rules the session starts with.
+    var jiraRunKey: String? = nil
+    var sessionRules: [RuleEdit] = []
     var permissionMode: String
     var firstMessage: String
     /// The issue this session is started for, linked to it once it opens.
@@ -114,6 +125,10 @@ final class AppModel {
     var jobs: [WorktreeJob] = []
     /// Projects whose issues are being implemented one after another, by path.
     var autopilots: [String: Autopilot] = [:]
+    /// The autopilot on Jira projects, by project; runs that ended stay in `finishedJiraRuns` until dismissed.
+    var jiraRuns: [String: JiraRun] = [:]
+    var finishedJiraRuns: [String: JiraRun] = [:]
+    var jiraRunSheet: JiraRunSheetRequest?
     /// Runs that ended, kept on the project's page until dismissed so you can see what they did.
     var finishedAutopilots: [String: Autopilot] = [:]
     var autopilotSheet: AutopilotSheetRequest?
@@ -222,7 +237,8 @@ final class AppModel {
             run(job)
         } else {
             open(title: title, spec: LaunchSpec(profile: request.profile, cwd: request.folder, permissionMode: mode, model: launchModel),
-                 worktree: nil, firstMessage: request.firstMessage, issueID: request.issueID, selecting: selecting)
+                 worktree: nil, firstMessage: request.firstMessage, issueID: request.issueID, jiraRunKey: request.jiraRunKey,
+                 rules: request.sessionRules, selecting: selecting)
         }
     }
 
@@ -250,8 +266,11 @@ final class AppModel {
 
     @discardableResult
     private func open(title: String, spec: LaunchSpec, worktree: WorktreeInfo?, firstMessage: String, issueID: String? = nil,
-                      selecting: Bool = true) -> Pane {
+                      jiraRunKey: String? = nil, rules: [RuleEdit] = [], selecting: Bool = true) -> Pane {
         let pane = Pane(title: title, spec: spec, worktree: worktree)
+        pane.jiraRunKey = jiraRunKey
+        pane.jiraServers = trackers.tracker(for: pane.projectPath)?.mcpServers ?? []
+        pane.sessionRules = rules
         wire(pane)
         panes.append(pane)
         ensureProject(pane.projectPath)
@@ -292,6 +311,7 @@ final class AppModel {
                     if let id = request.issueID { planningIssues.remove(id) }
                     fail(job, error, title: "worktree setup failed")
                     if let id = request.issueID { autopilotSetupFailed(id, error) }
+                    if let key = request.jiraRunKey { jiraSetupFailed(key, project: job.project, error) }
                 }
             }
         case .remove(let info, let deleteBranch):
@@ -322,9 +342,10 @@ final class AppModel {
         jobs.removeAll { $0.id == job.id }
         let pane = open(title: job.title, spec: LaunchSpec(profile: request.profile, cwd: info.path, permissionMode: mode,
                                                            model: model.isEmpty ? nil : model),
-                        worktree: info, firstMessage: request.firstMessage, issueID: request.issueID, selecting: watching)
+                        worktree: info, firstMessage: request.firstMessage, issueID: request.issueID, jiraRunKey: request.jiraRunKey,
+                        rules: request.sessionRules, selecting: watching)
         // An autopilot's sessions start unwatched by design.
-        if !(NSApp.isActive && watching), request.issueID.flatMap(autopilotProject(working:)) == nil {
+        if !(NSApp.isActive && watching), request.issueID.flatMap(autopilotProject(working:)) == nil, request.jiraRunKey == nil {
             notifier.post(id: "job:\(job.id):ready", title: "\(job.title) · worktree ready",
                           body: "The session has started in \((info.path as NSString).abbreviatingWithTildeInPath).",
                           target: Target.pane(pane.id).key, sound: false)
@@ -368,6 +389,7 @@ final class AppModel {
         pane.onStateChange = { [weak self] pane, previous in self?.stateChanged(pane, from: previous) }
         pane.onTurnFinished = { [weak self] pane in self?.turnFinished(pane) }
         pane.onRelayUpdate = { [weak self] pane, update in self?.relayUpdate(update, in: pane) }
+        pane.onJiraHold = { [weak self] pane, what in self?.holdJiraRun(pane, what) }
         pane.onOpenURL = { NSWorkspace.shared.open($0) }
         pane.onPersist = { [weak self] in self?.save() }
         pane.deviceHub = deviceHub
@@ -905,6 +927,198 @@ final class AppModel {
                                         firstMessage: ProjectTracker.draftPrompt(line, site: tracker.site), issueID: nil))
     }
 
+    // MARK: The autopilot on Jira
+
+    /// Opens the Autopilot sheet on an epic's issues, or on chosen keys.
+    func offerJiraRun(project: String, epic: JiraIssue? = nil, keys: [String] = []) {
+        if let epic, let board = jiraBoard(for: project), board.epicChildren[epic.key] == nil, !board.openEpics.contains(epic.key) {
+            board.toggleEpic(epic.key)
+        }
+        jiraRunSheet = JiraRunSheetRequest(project: project, epic: epic, keys: keys)
+    }
+
+    func startJiraRun(_ run: JiraRun) {
+        guard jiraRuns[run.project] == nil else { return }
+        jiraRuns[run.project] = run
+        finishedJiraRuns[run.project] = nil
+        advanceJiraRun(run.project)
+    }
+
+    /// Adds keys to the project's running Jira autopilot; ones it can't take are left alone, with a note.
+    func addToJiraRun(_ keys: [String], project: String) {
+        guard let board = jiraBoard(for: project) else { return }
+        for key in keys {
+            guard let issue = board.known[key], JiraRun.ineligible(issue, mine: board.isMine(issue)) == nil else { continue }
+            jiraRuns[project]?.enqueue(key)
+        }
+        advanceJiraRun(project)
+    }
+
+    func jiraRunPanes(_ project: String) -> [Pane] {
+        let active = jiraRuns[project]?.active ?? []
+        return panes.filter { $0.projectPath == project && $0.jiraRunKey.map(active.contains) == true }
+    }
+
+    func isJiraRunSession(_ pane: Pane) -> Bool {
+        guard let key = pane.jiraRunKey else { return false }
+        return jiraRuns[pane.projectPath]?.active.contains(key) == true
+    }
+
+    /// Why the run isn't starting another issue although some are queued.
+    func jiraRunWait(_ project: String) -> String? {
+        guard let run = jiraRuns[project], run.paused == nil, !run.stopping, !run.queue.isEmpty, run.active.count < run.sessionsAtOnce else { return nil }
+        let open = openWorktrees(in: project)
+        if open >= run.worktreesAtMost {
+            return "\(open) worktrees are open, the most this run allows. Shipped issues keep theirs until they are merged and cleaned up; the run continues when one is closed."
+        }
+        return nil
+    }
+
+    private func advanceJiraRun(_ project: String) {
+        guard var run = jiraRuns[project], run.paused == nil, let board = jiraBoard(for: project), let tracker = trackers.tracker(for: project) else { return }
+        if run.stuckInARow >= JiraRun.maxStuckInARow {
+            pauseJiraRun(project, "\(run.stuckInARow) issues in a row got stuck, so something may be wrong with the project. Look at their sessions, then resume.")
+            return
+        }
+        var starting: [JiraIssue] = []
+        if !run.stopping {
+            while let key = run.takeNext(known: board.known, openWorktrees: openWorktrees(in: project) + starting.count) {
+                if let issue = board.known[key] { starting.append(issue) }
+                else { run.finish(key, stuck: true, report: "Viber hadn't loaded \(key); open a view that lists it, then add it to the run again.") }
+            }
+        }
+        if starting.isEmpty, run.active.isEmpty, run.stopping || run.queue.isEmpty {
+            jiraRuns[project] = nil
+            finishedJiraRuns[project] = run
+            notifier.post(id: "jirarun:\(project):\(Date().timeIntervalSince1970)", title: "Autopilot · \(projectName(project))",
+                          body: (run.stopping ? "Stopped as you asked: " : "Nothing left in \(run.label): ") + run.tally + ". Nothing was pushed or merged.",
+                          target: Target.project(project).key)
+            return
+        }
+        jiraRuns[project] = run
+        for issue in starting {
+            createSession(NewSessionRequest(folder: project, profile: run.profile, useWorktree: true, name: "\(issue.key) \(issue.summary)",
+                                            jiraRunKey: issue.key, sessionRules: JiraRun.askRules(servers: tracker.mcpServers),
+                                            permissionMode: run.permissionMode, firstMessage: JiraRun.prompt(for: issue, tracker: tracker),
+                                            issueID: nil, issueKey: issue.key, branchPattern: run.branchPattern),
+                          selecting: false)
+        }
+    }
+
+    private func reportJira(from pane: Pane, text: String, finished: Bool) {
+        guard let key = pane.jiraRunKey, jiraRuns[pane.projectPath]?.active.contains(key) == true else { return }
+        let project = pane.projectPath
+        jiraRuns[project]?.finish(key, stuck: !finished, report: text.isEmpty ? (finished ? "Landed; in review." : "Stuck.") : text)
+        if !finished {
+            notifier.post(id: "jirarun:\(key):stuck", title: "\(key) · stuck", body: String(text.prefix(180)), target: Target.pane(pane.id).key)
+        }
+        jiraBoards[project]?.reload()
+        advanceJiraRun(project)
+    }
+
+    private func jiraTurnEnded(_ pane: Pane, stalled: Bool = false) {
+        guard let key = pane.jiraRunKey, let run = jiraRuns[pane.projectPath], run.active.contains(key), run.paused == nil else { return }
+        let project = pane.projectPath
+        if let stopped = pane.interruptedAt, Date().timeIntervalSince(stopped) < 120 {
+            pane.interruptedAt = nil
+            pauseJiraRun(project, "You stopped “\(pane.title)”. Resume to let it carry on, or skip it.")
+            return
+        }
+        if pane.state == .failed, let limit = pane.chat.usageLimit {
+            pauseJiraRun(project, "The \(limit.name) was reached.", notify: pane.continueAt == nil)
+            return
+        }
+        switch pane.state {
+        case .failed, .exited:
+            pauseJiraRun(project, "“\(pane.title)” stopped with an error. Look at it, then resume.")
+        case .finished, .idle:
+            let background = !pane.chat.controls.runningTasks.isEmpty || !pane.chat.runningAgents.isEmpty
+            switch run.afterTurn(for: key, backgroundWork: background && !stalled) {
+            case .wait: break
+            case .nudge:
+                jiraRuns[project]?.nudged(key)
+                submit(run.nudge(for: key), in: pane)
+            case .giveUp:
+                giveUpJira(on: key, project: project, why: "Its session kept stopping without saying whether it finished.")
+            }
+        default: break
+        }
+    }
+
+    private func giveUpJira(on key: String, project: String, why: String) {
+        jiraRuns[project]?.finish(key, stuck: true, report: why)
+        notifier.post(id: "jirarun:\(key):stuck", title: "\(key) · stuck", body: why, target: Target.project(project).key)
+        advanceJiraRun(project)
+    }
+
+    private func jiraSetupFailed(_ key: String, project: String, _ error: Error) {
+        guard jiraRuns[project]?.active.contains(key) == true else { return }
+        jiraRuns[project]?.finish(key, stuck: true, report: "The autopilot couldn't make its worktree: \(error.localizedDescription)")
+        pauseJiraRun(project, "The worktree for \(key) couldn't be made. Its setup's output is in the sidebar.")
+    }
+
+    /// A session asked for a Jira change the run doesn't make on its own: the prompt waits in the session, and the
+    /// run starts nothing more until it is answered.
+    private func holdJiraRun(_ pane: Pane, _ what: String) {
+        guard let key = pane.jiraRunKey, jiraRuns[pane.projectPath]?.active.contains(key) == true,
+              jiraRuns[pane.projectPath]?.paused == nil else { return }
+        jiraRuns[pane.projectPath]?.heldBy = pane.id
+        pauseJiraRun(pane.projectPath, "\(key)'s session wants \(what). That isn't one of the run's own changes, so it waits for you in the session.")
+    }
+
+    private func pauseJiraRun(_ project: String, _ reason: String, notify: Bool = true) {
+        guard jiraRuns[project] != nil else { return }
+        jiraRuns[project]?.paused = reason
+        guard notify else { return }
+        notifier.post(id: "jirarun:\(project):paused:\(Date().timeIntervalSince1970)", title: "Autopilot paused · \(projectName(project))",
+                      body: reason, target: Target.project(project).key)
+    }
+
+    func resumeJiraRun(_ project: String) {
+        guard jiraRuns[project]?.paused != nil else { return }
+        jiraRuns[project]?.resume()
+        for pane in jiraRunPanes(project) where pane.state != .working && !pane.state.needsYou {
+            submit(JiraRun.resumeMessage, in: pane)
+        }
+        advanceJiraRun(project)
+    }
+
+    func toggleStopJiraRunAfterCurrent(_ project: String) {
+        guard let run = jiraRuns[project] else { return }
+        if run.active.isEmpty { stopJiraRun(project); return }
+        jiraRuns[project]?.stopping.toggle()
+    }
+
+    func skipJiraIssue(_ key: String, project: String) {
+        guard jiraRuns[project]?.active.contains(key) == true else { return }
+        for pane in jiraRunPanes(project) where pane.jiraRunKey == key {
+            pane.interrupt()
+            pane.interruptedAt = nil
+            pane.continueAt = nil
+        }
+        if let job = jobs.first(where: { $0.project == project && $0.jiraRunKey == key }) { dismiss(job) }
+        jiraRuns[project]?.finish(key, stuck: true, report: "You skipped it. Its session stays open; move \(key) back in Jira if the skill left it In Progress.")
+        jiraRuns[project]?.resume()
+        advanceJiraRun(project)
+    }
+
+    func stopJiraRun(_ project: String) {
+        guard var run = jiraRuns[project] else { return }
+        jiraRuns[project] = nil
+        run.stopping = true
+        finishedJiraRuns[project] = run
+        for job in jobs where job.project == project && job.jiraRunKey != nil { dismiss(job) }
+        for pane in panes where pane.projectPath == project && pane.jiraRunKey.map(run.active.contains) == true {
+            pane.interrupt()
+            pane.interruptedAt = nil
+            pane.continueAt = nil
+        }
+    }
+
+    func dismissFinishedJiraRun(_ project: String) {
+        finishedJiraRuns[project] = nil
+    }
+
     // MARK: Autopilot
 
     /// Opens the Autopilot sheet on a project's issues to plan, or on one issue.
@@ -1074,6 +1288,13 @@ final class AppModel {
                 autopilotTurnEnded(pane, stalled: true)
             }
         }
+        for project in jiraRuns.keys {
+            for pane in jiraRunPanes(project) {
+                if pane.state == .exited { jiraTurnEnded(pane); continue }
+                guard [.finished, .idle].contains(pane.state), now.timeIntervalSince(pane.lastActivity) > Autopilot.stallInterval else { continue }
+                jiraTurnEnded(pane, stalled: true)
+            }
+        }
     }
 
     private func giveUp(on issueID: String, project: String, why: String) {
@@ -1188,6 +1409,8 @@ final class AppModel {
         save()
         if let issue = issues.issue(startedIn: pane.id), let project = autopilotProject(working: issue.id) {
             giveUp(on: issue.id, project: project, why: "Its session was closed before it said how it went.")
+        } else if let key = pane.jiraRunKey, jiraRuns[pane.projectPath]?.active.contains(key) == true {
+            giveUpJira(on: key, project: pane.projectPath, why: "Its session was closed before it said how it went.")
         } else if removeWorktree, let issue = issue(for: pane), issue.status == .started || issue.status == .review {
             // /cleanup only removes a worktree whose branch is merged, so the issue it was for is done.
             issues.setStatus(issue.id, .done)
@@ -1228,6 +1451,9 @@ final class AppModel {
 
     private func stateChanged(_ pane: Pane, from previous: PaneState) {
         updateBadge()
+        // The held Jira change was answered: the run goes on.
+        if pane.jiraRunKey != nil, previous == .permission, pane.state != .permission,
+           let run = jiraRuns[pane.projectPath], run.heldBy == pane.id { resumeJiraRun(pane.projectPath) }
         let state = pane.state
         let target = Target.pane(pane.id)
         let focused = NSApp.isActive && selection == target
@@ -1258,7 +1484,7 @@ final class AppModel {
     private func turnFinished(_ pane: Pane) {
         // A `viber issue done` from the turn that just ended decides what the autopilot does next: read it now,
         // not on the next poll.
-        if isAutopilotSession(pane) {
+        if isAutopilotSession(pane) || isJiraRunSession(pane) {
             drainRequests()
             guard panes.contains(where: { $0 === pane }) else { return }
         }
@@ -1271,6 +1497,7 @@ final class AppModel {
         waitOutLimit(pane)
         save()
         autopilotTurnEnded(pane)
+        jiraTurnEnded(pane)
     }
 
     /// Reads the worktree's diff stat and the branch checked out in it.
@@ -1371,9 +1598,11 @@ final class AppModel {
             case .issueAdd:
                 addIssue(request.text ?? "", project: pane.projectPath, by: pane.title, parent: request.parent, blockedBy: request.blockedBy ?? [])
             case .issueDone, .issueFailed:
-                reportIssue(from: pane, text: request.text ?? "", finished: request.command == .issueDone)
+                if pane.jiraRunKey != nil { reportJira(from: pane, text: request.text ?? "", finished: request.command == .issueDone) }
+                else { reportIssue(from: pane, text: request.text ?? "", finished: request.command == .issueDone) }
             case .issueShipped:
-                shipped(from: pane, text: request.text ?? "")
+                // On a Jira project the repository's skill moves the issue; Viber only reads.
+                if trackers.tracker(for: pane.projectPath) == nil { shipped(from: pane, text: request.text ?? "") }
             case .issueUpdate:
                 guard let key = request.key, let issue = issues.issue(key, in: pane.projectPath) else { continue }
                 if let status = request.status.flatMap(Issue.Status.init(rawValue:)) { setIssueStatus(issue.id, status) }

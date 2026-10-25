@@ -81,6 +81,11 @@ struct JiraIssuesSection: View {
                 Button { query = ""; board.search = ""; board.load() } label: { Image(systemName: "xmark.circle.fill") }
                     .buttonStyle(.borderless).foregroundStyle(.secondary).help("Clear the search")
             }
+            if model.jiraRuns[project] == nil, !board.byEpic, board.issues.contains(where: { JiraRun.ineligible($0, mine: board.isMine($0)) == nil }) {
+                Button { model.offerJiraRun(project: project, keys: board.issues.map(\.key)) } label: { Image(systemName: "airplane") }
+                    .buttonStyle(.borderless)
+                    .help("Autopilot: implement the issues in this view that are to do and yours or unassigned, several at a time")
+            }
             Button { board.reload() } label: { Image(systemName: "arrow.clockwise") }
                 .buttonStyle(.borderless)
                 .disabled(board.loading)
@@ -167,6 +172,14 @@ struct JiraIssuesSection: View {
                 Spacer(minLength: 8)
                 if let kids = board.epicChildren[epic.key] { Text("\(kids.count) open").font(.caption).foregroundStyle(.secondary) }
                 JiraStatusChip(issue: epic)
+                if model.jiraRuns[project] == nil {
+                    Button { model.offerJiraRun(project: project, epic: epic) } label: { Label("Autopilot…", systemImage: "airplane") }
+                        .buttonStyle(.link).font(.caption)
+                        .help("Implement the epic's issues that are to do and yours or unassigned, several at a time")
+                } else if let kids = board.epicChildren[epic.key] {
+                    Button("Add to Autopilot") { model.addToJiraRun(kids.map(\.key), project: project) }
+                        .buttonStyle(.link).font(.caption)
+                }
                 Link(destination: board.site?.browseURL(epic.key) ?? URL(fileURLWithPath: "/")) { Image(systemName: "arrow.up.right.square") }
                     .foregroundStyle(.secondary).help("Open in Jira")
             }
@@ -270,6 +283,15 @@ struct JiraIssueRow: View {
         .contextMenu {
             if let url = board.site?.browseURL(issue.key) { Link("Open in Jira", destination: url) }
             Button("Copy Key") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(issue.key, forType: .string) }
+            if !issue.isEpic, JiraRun.ineligible(issue, mine: board.isMine(issue)) == nil {
+                if let run = model.jiraRuns[project] {
+                    if !run.queue.contains(issue.key), !run.active.contains(issue.key) {
+                        Button("Add to Autopilot") { model.addToJiraRun([issue.key], project: project) }
+                    }
+                } else {
+                    Button("Implement on Autopilot…") { model.offerJiraRun(project: project, keys: [issue.key]) }
+                }
+            }
             if issue.category != .done, !issue.isEpic, pane == nil { Button("Start in a New Session") { model.startJiraIssue(issue, project: project) } }
         }
     }
@@ -348,6 +370,12 @@ struct TrackerSettingsRows: View {
             Divider()
             SettingRowView(label: "Account", note: "The login those sessions use; it needs the Atlassian connector for the skills that change Jira.") {
                 AccountPicker(selection: Binding(get: { tracker.profile }, set: { name in save { $0.profile = name } }), label: "Account").labelsHidden().fixedSize()
+            }
+            Divider()
+            SettingRowView(label: "Jira in sessions", note: "The MCP servers that reach Jira, by name, separated by commas. An autopilot run makes their calls ask, allows the skill's own changes and holds the rest for you.") {
+                TextField("Servers", text: Binding(get: { tracker.mcpServers.joined(separator: ", ") },
+                                                   set: { text in save { $0.mcpServers = text.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty } } }))
+                    .textFieldStyle(.roundedBorder).font(.callout.monospaced()).frame(width: 220)
             }
             Divider()
             SettingRowView(label: "Refresh", note: "How often the shown view is read again.") {

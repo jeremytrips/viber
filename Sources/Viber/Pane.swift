@@ -100,6 +100,11 @@ final class Pane: Identifiable {
     @ObservationIgnored var onStateChange: ((Pane, PaneState) -> Void)?
     @ObservationIgnored var onTurnFinished: ((Pane) -> Void)?
     @ObservationIgnored var onRelayUpdate: ((Pane, RelayUpdate) -> Void)?
+    /// A Jira autopilot session asked for a Jira change the run doesn't make on its own; the prompt is shown as usual.
+    @ObservationIgnored var onJiraHold: ((Pane, String) -> Void)?
+    /// The Jira issue an autopilot run started this session for, and the MCP servers whose calls the run decides on.
+    @ObservationIgnored var jiraRunKey: String?
+    @ObservationIgnored var jiraServers: [String] = []
     /// Opens a sign-in page for an MCP server.
     @ObservationIgnored var onOpenURL: ((URL) -> Void)?
 
@@ -179,6 +184,7 @@ final class Pane: Identifiable {
     private func handle(_ message: JSON) {
         if let call = SdkMcp.Incoming(message) { answer(call); return }
         if let reply = previewPermission(message) { process?.send(reply); return }
+        if let reply = jiraPermission(message) { process?.send(reply); return }
         if message["type"]?.string == "control_cancel_request", let id = message["request_id"]?.string,
            let task = mcpTasks.removeValue(forKey: id) {
             task.cancel()
@@ -462,6 +468,23 @@ final class Pane: Identifiable {
                                       actionsOnLocalPages: Prefs.bool(Prefs.previewLocalActions))
         guard allowed else { return nil }
         var response: [String: JSON] = ["behavior": "allow", "updatedInput": request["input"] ?? [:]]
+        if let toolUseID = request["tool_use_id"]?.string { response["toolUseID"] = .string(toolUseID) }
+        return ChatTranscript.controlSuccess(requestID, .object(response))
+    }
+
+    /// In a Jira autopilot session every call to the Jira servers asks (a session rule): reads and the skill's own
+    /// changes on the run's issue are allowed here; anything else is shown to the user and holds the run.
+    private func jiraPermission(_ message: JSON) -> JSON? {
+        guard let key = jiraRunKey, message["type"]?.string == "control_request", let request = message["request"],
+              request["subtype"]?.string == "can_use_tool", let requestID = message["request_id"]?.string,
+              let toolName = request["tool_name"]?.string, let tool = JiraRun.mcpTool(toolName, servers: jiraServers) else { return nil }
+        let input = request["input"] ?? [:]
+        guard JiraRun.decide(tool: tool, input: input, key: key) == .allow else {
+            let target = ["issueIdOrKey", "issueKey", "projectKey"].compactMap { input[$0]?.string }.first
+            onJiraHold?(self, tool + (target.map { " on \($0)" } ?? ""))
+            return nil
+        }
+        var response: [String: JSON] = ["behavior": "allow", "updatedInput": input]
         if let toolUseID = request["tool_use_id"]?.string { response["toolUseID"] = .string(toolUseID) }
         return ChatTranscript.controlSuccess(requestID, .object(response))
     }

@@ -126,6 +126,7 @@ struct ContentView: View {
         .sheet(isPresented: $model.showSwitcher) { QuickSwitcher() }
         .sheet(item: $model.closing) { pane in CloseSheet(pane: pane) }
         .sheet(item: $model.autopilotSheet) { request in AutopilotSheet(request: request) }
+        .sheet(item: $model.jiraRunSheet) { request in JiraRunSheet(request: request) }
         .sheet(item: $model.settingsSheet) { request in
             if let pane = model.pane(request.paneID) { SessionSettingsSheet(pane: pane, tab: request.tab) }
         }

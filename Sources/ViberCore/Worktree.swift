@@ -254,6 +254,8 @@ public enum Worktree {
     /// The slug for `<slug>`: the name's, with the issue's key in front when the pattern has nowhere else for it.
     static func slug(forName name: String, pattern: String, key: String?) -> String {
         var s = slug(name)
+        // A name that starts with the key ("NEX-198 Invite links") would repeat it next to `<key>`.
+        if let key, !key.isEmpty, s.hasPrefix(slug(key) + "-") { s = String(s.dropFirst(slug(key).count + 1)) }
         if s.isEmpty { s = "session" }
         if let key, !key.isEmpty, placeholders(in: pattern) == ["<slug>"] { s = slug(key) + "-" + s }
         return s

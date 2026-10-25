@@ -113,6 +113,9 @@ final class IssueTests: XCTestCase {
         XCTAssertEqual(Worktree.defaultBranch(forName: "Docker image", pattern: "feat/<id>-<slug>", key: "EST-12"), "feat/<id>-docker-image",
                        "a part only the user knows is left for the sheet")
         XCTAssertEqual(Worktree.defaultBranch(forName: "Docker image", pattern: "viber/<slug>"), "viber/docker-image")
+        XCTAssertEqual(Worktree.defaultBranch(forName: "NEX-198 Invite links expire", pattern: "feat/<key>-<slug>", key: "NEX-198"),
+                       "feat/nex-198-invite-links-expire", "a name that starts with the key doesn't repeat it")
+        XCTAssertEqual(Worktree.defaultBranch(forName: "NEX-198 Invite links expire", pattern: "viber/<slug>", key: "NEX-198"), "viber/nex-198-invite-links-expire")
         XCTAssertFalse(Worktree.needsInput("feat/<key>-<slug>", key: "EST-12"))
         XCTAssertTrue(Worktree.needsInput("feat/<key>-<slug>"), "a plain new session has no key")
         XCTAssertTrue(Worktree.needsInput("feat/<id>-<key>-<slug>", key: "EST-12"))

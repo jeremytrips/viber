@@ -24,13 +24,31 @@ public struct ProjectTracker: Codable, Equatable, Sendable {
     public var profile: String?
     /// Refresh the shown view this often.
     public var refreshSeconds: Int
+    /// The MCP servers that reach Jira in sessions, by name: what an autopilot run makes ask so it can allow the
+    /// skill's own changes and hold the rest.
+    public var mcpServers: [String]
 
     public init(site: String, views: [JiraView] = [], startMessage: String = ProjectTracker.defaultStartMessage,
-                profile: String? = nil, refreshSeconds: Int = 60) {
+                profile: String? = nil, refreshSeconds: Int = 60, mcpServers: [String] = ProjectTracker.defaultMcpServers) {
         self.site = site; self.views = views; self.startMessage = startMessage; self.profile = profile; self.refreshSeconds = refreshSeconds
+        self.mcpServers = mcpServers
+    }
+
+    private enum CodingKeys: String, CodingKey { case site, views, startMessage, profile, refreshSeconds, mcpServers }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        site = try c.decode(String.self, forKey: .site)
+        views = try c.decodeIfPresent([JiraView].self, forKey: .views) ?? []
+        startMessage = try c.decodeIfPresent(String.self, forKey: .startMessage) ?? Self.defaultStartMessage
+        profile = try c.decodeIfPresent(String.self, forKey: .profile)
+        refreshSeconds = try c.decodeIfPresent(Int.self, forKey: .refreshSeconds) ?? 60
+        mcpServers = try c.decodeIfPresent([String].self, forKey: .mcpServers) ?? Self.defaultMcpServers
     }
 
     public static let defaultStartMessage = "/work-issue <key>"
+    /// Atlassian's MCP server as `claude mcp add` names it, and as the claude.ai connector appears.
+    public static let defaultMcpServers = ["atlassian", "claude_ai_Atlassian"]
 
     /// The views a project starts with, for its Jira project keys.
     public static func defaultViews(projectKeys: [String]) -> [JiraView] {
