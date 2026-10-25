@@ -325,6 +325,7 @@ struct ProjectView: View {
                     }
                     Divider()
                 }
+                requestCheckRows
                 SettingRow(label: "Claude Code settings",
                            note: "Permissions, hooks and MCP servers for every session here. Viber keeps the personal file out of git.") {
                     SettingsFileButton(title: "Shared", url: SettingsFile.url(.projectShared, cwd: path))
@@ -343,6 +344,31 @@ struct ProjectView: View {
                 }
             }
         }
+    }
+
+    /// The check after each request: on or off, and the command that runs the tests.
+    @ViewBuilder private var requestCheckRows: some View {
+        let check = model.requestChecks[path] ?? RequestCheck()
+        SettingRow(label: "After each request",
+                   note: "When a session finishes a request that changed files, Viber has it run the tests and /code-review, then fix what they find. Autopilot sessions do it before they ship. Saved in Viber, not in the repository.") {
+            Toggle("After each request", isOn: Binding(get: { check.enabled }, set: { on in changeCheck { $0.enabled = on } }))
+                .toggleStyle(.switch).controlSize(.small).labelsHidden()
+        }
+        Divider()
+        if check.enabled {
+            SettingRow(label: "Tests", note: "The command that runs them. Empty: Claude runs them the way the project's CLAUDE.md or build files say.") {
+                TextField("Test command", text: Binding(get: { check.testCommand }, set: { text in changeCheck { $0.testCommand = text } }),
+                          prompt: Text("Claude finds it"))
+                    .textFieldStyle(.roundedBorder).font(.callout.monospaced()).frame(width: 220)
+            }
+            Divider()
+        }
+    }
+
+    private func changeCheck(_ change: (inout RequestCheck) -> Void) {
+        var check = model.requestChecks[path] ?? RequestCheck()
+        change(&check)
+        model.setRequestCheck(check, for: path)
     }
 
     private func createRepo() {

@@ -149,6 +149,21 @@ final class AutopilotTests: XCTestCase {
         XCTAssertFalse(pilot([issue], finish: .commit).prompt(for: issue, in: list).contains("blocked by"), "a done blocker is no blocker")
     }
 
+    func testPromptReviewsBeforeShippingWhenTheProjectChecksEachRequest() throws {
+        var list = IssueList()
+        let issue = try XCTUnwrap(list.add("Add search", project: "/repo", by: "you", at: at))
+        let plain = pilot([issue]).prompt(for: issue, in: list)
+        XCTAssertFalse(plain.contains("code-review"))
+        XCTAssertTrue(plain.contains("\n5. Report, as your last step"))
+
+        let checked = pilot([issue]).prompt(for: issue, in: list, check: RequestCheck(enabled: true, testCommand: "swift test"))
+        let review = try XCTUnwrap(checked.range(of: "4. Before shipping, the project asks for its tests and a code review: Run the tests with `swift test`"))
+        let ship = try XCTUnwrap(checked.range(of: "5. Ship it: commit, push the branch"))
+        XCTAssertLessThan(review.lowerBound, ship.lowerBound, "reviewed before it ships")
+        XCTAssertTrue(checked.contains("own `code-review` skill"))
+        XCTAssertTrue(checked.contains("\n6. Report, as your last step"))
+    }
+
     func testReportsFinishOrKeepTheIdeaStarted() throws {
         var list = IssueList()
         let shipped = try XCTUnwrap(list.add("shipped", project: "/repo", by: "you"))

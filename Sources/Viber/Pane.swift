@@ -58,6 +58,8 @@ final class Pane: Identifiable {
     var continueAt: Date? { didSet { if continueAt != oldValue { onPersist?() } } }
     /// When Stop was last pressed, so an autopilot run can tell your stop from Claude ending its turn.
     @ObservationIgnored var interruptedAt: Date?
+    /// The project's check after a request: when the request started, and the check Viber sent.
+    @ObservationIgnored var checks = CheckProgress()
     /// `//` messages this session has yet to answer, by the chat item each arrived as.
     var answering: [String: IncomingRelay] = [:]
     var sessionRules: [RuleEdit] = []
@@ -99,6 +101,8 @@ final class Pane: Identifiable {
     @ObservationIgnored var onPersist: (() -> Void)?
     @ObservationIgnored var onStateChange: ((Pane, PaneState) -> Void)?
     @ObservationIgnored var onTurnFinished: ((Pane) -> Void)?
+    /// A message started a new request, rather than joining the one Claude works on.
+    @ObservationIgnored var onRequestStarted: ((Pane) -> Void)?
     @ObservationIgnored var onRelayUpdate: ((Pane, RelayUpdate) -> Void)?
     /// A Jira autopilot session asked for a Jira change the run doesn't make on its own; the prompt is shown as usual.
     @ObservationIgnored var onJiraHold: ((Pane, String) -> Void)?
@@ -233,11 +237,14 @@ final class Pane: Identifiable {
 
     func send(_ message: JSON) { process?.send(message) }
 
-    /// Sends a user message, starting the process first if needed.
-    func sendUser(_ text: String, images: [ImageAttachment] = [], binDir: String?, pluginDir: String?) {
+    /// Sends a user message, starting the process first if needed. `continuing` keeps it in the request at hand rather
+    /// than starting one: the continue after a usage limit, and Viber's check after the request.
+    func sendUser(_ text: String, images: [ImageAttachment] = [], binDir: String?, pluginDir: String?, continuing: Bool = false) {
         if authFailed { restart(binDir: binDir, pluginDir: pluginDir) }
         if !isRunning { start(binDir: binDir, pluginDir: pluginDir) }
         let before = chat.state
+        // A message that finds Claude idle starts a request; one sent while it works joins the one running.
+        if !continuing, before != .working, !before.needsYou { startRequest() }
         process?.send(chat.userMessage(text, images: images))
         lastActivity = Date()
         notifyIfChanged(from: before)
@@ -257,11 +264,18 @@ final class Pane: Identifiable {
         if relay.isReply {
             process?.send(chat.receiveReply(from: relay.sourceTitle, text: relay.text))
         } else {
+            // Another session's request, like one you type.
+            if before != .working, !before.needsYou { startRequest() }
             process?.send(chat.receiveRelay(from: relay.sourceTitle, text: relay.text))
             if let item = chat.lastItemID { answering[item] = relay }
         }
         lastActivity = Date()
         notifyIfChanged(from: before)
+    }
+
+    private func startRequest() {
+        checks.requestStarted(at: Date())
+        onRequestStarted?(self)
     }
 
     func interrupt() {
@@ -301,6 +315,7 @@ final class Pane: Identifiable {
         process?.terminate()
         process = nil
         chat = ChatTranscript()
+        checks = CheckProgress()
         spec.resume = nil
         started = false
         authFailed = false

@@ -134,10 +134,12 @@ public struct JiraRun: Equatable, Sendable {
 
     // MARK: The session's first message
 
-    public static func prompt(for issue: JiraIssue, tracker: ProjectTracker, startBranch: String? = nil) -> String {
+    /// `check` is the project's check after each request, which the session runs before it commits.
+    public static func prompt(for issue: JiraIssue, tracker: ProjectTracker, startBranch: String? = nil, check: RequestCheck? = nil) -> String {
         let start = tracker.startMessage.replacingOccurrences(of: "<key>", with: issue.key)
         var notes = ""
         if let startBranch { notes = "\nThis worktree starts from `\(startBranch)`, which has the work this issue builds on; it isn't merged yet.\n" }
+        let review = check.map { "- Before you commit, the project asks for its tests and a code review: \($0.beforeShipping)\n" } ?? ""
         return """
         Autopilot: \(issue.key) \(issue.summary)
 
@@ -154,7 +156,7 @@ public struct JiraRun: Equatable, Sendable {
         - Jira: this run lets you read anything, and move \(issue.key) and comment on it, as the project's skill does. Any other \
         Jira change (a new issue, editing another one, Done, Wontfix) waits for the user, so avoid it; put what you'd have \
         written in \(issue.key)'s comment instead.
-        - Finish: commit on this branch and stop at the status the project's skill uses for "landed, not merged" (In Review). \
+        \(review)- Finish: commit on this branch and stop at the status the project's skill uses for "landed, not merged" (In Review). \
         Don't push or merge. The user ships the branch.
         - Report, as your last step: `viber issue done "<what landed, in a sentence>"` once the branch is committed and the \
         issue moved, or `viber issue failed "<why>"` if you can't finish it; before that, move \(issue.key) back to To Do \

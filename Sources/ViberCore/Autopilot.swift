@@ -156,9 +156,10 @@ public struct Autopilot: Equatable, Sendable {
     public mutating func nudged(_ id: String) { nudges[id, default: 0] += 1 }
 
     /// The first message of an issue's session: the issue, and how to see it through alone. `startBranch` is the
-    /// branch the worktree starts from when that isn't the usual base: a blocker's, shipped but not merged.
+    /// branch the worktree starts from when that isn't the usual base: a blocker's, shipped but not merged. `check`
+    /// is the project's check after each request, which the session runs before it ships.
     /// Its first line names the issue, since lists of past sessions title them by their first message.
-    public func prompt(for issue: Issue, in list: IssueList, startBranch: String? = nil) -> String {
+    public func prompt(for issue: Issue, in list: IssueList, startBranch: String? = nil, check: RequestCheck? = nil) -> String {
         var notes: [String] = []
         if let startBranch {
             notes.append("This worktree starts from `\(startBranch)`, which has the work this issue builds on; it isn't merged yet.")
@@ -169,6 +170,20 @@ public struct Autopilot: Equatable, Sendable {
                 + ". If that work really is missing here, report failed right away and say so.")
         }
         let extra = notes.isEmpty ? "" : "\n" + notes.joined(separator: "\n") + "\n"
+        let steps = [
+            "Read the code it touches and decide how to do it. Don't ask questions or wait for approval. "
+                + "Where something is unclear, pick what fits the project best and say so in the commit message.",
+            "Implement it in this worktree, on its branch. Keep to the issue: save anything else worth doing with "
+                + "`viber issue add` (the /issue skill) instead of doing it.",
+            "Check it the way the project requires (its CLAUDE.md, AGENTS.md or skills): build, run the tests and checks, "
+                + "and fix what fails. Stop any dev server or other background command you started.",
+            check.map { "Before shipping, the project asks for its tests and a code review: " + $0.beforeShipping },
+            finishStep,
+            "Report, as your last step: `viber issue done \"<what shipped, in a sentence>\"` once it is shipped, or "
+                + "`viber issue failed \"<why>\"` if you can't finish it (it can't be done as described, it needs a decision only "
+                + "the user can make, or the checks keep failing). Either one ends your work here; Viber starts the next issue "
+                + "in a session of its own.",
+        ].compactMap { $0 }
         return """
         Autopilot: \(issue.key) \(issue.title)
 
@@ -179,17 +194,7 @@ public struct Autopilot: Equatable, Sendable {
 
         \(issue.text)
         \(extra)
-        1. Read the code it touches and decide how to do it. Don't ask questions or wait for approval. \
-        Where something is unclear, pick what fits the project best and say so in the commit message.
-        2. Implement it in this worktree, on its branch. Keep to the issue: save anything else worth doing with \
-        `viber issue add` (the /issue skill) instead of doing it.
-        3. Check it the way the project requires (its CLAUDE.md, AGENTS.md or skills): build, run the tests and checks, \
-        and fix what fails. Stop any dev server or other background command you started.
-        4. \(finishStep)
-        5. Report, as your last step: `viber issue done "<what shipped, in a sentence>"` once it is shipped, or \
-        `viber issue failed "<why>"` if you can't finish it (it can't be done as described, it needs a decision only \
-        the user can make, or the checks keep failing). Either one ends your work here; Viber starts the next issue \
-        in a session of its own.
+        \(steps.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n"))
 
         The project's rules for commits, checks and shipping come first. This run approves the steps above, \
         so don't stop to ask before them.

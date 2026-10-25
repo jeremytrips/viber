@@ -83,6 +83,7 @@ struct AutopilotSheet: View {
                     Stepper("Worktrees at most: \(worktrees)", value: $worktrees, in: max(sessions, 1)...32)
                     note(finish == .merge ? "Counts the project's open worktree sessions. Merged issues close theirs, so this rarely matters."
                          : "Counts the project's open worktree sessions, including issues waiting for review: a shipped issue keeps its worktree until it is merged and cleaned up, so the run can't get further ahead of you than this.")
+                    CheckBeforeShipping(project: request.project)
                     LabeledContent("Branches") {
                         Text(repo.map { $0.usesHook ? "Made by the project's WorktreeCreate hook" : Autopilot.usablePattern($0.pattern) } ?? "")
                     }
@@ -115,6 +116,7 @@ struct AutopilotSheet: View {
     private func note(_ text: String) -> some View {
         Text(text).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
     }
+
 
     private var finishNote: String {
         switch finish {
@@ -312,5 +314,25 @@ struct AutopilotCard: View {
         .fixedSize()
         .controlSize(.small)
         .help("Stop after the issues it is on, or stop now (their sessions stay open)")
+    }
+}
+
+
+/// An autopilot sheet's row on the project's check after each request, which its sessions run before they ship
+/// (or, on Jira, commit).
+struct CheckBeforeShipping: View {
+    @Environment(AppModel.self) private var model
+    let project: String
+    var commits = false
+
+    var body: some View {
+        let on = model.requestCheck(for: project) != nil
+        let ships = commits ? "commits" : "ships"
+        LabeledContent(commits ? "Before committing" : "Before shipping") {
+            Text(on ? "Tests and /code-review" : "The project's checks")
+        }
+        Text(on ? "After each request is on in the project's Settings tab, so each session also runs /code-review and fixes what it finds before it \(ships)."
+             : "Turn on After each request in the project's Settings tab to have each session also run /code-review before it \(ships).")
+            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
     }
 }
