@@ -50,6 +50,35 @@ struct JiraRunSheetRequest: Identifiable {
     var id: String { project + "|" + (epic?.key ?? keys.joined(separator: ",")) }
 }
 
+/// A project's account changed while some of its open sessions run on another; an alert offers to move them.
+struct AccountMove: Identifiable {
+    var project: String
+    /// The clauth profile they would move to; nil for the plain `claude` login.
+    var profile: String?
+    var sessions: Int
+    /// How many of them wait out a usage limit, which they would carry on from at once.
+    var waiting: Int
+    /// An autopilot run is going in the project; its next sessions would move too.
+    var autopilot: Bool
+    var id: String { project }
+
+    var title: String {
+        "Move " + (sessions == 1 ? "the open session" : "the \(sessions) open sessions") + " to \(profile ?? "the plain claude login")?"
+    }
+
+    var message: String {
+        let name = profile ?? "the plain claude login"
+        var text = sessions == 1
+            ? "Claude restarts on \(name) and keeps the conversation; if it is working, it moves when the turn ends. "
+                + "Its next message reads the whole conversation again, uncached."
+            : "Claude restarts in each on \(name) and keeps the conversation; one that is working moves when its turn ends. "
+                + "The next message in each reads the whole conversation again, uncached."
+        if waiting > 0 { text += " Sessions waiting out a usage limit carry on right away." }
+        if autopilot { text += " The autopilot starts its next sessions there too." }
+        return text
+    }
+}
+
 /// The settings sheet of one session, opened on a tab.
 struct SettingsSheetRequest: Identifiable {
     var paneID: String
@@ -100,6 +129,9 @@ final class AppModel {
     var newSessionFolder: String?
     /// The projects in the sidebar, kept while none of their sessions is open.
     var projects = ProjectList()
+    /// Each project's account by its path, as `ProjectAccount` stores it. One not in it uses clauth's default.
+    var projectAccounts: [String: String] = [:]
+    var accountMove: AccountMove?
     /// The project being renamed, by its path.
     var renamingProject: String?
     /// The project each folder in `recent` belongs to.
@@ -183,8 +215,13 @@ final class AppModel {
     var waitingCount: Int { panes.filter { $0.state.needsYou }.count + externals.filter { [.input, .plan, .permission].contains($0.state) }.count }
     var profiles: [ClauthStatus.Profile] { status?.profiles ?? [] }
     var defaultProfile: String? { status?.activeProfile }
-    /// The account the top bar shows: the selected chat's, else clauth's default. Nil means the plain `claude` login.
-    var shownProfileName: String? { selectedPane.map { $0.spec.profile } ?? defaultProfile }
+    /// The account the top bar shows: the selected chat's, else the selected project's, else clauth's default.
+    /// Nil means the plain `claude` login.
+    var shownProfileName: String? {
+        if let pane = selectedPane { return pane.spec.profile }
+        if let project = selectedProject { return launchProfile(for: project) }
+        return defaultProfile
+    }
 
     /// Folders seen in clauth's session list, most recent first.
     var recentFolders: [String] {
@@ -261,7 +298,8 @@ final class AppModel {
             select(.pane(existing.id)); return
         }
         let title = recent.first(where: { $0.id == session.id })?.title ?? session.projectName
-        open(title: title, spec: LaunchSpec(profile: defaultProfile, cwd: session.project, resume: session.id), worktree: nil, firstMessage: "")
+        open(title: title, spec: LaunchSpec(profile: launchProfile(for: ProjectRoot.resolve(session.project)), cwd: session.project, resume: session.id),
+             worktree: nil, firstMessage: "")
     }
 
     @discardableResult
@@ -674,6 +712,35 @@ final class AppModel {
         saveProjects()
     }
 
+    func account(of project: String) -> ProjectAccount { ProjectAccount(stored: projectAccounts[project]) }
+
+    /// The clauth profile a new session in the project starts under; nil for the plain `claude` login.
+    func launchProfile(for project: String) -> String? { account(of: project).launchProfile(status: status) }
+
+    /// Sets the account the project's new sessions start with. When open ones run on another, an alert offers to move them.
+    func setAccount(_ account: ProjectAccount, for project: String) {
+        guard account != self.account(of: project) else { return }
+        projectAccounts[project] = account.stored
+        UserDefaults.standard.set(projectAccounts, forKey: Prefs.projectAccounts)
+        let profile = launchProfile(for: project)
+        let others = panes.filter { $0.projectPath == project && $0.spec.profile != profile }
+        accountMove = others.isEmpty ? nil
+            : AccountMove(project: project, profile: profile, sessions: others.count, waiting: others.filter { $0.continueAt != nil }.count,
+                          autopilot: autopilots[project] != nil || jiraRuns[project] != nil)
+    }
+
+    /// Moves the project's open sessions, and its autopilot runs' next ones, to the account the alert offered.
+    func moveSessions(_ move: AccountMove) {
+        autopilots[move.project]?.profile = move.profile
+        jiraRuns[move.project]?.profile = move.profile
+        for pane in panes where pane.projectPath == move.project && pane.spec.profile != move.profile {
+            pane.switchAccount(to: move.profile, binDir: binDir, pluginDir: pluginDir)
+            // The limit it was waiting out was the old account's. The next tick carries on once Claude is up again.
+            if pane.continueAt != nil { pane.continueAt = now }
+        }
+        save()
+    }
+
     /// Opens the New Session sheet on a project, or on a folder in it.
     func newSession(in folder: String) {
         newSessionFolder = folder
@@ -683,7 +750,7 @@ final class AppModel {
     /// Starts a session in a worktree that already exists, such as one a session before it left behind.
     func openSession(inWorktree entry: WorktreeEntry) {
         let name = entry.branch.map { $0.split(separator: "/").last.map(String.init) ?? $0 } ?? Project.folderName(entry.path)
-        createSession(NewSessionRequest(folder: entry.path, profile: AccountPicker.usableDefault(self), useWorktree: false, name: name,
+        createSession(NewSessionRequest(folder: entry.path, profile: launchProfile(for: ProjectRoot.resolve(entry.path)), useWorktree: false, name: name,
                                         permissionMode: Prefs.string(Prefs.newSessionMode), firstMessage: "", issueID: nil))
     }
 
@@ -759,7 +826,7 @@ final class AppModel {
             let key = root.map { WorktreeHooks.mainCheckout($0) ?? $0 }
             await MainActor.run {
                 let pattern = key.map { Prefs.branchPattern(project: $0) } ?? Worktree.defaultBranchPattern
-                let request = NewSessionRequest(folder: project, profile: AccountPicker.usableDefault(self), useWorktree: root != nil,
+                let request = NewSessionRequest(folder: project, profile: self.launchProfile(for: project), useWorktree: root != nil,
                                                 name: issue.title, permissionMode: PermissionMode.plan.rawValue,
                                                 firstMessage: self.firstMessage(for: issue), issueID: issue.id, issueKey: issue.key,
                                                 branchPattern: pattern)
@@ -901,9 +968,7 @@ final class AppModel {
             let key = root.map { WorktreeHooks.mainCheckout($0) ?? $0 }
             await MainActor.run {
                 let pattern = key.map { Prefs.branchPattern(project: $0) } ?? Worktree.defaultBranchPattern
-                let profile = tracker.profile.flatMap { name in self.profiles.contains { $0.name == name && $0.loginProblem == nil } ? name : nil }
-                    ?? AccountPicker.usableDefault(self)
-                let request = NewSessionRequest(folder: project, profile: profile, useWorktree: root != nil,
+                let request = NewSessionRequest(folder: project, profile: self.launchProfile(for: project), useWorktree: root != nil,
                                                 name: "\(issue.key) \(issue.summary)", permissionMode: Prefs.string(Prefs.newSessionMode),
                                                 firstMessage: tracker.firstMessage(for: issue), issueID: nil, issueKey: issue.key,
                                                 branchPattern: pattern)
@@ -917,9 +982,7 @@ final class AppModel {
     /// Ask Claude: a session in the project with the action's prompt. On Jira every call to the Jira servers asks.
     func askClaude(_ action: AskClaude, project: String) {
         let tracker = trackers.tracker(for: project)
-        let profile = tracker?.profile.flatMap { name in profiles.contains { $0.name == name && $0.loginProblem == nil } ? name : nil }
-            ?? AccountPicker.usableDefault(self)
-        createSession(NewSessionRequest(folder: project, profile: profile, useWorktree: false, name: action.title,
+        createSession(NewSessionRequest(folder: project, profile: launchProfile(for: project), useWorktree: false, name: action.title,
                                         sessionRules: tracker.map { JiraRun.askRules(servers: $0.mcpServers) } ?? [],
                                         permissionMode: PermissionMode.auto.rawValue,
                                         firstMessage: action.prompt(project: project, tracker: tracker), issueID: nil))
@@ -931,9 +994,7 @@ final class AppModel {
         guard let tracker = trackers.tracker(for: project) else { return }
         let line = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !line.isEmpty else { return }
-        let profile = tracker.profile.flatMap { name in profiles.contains { $0.name == name && $0.loginProblem == nil } ? name : nil }
-            ?? AccountPicker.usableDefault(self)
-        createSession(NewSessionRequest(folder: project, profile: profile, useWorktree: false, name: "Draft: " + String(line.prefix(40)),
+        createSession(NewSessionRequest(folder: project, profile: launchProfile(for: project), useWorktree: false, name: "Draft: " + String(line.prefix(40)),
                                         permissionMode: PermissionMode.default.rawValue,
                                         firstMessage: ProjectTracker.draftPrompt(line, site: tracker.site), issueID: nil))
     }
@@ -1504,8 +1565,11 @@ final class AppModel {
             close(pane, removeWorktree: request.removeWorktree, deleteBranch: request.deleteBranch)
             return
         }
+        let moved = pane.finishAccountMove(binDir: binDir, pluginDir: pluginDir)
         refreshWorktree(pane)
         waitOutLimit(pane)
+        // A limit that stopped the turn was the old account's.
+        if moved, pane.continueAt != nil { pane.continueAt = now }
         save()
         autopilotTurnEnded(pane)
         jiraTurnEnded(pane)
@@ -1753,6 +1817,7 @@ final class AppModel {
     private func restore() {
         issues = IssueList.load()
         trackers = TrackerList.load()
+        projectAccounts = UserDefaults.standard.dictionary(forKey: Prefs.projectAccounts) as? [String: String] ?? [:]
         if let data = UserDefaults.standard.data(forKey: Prefs.jiraSites), let sites = try? JSONDecoder().decode([JiraSite].self, from: data) {
             jiraSites = sites
         }

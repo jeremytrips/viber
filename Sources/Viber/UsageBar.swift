@@ -1,8 +1,8 @@
 import SwiftUI
 import ViberCore
 
-/// The toolbar's account button: usage for the selected chat's account (clauth's default account when no
-/// chat is selected), with every account in a popover.
+/// The toolbar's account button: usage for the selected chat's account (else the selected project's, else clauth's
+/// default), with every account in a popover, where the project's account can be switched.
 struct UsageBar: View {
     @Environment(AppModel.self) private var model
     @State private var showing = false
@@ -11,6 +11,10 @@ struct UsageBar: View {
     private var active: ClauthStatus.Profile? {
         guard let name = model.shownProfileName else { return nil }
         return model.profiles.first { $0.name == name }
+    }
+    /// The selected chat, or the selected project's new sessions, use the plain `claude` login.
+    private var plain: Bool {
+        model.shownProfileName == nil && (model.selectedPane != nil || model.selectedProject != nil && model.status != nil)
     }
     private var brokenCount: Int { model.profiles.filter { $0.loginProblem != nil }.count }
 
@@ -38,7 +42,7 @@ struct UsageBar: View {
                         }
                     }
                 }
-            } else if model.selectedPane != nil {
+            } else if plain {
                 StatusDot(color: .secondary)
                 Text("Default login").font(.callout.weight(.medium))
             } else {
@@ -58,10 +62,13 @@ struct UsageBar: View {
     }
 
     private var helpText: String {
-        let subject = model.selectedPane == nil ? "Default account" : "This chat's account"
+        let subject = model.selectedPane != nil ? "This chat's account"
+            : model.selectedProject.map { "\(model.projectName($0))'s account. Click to switch it" } ?? "Default account"
         if brokenCount == 1 { return "\(subject). One account needs you to log in again" }
         if brokenCount > 1 { return "\(subject). \(brokenCount) accounts need you to log in again" }
-        if active == nil, model.selectedPane != nil { return "This chat uses the plain claude login, which clauth has no usage for" }
+        if active == nil, plain {
+            return (model.selectedPane != nil ? "This chat uses" : "New sessions here use") + " the plain claude login, which clauth has no usage for"
+        }
         return model.statusNote ?? subject
     }
 }
@@ -124,13 +131,26 @@ enum UsageWindows {
     }
 }
 
-/// Every clauth account: usage, reset times, and a way to log in again.
+/// Every clauth account: usage, reset times, and a way to log in again. With a project selected, its account too.
 private struct AccountsPopover: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text("Accounts").font(.headline).padding([.horizontal, .top], 14).padding(.bottom, 8)
+            if let project = model.selectedProject {
+                HStack(spacing: 8) {
+                    Text("\(model.projectName(project)) uses").lineLimit(1).truncationMode(.middle)
+                    Spacer(minLength: 4)
+                    ProjectAccountPicker(project: project).labelsHidden().fixedSize()
+                }
+                .font(.callout)
+                .padding(.horizontal, 14).padding(.bottom, 10)
+                // The alert that offers to move the open sessions shows in the window.
+                .onChange(of: model.accountMove?.id) { if model.accountMove != nil { dismiss() } }
+                Divider()
+            }
             if model.profiles.isEmpty {
                 Text(model.statusNote ?? "Loading accounts…").font(.callout).foregroundStyle(.secondary)
                     .padding(.horizontal, 14).padding(.bottom, 14)
@@ -139,6 +159,7 @@ private struct AccountsPopover: View {
                 if index > 0 { Divider().padding(.horizontal, 14) }
                 AccountRow(profile: profile, active: profile.name == model.shownProfileName,
                            badge: profile.name == model.shownProfileName && model.selectedPane != nil ? "This chat"
+                               : profile.name == model.shownProfileName && model.selectedProject != nil ? "This project"
                                : profile.name == model.defaultProfile ? "Default" : nil,
                            loggingIn: model.loggingIn.contains(profile.name), now: model.now) { model.login(profile.name) }
             }

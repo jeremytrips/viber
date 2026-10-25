@@ -294,6 +294,12 @@ struct ProjectView: View {
         let jira = model.trackers.tracker(for: path) != nil
         return PageSection(title: "Settings") {
             PageCard {
+                SettingRow(label: "Account",
+                           note: "The Claude login new sessions here start with, autopilot runs too. Changing it offers to move the open sessions."
+                               + (jira ? " Jira's skills need the account to have the Atlassian connector." : "")) {
+                    ProjectAccountPicker(project: path).labelsHidden().fixedSize()
+                }
+                Divider()
                 TrackerSettingsRows(project: path)
                 if !jira {
                     Divider()
@@ -523,10 +529,11 @@ private struct EarlierSessionRow: View {
         .padding(.horizontal, 12).padding(.vertical, 8)
     }
 
-    /// The account it last ran on, if that login still works, else the default one.
+    /// The project's account when it chose one. Else the account it last ran on, if that login still works, else clauth's default.
     private var profile: String? {
-        if let name = session.lastRanProfile, model.profiles.contains(where: { $0.name == name && $0.loginProblem == nil }) { return name }
-        return AccountPicker.usableDefault(model)
+        if model.account(of: project) == .clauthDefault, let name = session.lastRanProfile,
+           model.profiles.contains(where: { $0.name == name && $0.loginProblem == nil }) { return name }
+        return model.launchProfile(for: project)
     }
 }
 

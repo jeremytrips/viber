@@ -369,10 +369,6 @@ struct TrackerSettingsRows: View {
                     .textFieldStyle(.roundedBorder).font(.callout.monospaced()).frame(width: 220)
             }
             Divider()
-            SettingRowView(label: "Account", note: "The login those sessions use; it needs the Atlassian connector for the skills that change Jira.") {
-                AccountPicker(selection: Binding(get: { tracker.profile }, set: { name in save { $0.profile = name } }), label: "Account").labelsHidden().fixedSize()
-            }
-            Divider()
             SettingRowView(label: "Jira in sessions", note: "The MCP servers that reach Jira, by name, separated by commas. An autopilot run makes their calls ask, allows the skill's own changes and holds the rest for you.") {
                 TextField("Servers", text: Binding(get: { tracker.mcpServers.joined(separator: ", ") },
                                                    set: { text in save { $0.mcpServers = text.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty } } }))
@@ -400,8 +396,7 @@ struct TrackerSettingsRows: View {
         if which == "viber" {
             model.setTracker(nil, for: project)
         } else if let site = model.jiraSites.first {
-            model.setTracker(ProjectTracker(site: site.host, views: ProjectTracker.defaultViews(projectKeys: []),
-                                            profile: AccountPicker.usableDefault(model)), for: project)
+            model.setTracker(ProjectTracker(site: site.host, views: ProjectTracker.defaultViews(projectKeys: [])), for: project)
         }
     }
 }

@@ -101,9 +101,7 @@ struct JiraRunSheet: View {
         .frame(width: 560)
         .fitsWindow()
         .task {
-            let tracker = model.trackers.tracker(for: request.project)
-            profile = tracker?.profile.flatMap { name in model.profiles.contains { $0.name == name && $0.loginProblem == nil } ? name : nil }
-                ?? AccountPicker.usableDefault(model)
+            profile = model.launchProfile(for: request.project)
             let project = request.project
             let key = await Task.detached { Worktree.repoRoot(project).map { WorktreeHooks.mainCheckout($0) ?? $0 } }.value
             if let key { pattern = Prefs.branchPattern(project: key) }

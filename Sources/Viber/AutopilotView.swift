@@ -148,7 +148,7 @@ struct AutopilotSheet: View {
     }
 
     private func load() async {
-        profile = AccountPicker.usableDefault(model)
+        profile = model.launchProfile(for: request.project)
         let project = request.project
         let (found, key) = await Task.detached { () -> (Repo, String?) in
             guard let root = Worktree.repoRoot(project) else { return (Repo(), nil) }

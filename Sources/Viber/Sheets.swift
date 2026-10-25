@@ -28,13 +28,28 @@ struct AccountPicker: View {
         if let problem = profile.loginProblem { text += " — \(problem)" }
         return text
     }
+}
 
-    /// The default profile, unless its login is broken.
-    @MainActor static func usableDefault(_ model: AppModel) -> String? {
-        guard let name = model.defaultProfile,
-              let profile = model.profiles.first(where: { $0.name == name }),
-              profile.loginProblem == nil else { return nil }
-        return name
+/// The account a project's new sessions start with. A profile with a broken login can be chosen: logging in again
+/// fixes it, and Viber doesn't swap it for another account.
+struct ProjectAccountPicker: View {
+    @Environment(AppModel.self) private var model
+    let project: String
+
+    var body: some View {
+        let account = model.account(of: project)
+        Picker("Account", selection: Binding(get: { account }, set: { model.setAccount($0, for: project) })) {
+            Text(model.defaultProfile.map { "clauth's default (\($0.capitalized))" } ?? "clauth's default").tag(ProjectAccount.clauthDefault)
+            Text("Default login (plain claude)").tag(ProjectAccount.plain)
+            if !model.profiles.isEmpty { Divider() }
+            ForEach(model.profiles) { profile in
+                Text(AccountPicker.title(for: profile)).tag(ProjectAccount.profile(profile.name))
+            }
+            if case .profile(let name) = account, !model.profiles.contains(where: { $0.name == name }) {
+                Text(model.status == nil ? name : "\(name) — not in clauth").tag(account)
+            }
+        }
+        .help("The Claude login new sessions in \(model.projectName(project)) start with")
     }
 }
 
@@ -83,6 +98,8 @@ struct NewSessionSheet: View {
     /// The project `folder` belongs to, once looked up.
     @State private var projectRoot: String?
     @State private var profile: String?
+    /// The account was picked here, so it no longer follows the project's.
+    @State private var profileChosen = false
     @State private var useWorktree = false
     @State private var repoRoot: String?
     @State private var creatingRepo = false
@@ -155,7 +172,7 @@ struct NewSessionSheet: View {
                                 .help("A folder or git repository. A new one is added to the sidebar's projects.")
                         }
                     }
-                    AccountPicker(selection: $profile)
+                    AccountPicker(selection: Binding(get: { profile }, set: { profile = $0; profileChosen = true }))
                 }
 
                 Section {
@@ -338,6 +355,7 @@ struct NewSessionSheet: View {
             model.newSessionPrefill = nil
             folder = prefill.folder
             profile = prefill.profile
+            profileChosen = true
             name = prefill.name
             permissionMode = prefill.permissionMode
             firstMessage = prefill.firstMessage
@@ -348,10 +366,15 @@ struct NewSessionSheet: View {
             let asked = model.newSessionFolder ?? ""
             model.newSessionFolder = nil
             folder = !asked.isEmpty ? asked : model.selectedProject ?? model.sidebarProjects.first?.path ?? model.recentFolders.first ?? ""
-            profile = AccountPicker.usableDefault(model)
+            if !folder.isEmpty { followAccount(of: ProjectRoot.resolve(folder)) }
             permissionMode = Prefs.string(Prefs.newSessionMode)
         }
         branch = defaultBranch
+    }
+
+    /// The project's account, until one is picked here.
+    private func followAccount(of project: String) {
+        if !profileChosen { profile = model.launchProfile(for: project) }
     }
 
     /// The worktree row's subtitle, or the error from creating a repository.
@@ -375,6 +398,7 @@ struct NewSessionSheet: View {
         guard !Task.isCancelled, dir == folder else { return }
         repoRoot = root
         projectRoot = home
+        followAccount(of: home)
         maker = found
         if project != patternProject {
             patternProject = project
@@ -552,7 +576,12 @@ struct ResumeSheet: View {
         .frame(width: 620, height: 520)
         .onAppear {
             model.reloadRecent()
-            profile = model.defaultProfile
+            profile = ProjectAccount.clauthDefault.launchProfile(status: model.status)
+        }
+        // The chosen session's project decides, as for a new session there.
+        .onChange(of: selected) {
+            guard let folder = model.recent.first(where: { $0.id == selected })?.workspace else { return }
+            profile = model.launchProfile(for: model.recentRoots[folder] ?? ProjectRoot.resolve(folder))
         }
     }
 

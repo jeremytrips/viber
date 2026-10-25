@@ -64,3 +64,44 @@ public struct ClauthSession: Decodable, Equatable, Identifiable {
         return line.isEmpty ? "Untitled session" : String(line.prefix(80))
     }
 }
+
+/// The login a project's sessions start with, chosen on its Settings tab or under the toolbar's account button.
+public enum ProjectAccount: Hashable, Sendable {
+    /// clauth's default account, whichever that is when a session starts.
+    case clauthDefault
+    /// Plain `claude` with its own login, outside clauth.
+    case plain
+    /// A clauth profile, by name.
+    case profile(String)
+
+    /// How Viber stores it: nil for clauth's default, an empty string for plain `claude`, else the profile's name.
+    public init(stored: String?) {
+        switch stored {
+        case .none: self = .clauthDefault
+        case .some(let name) where name.isEmpty: self = .plain
+        case .some(let name): self = .profile(name)
+        }
+    }
+
+    public var stored: String? {
+        switch self {
+        case .clauthDefault: return nil
+        case .plain: return ""
+        case .profile(let name): return name
+        }
+    }
+
+    /// The clauth profile a new session starts under; nil starts plain `claude`. clauth's default falls back to plain
+    /// `claude` while its login is broken. A profile the project names is used as it is, even with a broken login:
+    /// its sessions never run on an account the project didn't choose, and the chat says when the login fails.
+    public func launchProfile(status: ClauthStatus?) -> String? {
+        switch self {
+        case .plain: return nil
+        case .profile(let name): return name
+        case .clauthDefault:
+            guard let name = status?.activeProfile,
+                  let profile = status?.profiles.first(where: { $0.name == name }), profile.loginProblem == nil else { return nil }
+            return name
+        }
+    }
+}

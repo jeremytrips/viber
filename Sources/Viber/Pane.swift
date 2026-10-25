@@ -87,6 +87,8 @@ final class Pane: Identifiable {
     /// The CLI reported a dead login. It keeps its credentials in memory, so only a new process
     /// sees a re-login; the next message restarts it.
     private(set) var authFailed = false
+    /// The session moved to another account while Claude was busy; it restarts on that one when the turn ends.
+    private(set) var accountChanged = false
     @ObservationIgnored private var process: ClaudeProcess?
     /// Preview and device tool calls in flight, by control request ID.
     @ObservationIgnored private var mcpTasks: [String: Task<Void, Never>] = [:]
@@ -158,6 +160,7 @@ final class Pane: Identifiable {
             chat.loadHistory(data, transcript: url)
         }
         started = true
+        accountChanged = false
         spec.pluginDir = pluginDir
         let before = chat.state
         chat.state = .starting
@@ -278,14 +281,46 @@ final class Pane: Identifiable {
     /// A new CLI process on the same conversation, so it re-reads the login and settings.
     func restart(binDir: String?, pluginDir: String?) {
         cancelToolCalls()
+        // Nothing the old process still prints reaches the chat or the new process.
+        process?.onMessage = nil
         process?.onExit = nil
         process?.terminate()
         process = nil
         authFailed = false
+        // In the mode it is in now, such as the one an approved plan switched to, not the one it started in.
+        if let mode = chat.permissionMode { spec.permissionMode = mode }
         chat.processExited(status: 0)
         reportRelayUpdates()
         start(binDir: binDir, pluginDir: pluginDir)
     }
+
+    /// Moves the session to another account, keeping the conversation. Claude restarts on it now, or when the turn
+    /// ends if it is busy, so nothing it is doing is cut off; a stopped session starts on it next time.
+    func switchAccount(to profile: String?, binDir: String?, pluginDir: String?) {
+        guard profile != spec.profile else { return }
+        spec.profile = profile
+        onPersist?()
+        if !isRunning {
+            // A session not opened yet still loads its history into an empty chat, which a note would stop.
+            if started { chat.note("Moved to \(accountName).") }
+        } else if state == .working || state.needsYou {
+            accountChanged = true
+            chat.note("Moving to \(accountName) when this turn ends.")
+        } else {
+            restart(binDir: binDir, pluginDir: pluginDir)
+            chat.note("Restarted Claude on \(accountName).")
+        }
+    }
+
+    /// Restarts on the account the session moved to while it was busy, now that the turn is over. Returns whether it did.
+    func finishAccountMove(binDir: String?, pluginDir: String?) -> Bool {
+        guard accountChanged else { return false }
+        restart(binDir: binDir, pluginDir: pluginDir)
+        chat.note("Restarted Claude on \(accountName).")
+        return true
+    }
+
+    private var accountName: String { spec.profile ?? "the plain claude login" }
 
     static func isAuthError(_ text: String) -> Bool {
         let lower = text.lowercased()

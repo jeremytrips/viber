@@ -83,6 +83,31 @@ final class ClauthTests: XCTestCase {
         XCTAssertEqual(status.profiles[1].loginProblem, "Login broken")
     }
 
+    func testProjectAccountStoresTheDefaultAsNothing() {
+        for account in [ProjectAccount.clauthDefault, .plain, .profile("pinsound_1")] {
+            XCTAssertEqual(ProjectAccount(stored: account.stored), account)
+        }
+        XCTAssertNil(ProjectAccount.clauthDefault.stored)
+        XCTAssertEqual(ProjectAccount.plain.stored, "")
+    }
+
+    func testProjectAccountPicksTheProfileSessionsStartUnder() throws {
+        let json = #"""
+        {"active_profile":"Private","profiles":[{"name":"Private","auth_status":"ok"},{"name":"pinsound_1","auth_status":"broken"}]}
+        """#
+        let status = try XCTUnwrap(ClauthStatus.decode(Data(json.utf8)))
+        XCTAssertEqual(ProjectAccount.clauthDefault.launchProfile(status: status), "Private")
+        XCTAssertNil(ProjectAccount.plain.launchProfile(status: status))
+        XCTAssertEqual(ProjectAccount.profile("pinsound_1").launchProfile(status: status), "pinsound_1",
+                       "a broken login the project chose is kept, not swapped for another account")
+        XCTAssertEqual(ProjectAccount.profile("pinsound_2").launchProfile(status: nil), "pinsound_2")
+
+        var broken = status
+        broken.activeProfile = "pinsound_1"
+        XCTAssertNil(ProjectAccount.clauthDefault.launchProfile(status: broken), "a broken default falls back to plain claude")
+        XCTAssertNil(ProjectAccount.clauthDefault.launchProfile(status: nil))
+    }
+
     func testSessionTitleStripsWrappers() {
         let json = #"[{"id":"1","workspace":"/w","updated":"2026-10-23T08:23:36+00:00","first_message":"<ide_opened_file>The user opened x.py</ide_opened_file>Refactor the board UI\nmore","last_message":"ok"}]"#
         let sessions = ClauthSession.decodeList(Data(json.utf8))
