@@ -281,7 +281,8 @@ struct ChatItemView: View {
         case .tool(let call):
             if let run = call.agent { AgentCard(call: call, run: run, pane: pane) } else { ToolRow(call: call, pane: pane) }
         case .permission(let prompt):
-            PermissionCard(itemID: item.id, prompt: prompt, pane: pane)
+            if JiraTicketCard.handles(prompt) { JiraTicketCard(itemID: item.id, prompt: prompt, pane: pane) }
+            else { PermissionCard(itemID: item.id, prompt: prompt, pane: pane) }
         case .question(let prompt):
             QuestionCard(itemID: item.id, prompt: prompt, pane: pane)
         case .plan(let prompt):

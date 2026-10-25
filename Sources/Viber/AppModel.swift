@@ -892,6 +892,19 @@ final class AppModel {
         }
     }
 
+    /// Draft…: a session that writes `text` up as a Jira issue and creates it. It runs in the default permission mode,
+    /// so every Jira call asks, and the create call shows as a ticket card to edit and approve.
+    func draftJiraIssue(_ text: String, project: String) {
+        guard let tracker = trackers.tracker(for: project) else { return }
+        let line = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !line.isEmpty else { return }
+        let profile = tracker.profile.flatMap { name in profiles.contains { $0.name == name && $0.loginProblem == nil } ? name : nil }
+            ?? AccountPicker.usableDefault(self)
+        createSession(NewSessionRequest(folder: project, profile: profile, useWorktree: false, name: "Draft: " + String(line.prefix(40)),
+                                        permissionMode: PermissionMode.default.rawValue,
+                                        firstMessage: ProjectTracker.draftPrompt(line, site: tracker.site), issueID: nil))
+    }
+
     // MARK: Autopilot
 
     /// Opens the Autopilot sheet on a project's issues to plan, or on one issue.

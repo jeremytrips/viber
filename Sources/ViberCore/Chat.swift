@@ -291,10 +291,13 @@ public struct ChatTranscript {
     }
 
     /// Answer a permission card. `always` applies the CLI's own suggested rules for the rest of the session.
-    public mutating func decidePermission(itemID: String, allow: Bool, always: Bool = false, message: String? = nil) -> JSON? {
+    /// `updatedInput` lets the user edit what the tool gets, such as a ticket's fields, before allowing it.
+    public mutating func decidePermission(itemID: String, allow: Bool, always: Bool = false, message: String? = nil,
+                                          updatedInput: JSON? = nil) -> JSON? {
         guard let index = items.firstIndex(where: { $0.id == itemID }),
               case .permission(var prompt) = items[index].kind, prompt.decision == nil else { return nil }
         prompt.decision = allow ? (always ? .alwaysAllowed : .allowed) : .denied
+        if let updatedInput, allow { prompt.input = updatedInput }
         items[index].kind = .permission(prompt)
         resumeAfterPrompt()
         var response: [String: JSON]

@@ -42,6 +42,26 @@ public struct ProjectTracker: Codable, Equatable, Sendable {
         ]
     }
 
+    /// The first message of a session that writes a Jira ticket up from a line the user typed and creates it. The create
+    /// call is what Viber shows as an editable ticket card, so nothing reaches Jira before the user has seen it.
+    public static func draftPrompt(_ text: String, site: String) -> String {
+        """
+        Draft a Jira issue: \(text)
+
+        Write this up as a Jira issue on \(site) and create it. Steps:
+        1. If the project has a skill or instructions about Jira (such as a `jira-tracker` skill, CLAUDE.md or AGENTS.md), \
+        read them first: they decide the project key, the issue type, labels and any template.
+        2. Search Jira for issues about the same thing (`searchJiraIssuesUsingJql`, a few words from the title, and \
+        the same project). If one already covers this, don't create another: say which one, and stop.
+        3. Read the code it touches, so the description says where the problem is (files, functions) and what "done" \
+        means. Keep it to what you can see; don't invent acceptance criteria.
+        4. Create the issue with the Atlassian tool `createJiraIssue`, in one call, with the summary, the description, \
+        the issue type, and labels or priority when the project's rules call for them. Viber shows that call to the user \
+        to edit and approve before it is made; if it is denied, don't try again, just say so.
+        5. Report the new key in one line, and stop. Don't start working on the issue.
+        """
+    }
+
     /// The first message for an issue, with its key and a summary of the issue for Claude to start from.
     public func firstMessage(for issue: JiraIssue) -> String {
         var text = startMessage.replacingOccurrences(of: "<key>", with: issue.key)

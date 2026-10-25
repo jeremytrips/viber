@@ -31,9 +31,20 @@ struct JiraIssuesSection: View {
     let project: String
     let board: JiraBoard
     @State private var query = ""
+    @State private var draft = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                TextField("New issue… for example: invite emails bounce for Gmail users", text: $draft)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit(startDraft)
+                Button { startDraft() } label: { Label("Draft…", systemImage: "sparkles") }
+                    .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .help("A session writes it up (following the project's Jira rules, after searching for duplicates) and shows you the ticket to edit before it is created")
+            }
+            Text("Claude writes it up for Jira, checks for duplicates, and shows the ticket to you before anything is created.")
+                .font(.caption).foregroundStyle(.secondary)
             viewBar
             if let error = board.error {
                 Label(error, systemImage: "exclamationmark.triangle").font(.callout).foregroundStyle(.orange)
@@ -48,6 +59,11 @@ struct JiraIssuesSection: View {
             }
             footer
         }
+    }
+
+    private func startDraft() {
+        model.draftJiraIssue(draft, project: project)
+        draft = ""
     }
 
     private var viewBar: some View {

@@ -44,6 +44,23 @@ final class JiraTests: XCTestCase {
         XCTAssertEqual(JiraIssue.key(inBranch: "chore/dev-up"), nil)
     }
 
+    func testDraftPromptAndEditedPermission() throws {
+        let prompt = ProjectTracker.draftPrompt("invite emails bounce for gmail users", site: "pinsound.atlassian.net")
+        XCTAssertTrue(prompt.hasPrefix("Draft a Jira issue: invite emails bounce for gmail users"))
+        XCTAssertTrue(prompt.contains("createJiraIssue"))
+        XCTAssertTrue(prompt.contains("don't create another"))
+
+        var chat = ChatTranscript()
+        _ = chat.apply(["type": "control_request", "request_id": "r1", "request": ["subtype": "can_use_tool", "tool_name": "mcp__atlassian__createJiraIssue",
+                                                                              "input": ["projectKey": "NEX", "summary": "Draft"], "tool_use_id": "t1"]])
+        let item = try XCTUnwrap(chat.items.last { if case .permission = $0.kind { return true }; return false })
+        let reply = try XCTUnwrap(chat.decidePermission(itemID: item.id, allow: true, updatedInput: ["projectKey": "NEX", "summary": "Edited"]))
+        XCTAssertEqual(reply["response"]?["response"]?["updatedInput"]?["summary"]?.string, "Edited")
+        if case .permission(let decided) = chat.items.first(where: { $0.id == item.id })?.kind {
+            XCTAssertEqual(decided.input["summary"]?.string, "Edited", "the card shows what was sent")
+        } else { XCTFail("no permission item") }
+    }
+
     func testTrackerDefaultsAndFirstMessage() {
         let views = ProjectTracker.defaultViews(projectKeys: ["NEX", "NEXF"])
         XCTAssertEqual(views.map(\.name), ["My issues", "Current sprint", "Backlog"])
