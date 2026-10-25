@@ -69,9 +69,9 @@ struct AccountMove: Identifiable {
     var message: String {
         let name = profile ?? "the plain claude login"
         var text = sessions == 1
-            ? "Claude restarts on \(name) and keeps the conversation; if it is working, it moves when the turn ends. "
+            ? "Claude restarts on \(name) and keeps the conversation; if it is working, it moves once it's done. "
                 + "Its next message reads the whole conversation again, uncached."
-            : "Claude restarts in each on \(name) and keeps the conversation; one that is working moves when its turn ends. "
+            : "Claude restarts in each on \(name) and keeps the conversation; one that is working moves once it's done. "
                 + "The next message in each reads the whole conversation again, uncached."
         if waiting > 0 { text += " Sessions waiting out a usage limit carry on right away." }
         if autopilot { text += " The autopilot starts its next sessions there too." }
@@ -144,6 +144,8 @@ final class AppModel {
     var issues = IssueList()
     /// Projects whose issues come from Jira.
     var trackers = TrackerList()
+    /// What each project's sessions do once a request is done, by its path. A missing one is off.
+    var requestChecks: [String: RequestCheck] = [:]
     var jiraSites: [JiraSite] = []
     /// What each Jira project's Planning tab shows, kept while the app runs.
     var jiraBoards: [String: JiraBoard] = [:]
@@ -426,6 +428,7 @@ final class AppModel {
     private func wire(_ pane: Pane) {
         pane.onStateChange = { [weak self] pane, previous in self?.stateChanged(pane, from: previous) }
         pane.onTurnFinished = { [weak self] pane in self?.turnFinished(pane) }
+        pane.onRequestStarted = { [weak self] pane in self?.requestStarted(pane) }
         pane.onRelayUpdate = { [weak self] pane, update in self?.relayUpdate(update, in: pane) }
         pane.onJiraHold = { [weak self] pane, what in self?.holdJiraRun(pane, what) }
         pane.onOpenURL = { NSWorkspace.shared.open($0) }
@@ -883,7 +886,7 @@ final class AppModel {
         if let project = issues.issue(startedIn: pane.id).flatMap({ autopilotProject(working: $0.id) }), autopilots[project]?.paused != nil {
             resumeAutopilot(project)
         } else {
-            submit(UsageLimit.continueMessage, in: pane)
+            pane.sendUser(UsageLimit.continueMessage, binDir: binDir, pluginDir: pluginDir, continuing: true)
         }
     }
 
@@ -1071,7 +1074,7 @@ final class AppModel {
         for issue in starting {
             createSession(NewSessionRequest(folder: project, profile: run.profile, useWorktree: true, name: "\(issue.key) \(issue.summary)",
                                             jiraRunKey: issue.key, sessionRules: JiraRun.askRules(servers: tracker.mcpServers),
-                                            permissionMode: run.permissionMode, firstMessage: JiraRun.prompt(for: issue, tracker: tracker),
+                                            permissionMode: run.permissionMode, firstMessage: JiraRun.prompt(for: issue, tracker: tracker, check: requestCheck(for: project)),
                                             issueID: nil, issueKey: issue.key, branchPattern: run.branchPattern),
                           selecting: false)
         }
@@ -1284,7 +1287,7 @@ final class AppModel {
                                             // Merged issues build on each other; pull requests each start from origin.
                                             base: pilot.finish == .merge ? .current : .originDefault, startBranch: branch,
                                             permissionMode: pilot.permissionMode,
-                                            firstMessage: pilot.prompt(for: issue, in: issues, startBranch: branch),
+                                            firstMessage: pilot.prompt(for: issue, in: issues, startBranch: branch, check: requestCheck(for: project)),
                                             issueID: issue.id, issueKey: issue.key, branchPattern: pilot.branchPattern),
                           selecting: false)
         }
@@ -1544,7 +1547,8 @@ final class AppModel {
             body = asking.map { "\($0.server) needs your input." } ?? "Claude has a question for you."
         case .plan: body = "A plan is ready for review."
         case .finished:
-            guard previous == .working, pane.chat.turnStartedByUser else { return }
+            // Held while Viber finds out whether the request needs its check.
+            guard previous == .working, pane.chat.turnStartedByUser, !pane.checks.comparing else { return }
             body = "Finished" + (pane.chat.lastTurnSeconds.map { " in \(Self.duration($0))" } ?? "") + "."
         case .failed: body = pane.chat.usageLimit.map { limitNotice($0, continueAt: pane.continueAt) } ?? "The last turn failed."
         default: return
@@ -1565,14 +1569,90 @@ final class AppModel {
             close(pane, removeWorktree: request.removeWorktree, deleteBranch: request.deleteBranch)
             return
         }
-        let moved = pane.finishAccountMove(binDir: binDir, pluginDir: pluginDir)
         refreshWorktree(pane)
         waitOutLimit(pane)
-        // A limit that stopped the turn was the old account's.
-        if moved, pane.continueAt != nil { pane.continueAt = now }
         save()
         autopilotTurnEnded(pane)
         jiraTurnEnded(pane)
+        checkAfterRequest(pane)
+        settleAccountMove(pane)
+    }
+
+    /// Restarts a session on the account it moved to while busy, once its request is over: nothing sent it another
+    /// message (the check after the request, an autopilot nudge) and no check is still deciding whether to run.
+    private func settleAccountMove(_ pane: Pane) {
+        guard pane.accountChanged, pane.state != .working, !pane.state.needsYou, !pane.checks.comparing else { return }
+        let limited = pane.continueAt != nil
+        pane.finishAccountMove(binDir: binDir, pluginDir: pluginDir)
+        // A limit that stopped the turn was the old account's.
+        if limited { pane.continueAt = now }
+    }
+
+    /// Turns a project's check after each request on or off, or changes its test command.
+    func setRequestCheck(_ check: RequestCheck, for project: String) {
+        requestChecks[project] = check.enabled || !check.testCommand.isEmpty ? check : nil
+        UserDefaults.standard.set(try? JSONEncoder().encode(requestChecks), forKey: Prefs.requestChecks)
+    }
+
+    /// The project's check after each request, when it is on. Autopilot sessions run it before they ship.
+    func requestCheck(for project: String) -> RequestCheck? {
+        requestChecks[project].flatMap { $0.enabled ? $0 : nil }
+    }
+
+    /// The check a session gets after each request: the project's, except in autopilot sessions, whose first
+    /// message already has it before they ship.
+    private func checksRequests(_ pane: Pane) -> RequestCheck? {
+        guard pane.jiraRunKey == nil, !startedByAutopilot(pane) else { return nil }
+        return requestCheck(for: pane.projectPath)
+    }
+
+    /// A request started in a project that checks each one: read the work tree, to tell at its end whether it changed.
+    private func requestStarted(_ pane: Pane) {
+        guard checksRequests(pane) != nil, let request = pane.checks.requestStartedAt else { return }
+        let cwd = pane.cwd
+        Task.detached {
+            let state = Worktree.fingerprint(cwd)
+            await MainActor.run { pane.checks.setBaseline(state, for: request) }
+        }
+    }
+
+    /// Once a request that changed files is done, a project that asks for it has the session run the tests and a
+    /// code review and fix what they find. The message keeps the session working, so "Finished" is only posted
+    /// after the check.
+    private func checkAfterRequest(_ pane: Pane) {
+        guard let check = checksRequests(pane) else { return }
+        switch pane.checks.turnEnded(state: pane.state, lastEdit: pane.chat.lastFileEditAt,
+                                     agentsRunning: !pane.chat.runningAgents.isEmpty, interruptedAt: pane.interruptedAt) {
+        case .nothing: break
+        case .check: sendCheck(check, to: pane)
+        case .compare(let baseline):
+            pane.checks.comparing = true
+            let cwd = pane.cwd, request = pane.checks.requestStartedAt
+            Task.detached {
+                let state = Worktree.fingerprint(cwd)
+                await MainActor.run {
+                    // A message sent meanwhile started another request.
+                    guard pane.checks.comparing, pane.checks.requestStartedAt == request else { return }
+                    pane.checks.comparing = false
+                    guard self.panes.contains(where: { $0 === pane }), pane.state == .finished else { return }
+                    if let state, state != baseline { self.sendCheck(check, to: pane) }
+                    else { self.stateChanged(pane, from: .working) }  // posts the "Finished" it held
+                    self.settleAccountMove(pane)
+                }
+            }
+        }
+    }
+
+    private func sendCheck(_ check: RequestCheck, to pane: Pane) {
+        pane.sendUser(check.message, binDir: binDir, pluginDir: pluginDir, continuing: true)
+        pane.checks.checkSent(at: Date())
+    }
+
+    /// A session an autopilot run started, while it runs or until its card is dismissed. Its issue has left the run
+    /// by the time its last turn ends, so the run's list of issues it took says.
+    private func startedByAutopilot(_ pane: Pane) -> Bool {
+        guard let issue = issues.issue(startedIn: pane.id) else { return false }
+        return [autopilots[issue.project], finishedAutopilots[issue.project]].contains { $0?.handled.contains(issue.id) == true }
     }
 
     /// Reads the worktree's diff stat and the branch checked out in it.
@@ -1820,6 +1900,10 @@ final class AppModel {
         projectAccounts = UserDefaults.standard.dictionary(forKey: Prefs.projectAccounts) as? [String: String] ?? [:]
         if let data = UserDefaults.standard.data(forKey: Prefs.jiraSites), let sites = try? JSONDecoder().decode([JiraSite].self, from: data) {
             jiraSites = sites
+        }
+        if let data = UserDefaults.standard.data(forKey: Prefs.requestChecks),
+           let checks = try? JSONDecoder().decode([String: RequestCheck].self, from: data) {
+            requestChecks = checks
         }
         // Issues were filed under a session's folder; a subfolder's or worktree's now belong to its repository.
         if issues.moveProjects(ProjectRoot.resolve) { saveIssues() }

@@ -58,6 +58,8 @@ final class Pane: Identifiable {
     var continueAt: Date? { didSet { if continueAt != oldValue { onPersist?() } } }
     /// When Stop was last pressed, so an autopilot run can tell your stop from Claude ending its turn.
     @ObservationIgnored var interruptedAt: Date?
+    /// The project's check after a request: when the request started, and the check Viber sent.
+    @ObservationIgnored var checks = CheckProgress()
     /// `//` messages this session has yet to answer, by the chat item each arrived as.
     var answering: [String: IncomingRelay] = [:]
     var sessionRules: [RuleEdit] = []
@@ -87,7 +89,7 @@ final class Pane: Identifiable {
     /// The CLI reported a dead login. It keeps its credentials in memory, so only a new process
     /// sees a re-login; the next message restarts it.
     private(set) var authFailed = false
-    /// The session moved to another account while Claude was busy; it restarts on that one when the turn ends.
+    /// The session moved to another account while Claude was busy; it restarts on that one when the request is over.
     private(set) var accountChanged = false
     @ObservationIgnored private var process: ClaudeProcess?
     /// Preview and device tool calls in flight, by control request ID.
@@ -101,6 +103,8 @@ final class Pane: Identifiable {
     @ObservationIgnored var onPersist: (() -> Void)?
     @ObservationIgnored var onStateChange: ((Pane, PaneState) -> Void)?
     @ObservationIgnored var onTurnFinished: ((Pane) -> Void)?
+    /// A message started a new request, rather than joining the one Claude works on.
+    @ObservationIgnored var onRequestStarted: ((Pane) -> Void)?
     @ObservationIgnored var onRelayUpdate: ((Pane, RelayUpdate) -> Void)?
     /// A Jira autopilot session asked for a Jira change the run doesn't make on its own; the prompt is shown as usual.
     @ObservationIgnored var onJiraHold: ((Pane, String) -> Void)?
@@ -236,11 +240,14 @@ final class Pane: Identifiable {
 
     func send(_ message: JSON) { process?.send(message) }
 
-    /// Sends a user message, starting the process first if needed.
-    func sendUser(_ text: String, images: [ImageAttachment] = [], binDir: String?, pluginDir: String?) {
+    /// Sends a user message, starting the process first if needed. `continuing` keeps it in the request at hand rather
+    /// than starting one: the continue after a usage limit, and Viber's check after the request.
+    func sendUser(_ text: String, images: [ImageAttachment] = [], binDir: String?, pluginDir: String?, continuing: Bool = false) {
         if authFailed { restart(binDir: binDir, pluginDir: pluginDir) }
         if !isRunning { start(binDir: binDir, pluginDir: pluginDir) }
         let before = chat.state
+        // A message that finds Claude idle starts a request; one sent while it works joins the one running.
+        if !continuing, before != .working, !before.needsYou { startRequest() }
         process?.send(chat.userMessage(text, images: images))
         lastActivity = Date()
         notifyIfChanged(from: before)
@@ -260,11 +267,18 @@ final class Pane: Identifiable {
         if relay.isReply {
             process?.send(chat.receiveReply(from: relay.sourceTitle, text: relay.text))
         } else {
+            // Another session's request, like one you type.
+            if before != .working, !before.needsYou { startRequest() }
             process?.send(chat.receiveRelay(from: relay.sourceTitle, text: relay.text))
             if let item = chat.lastItemID { answering[item] = relay }
         }
         lastActivity = Date()
         notifyIfChanged(from: before)
+    }
+
+    private func startRequest() {
+        checks.requestStarted(at: Date())
+        onRequestStarted?(self)
     }
 
     func interrupt() {
@@ -294,8 +308,8 @@ final class Pane: Identifiable {
         start(binDir: binDir, pluginDir: pluginDir)
     }
 
-    /// Moves the session to another account, keeping the conversation. Claude restarts on it now, or when the turn
-    /// ends if it is busy, so nothing it is doing is cut off; a stopped session starts on it next time.
+    /// Moves the session to another account, keeping the conversation. Claude restarts on it now, or once the request
+    /// is over if it is busy, so nothing it is doing is cut off; a stopped session starts on it next time.
     func switchAccount(to profile: String?, binDir: String?, pluginDir: String?) {
         guard profile != spec.profile else { return }
         spec.profile = profile
@@ -303,21 +317,20 @@ final class Pane: Identifiable {
         if !isRunning {
             // A session not opened yet still loads its history into an empty chat, which a note would stop.
             if started { chat.note("Moved to \(accountName).") }
-        } else if state == .working || state.needsYou {
+        } else if state == .working || state.needsYou || checks.comparing {
             accountChanged = true
-            chat.note("Moving to \(accountName) when this turn ends.")
+            chat.note("Moving to \(accountName) once Claude is done with this request.")
         } else {
             restart(binDir: binDir, pluginDir: pluginDir)
             chat.note("Restarted Claude on \(accountName).")
         }
     }
 
-    /// Restarts on the account the session moved to while it was busy, now that the turn is over. Returns whether it did.
-    func finishAccountMove(binDir: String?, pluginDir: String?) -> Bool {
-        guard accountChanged else { return false }
+    /// Restarts on the account the session moved to while it was busy, now that its request is over.
+    func finishAccountMove(binDir: String?, pluginDir: String?) {
+        guard accountChanged else { return }
         restart(binDir: binDir, pluginDir: pluginDir)
         chat.note("Restarted Claude on \(accountName).")
-        return true
     }
 
     private var accountName: String { spec.profile ?? "the plain claude login" }
@@ -336,6 +349,7 @@ final class Pane: Identifiable {
         process?.terminate()
         process = nil
         chat = ChatTranscript()
+        checks = CheckProgress()
         spec.resume = nil
         started = false
         authFailed = false

@@ -85,6 +85,7 @@ struct JiraRunSheet: View {
                     Stepper("Worktrees at most: \(worktrees)", value: $worktrees, in: max(sessions, 1)...32)
                     Text("A shipped issue keeps its worktree until it is merged and cleaned up, so the run can't get further ahead of you than this.")
                         .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    CheckBeforeShipping(project: request.project, commits: true)
                     LabeledContent("Branches") { Text(Autopilot.usablePattern(pattern)) }
                 }
             }

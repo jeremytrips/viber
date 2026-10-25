@@ -126,6 +126,11 @@ final class JiraRunTests: XCTestCase {
         XCTAssertTrue(prompt.hasPrefix("Autopilot: NEX-233 Paginate\n\n/work-issue NEX-233"))
         XCTAssertTrue(prompt.contains("starts from `feat/nex-251-api`"))
         XCTAssertTrue(prompt.contains("Don't push or merge."))
+        XCTAssertFalse(prompt.contains("code-review"))
+        let checked = JiraRun.prompt(for: issue("NEX-233", "Paginate"), tracker: ProjectTracker(site: "x"), check: RequestCheck(enabled: true))
+        XCTAssertTrue(checked.contains("\n- Before you commit, the project asks for its tests and a code review: Run the project's tests the way it runs them"))
+        XCTAssertTrue(checked.contains("own `code-review` skill"))
+        XCTAssertTrue(checked.contains("in the commit message.\n- Finish: commit on this branch"), "its own rule, before Finish")
     }
 }
 

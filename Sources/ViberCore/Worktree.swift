@@ -386,6 +386,28 @@ public enum Worktree {
         return formatShortstat(r.output)
     }
 
+    /// A digest of a checkout's state: its HEAD, the changes to tracked files, and the untracked files' sizes and
+    /// times. Two that differ mean something changed in between, also through shell commands the chat can't see.
+    /// Only comparable within one run of the app. Nil outside a git repository. Blocking: runs git.
+    public static func fingerprint(_ folder: String) -> Int? {
+        let top = Shell.run("git", ["-C", folder, "rev-parse", "--show-toplevel"], timeout: 10)
+        guard top.ok, !top.output.isEmpty else { return nil }
+        let status = Shell.run("git", ["-C", folder, "status", "--porcelain=v1", "-z", "--untracked-files=all"], timeout: 30)
+        guard status.ok else { return nil }
+        var hasher = Hasher()
+        // A repository with no commits yet has no HEAD to diff against; its status still changes.
+        hasher.combine(Shell.run("git", ["-C", folder, "rev-parse", "-q", "--verify", "HEAD"], timeout: 10).output)
+        hasher.combine(status.stdout)
+        hasher.combine(Shell.run("git", ["-C", folder, "diff", "HEAD", "--no-ext-diff", "--binary"], timeout: 30).stdout)
+        // Porcelain paths are relative to the repository's top.
+        for entry in status.stdout.split(separator: "\0") where entry.hasPrefix("?? ") {
+            let attributes = try? FileManager.default.attributesOfItem(atPath: top.output + "/" + entry.dropFirst(3))
+            hasher.combine(attributes?[.size] as? Int)
+            hasher.combine(attributes?[.modificationDate] as? Date)
+        }
+        return hasher.finalize()
+    }
+
     public static func formatShortstat(_ text: String) -> String {
         func number(before word: String) -> Int {
             guard let range = text.range(of: word) else { return 0 }

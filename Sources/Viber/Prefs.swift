@@ -26,6 +26,8 @@ enum Prefs {
     static let autopilotWorktrees = "autopilotWorktrees"
     /// The Jira sites Viber reads, as JSON; their tokens are in the Keychain.
     static let jiraSites = "jiraSites"
+    /// Each project's check after a request (RequestCheck), by its path, as JSON.
+    static let requestChecks = "requestChecks"
 
     /// New worktrees' branch patterns, by the repository's main checkout. A missing one is Worktree.defaultBranchPattern.
     static let branchPatterns = "branchPatterns"
