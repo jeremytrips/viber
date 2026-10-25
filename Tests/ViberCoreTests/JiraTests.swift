@@ -128,3 +128,19 @@ final class JiraRunTests: XCTestCase {
         XCTAssertTrue(prompt.contains("Don't push or merge."))
     }
 }
+
+final class AskClaudeTests: XCTestCase {
+    func testPromptsFitTheTracker() {
+        let own = AskClaude.review.prompt(project: "/dev/estafette", tracker: nil)
+        XCTAssertTrue(own.hasPrefix("Review the backlog of estafette."))
+        XCTAssertTrue(own.contains("viber issue list"))
+        XCTAssertTrue(own.contains("EST-12"))
+        XCTAssertTrue(own.contains("make the changes directly"))
+        let jira = AskClaude.breakDown(key: "NEX-233").prompt(project: "/dev/nexus-cloud", tracker: ProjectTracker(site: "pinsound.atlassian.net"))
+        XCTAssertTrue(jira.contains("pinsound.atlassian.net"))
+        XCTAssertTrue(jira.contains("Every change to Jira asks the user first"))
+        XCTAssertTrue(jira.contains("sub-tasks (or child issues) of NEX-233"))
+        XCTAssertEqual(AskClaude.standup.title, "Standup note")
+        XCTAssertTrue(AskClaude.next.prompt(project: "/x", tracker: nil).contains("Don't change anything"))
+    }
+}

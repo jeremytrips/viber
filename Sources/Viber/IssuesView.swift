@@ -495,6 +495,7 @@ struct IssueMenu: View {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(issue.key, forType: .string)
         }
+        Button("Break Down with Claude") { model.askClaude(.breakDown(key: issue.key), project: issue.project) }
         Button("Copy Text") {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(issue.text, forType: .string)

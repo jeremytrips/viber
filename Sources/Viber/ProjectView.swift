@@ -173,6 +173,7 @@ struct ProjectView: View {
     private func jiraIssues(_ board: JiraBoard) -> some View {
         PageSection(title: "Issues", detail: board.view.map { "\($0.name) · \(board.site?.host ?? board.tracker.site)" }) {
             HStack(spacing: 14) {
+                AskClaudeMenu(project: path)
                 Button("All Issues") { model.select(.issues) }
                     .buttonStyle(.link)
                     .help("Every project's own issues (⇧⌘I)")
@@ -197,6 +198,7 @@ struct ProjectView: View {
                         .buttonStyle(.link)
                         .help("Implement the issues to do one after another on their own, each in a new worktree, shipped once it works")
                 }
+                AskClaudeMenu(project: path)
                 Button("All Issues") { model.select(.issues) }
                     .buttonStyle(.link)
                     .help("Every project's issues (⇧⌘I)")
@@ -633,5 +635,26 @@ private struct IssuePrefixEditor: View {
     private func save() {
         model.setIssuePrefix(draft, project: project)
         isPresented = false
+    }
+}
+
+/// Review the backlog, what's next, standup note: each a session in the project with a prompt for it.
+struct AskClaudeMenu: View {
+    @Environment(AppModel.self) private var model
+    let project: String
+
+    var body: some View {
+        let jira = model.trackers.tracker(for: project) != nil
+        Menu {
+            Button("Review the Backlog") { model.askClaude(.review, project: project) }
+                .help(jira ? "Duplicates, done-but-open and stale issues; each change to Jira asks first" : "Folds duplicates, closes what is already shipped, sizes the rest; each change can be undone")
+            Button("What's Next?") { model.askClaude(.next, project: project) }
+            Button("Standup Note") { model.askClaude(.standup, project: project) }
+        } label: {
+            Label("Ask Claude", systemImage: "sparkles")
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Start a session that goes over the issues" + (jira ? "; changes to Jira ask first" : "; it changes the list directly"))
     }
 }

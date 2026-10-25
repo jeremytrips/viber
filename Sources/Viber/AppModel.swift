@@ -914,6 +914,17 @@ final class AppModel {
         }
     }
 
+    /// Ask Claude: a session in the project with the action's prompt. On Jira every call to the Jira servers asks.
+    func askClaude(_ action: AskClaude, project: String) {
+        let tracker = trackers.tracker(for: project)
+        let profile = tracker?.profile.flatMap { name in profiles.contains { $0.name == name && $0.loginProblem == nil } ? name : nil }
+            ?? AccountPicker.usableDefault(self)
+        createSession(NewSessionRequest(folder: project, profile: profile, useWorktree: false, name: action.title,
+                                        sessionRules: tracker.map { JiraRun.askRules(servers: $0.mcpServers) } ?? [],
+                                        permissionMode: PermissionMode.auto.rawValue,
+                                        firstMessage: action.prompt(project: project, tracker: tracker), issueID: nil))
+    }
+
     /// Draft…: a session that writes `text` up as a Jira issue and creates it. It runs in the default permission mode,
     /// so every Jira call asks, and the create call shows as a ticket card to edit and approve.
     func draftJiraIssue(_ text: String, project: String) {

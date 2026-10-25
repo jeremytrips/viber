@@ -283,6 +283,7 @@ struct JiraIssueRow: View {
         .contextMenu {
             if let url = board.site?.browseURL(issue.key) { Link("Open in Jira", destination: url) }
             Button("Copy Key") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(issue.key, forType: .string) }
+            if !issue.isEpic { Button("Break Down with Claude") { model.askClaude(.breakDown(key: issue.key), project: project) } }
             if !issue.isEpic, JiraRun.ineligible(issue, mine: board.isMine(issue)) == nil {
                 if let run = model.jiraRuns[project] {
                     if !run.queue.contains(issue.key), !run.active.contains(issue.key) {
