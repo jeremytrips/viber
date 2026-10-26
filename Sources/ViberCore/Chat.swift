@@ -390,7 +390,8 @@ public struct ChatTranscript {
 
     /// Starts an OAuth sign-in; the reply carries the page to open. The CLI reconnects once it completes.
     public mutating func mcpAuthenticate(_ server: String) -> JSON {
-        request("mcp_authenticate", ["serverName": .string(server)], key: "mcp:\(server)")
+        controls.signInsUnfinished.remove(server)
+        return request("mcp_authenticate", ["serverName": .string(server)], key: "mcp:\(server)")
     }
 
     public mutating func mcpClearAuth(_ server: String) -> JSON {
@@ -1182,7 +1183,10 @@ public struct ChatTranscript {
         case "mcp_status":
             let servers = McpServer.parse(body?["mcpServers"])
             controls.mcp = servers
-            for s in servers where s.status == .connected { controls.signingIn[s.name] = nil }
+            for s in servers where s.status == .connected {
+                controls.signingIn[s.name] = nil
+                controls.signInsUnfinished.remove(s.name)
+            }
         case "mcp_toggle", "mcp_reconnect", "mcp_clear_auth":
             return [request("mcp_status", key: "mcp")]
         case "mcp_authenticate":
@@ -1235,6 +1239,7 @@ public struct ChatTranscript {
     private mutating func mergeServerStatus(_ servers: [McpServer]) {
         guard var current = controls.mcp else { controls.mcp = servers; return }
         for server in servers {
+            if server.status == .connected { controls.signInsUnfinished.remove(server.name) }
             if let index = current.firstIndex(where: { $0.name == server.name }) { current[index].status = server.status }
             else { current.append(server) }
         }

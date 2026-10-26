@@ -188,6 +188,14 @@ private struct McpRow: View {
             if let error = controls.errors[key] {
                 Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled).padding(.leading, 18)
             }
+            if controls.signInsUnfinished.contains(server.name) {
+                Text("Still not connected 2 minutes after you started signing in. If the browser said it worked, Claude couldn't use the login. Sign in again.")
+                    .font(.caption).foregroundStyle(.orange).padding(.leading, 18)
+            }
+            if server.status == .needsAuth, server.signInLastsOneSession(underClauth: pane.spec.profile != nil) {
+                Text("Under clauth, a sign-in here lasts only until Claude restarts. A claude.ai connector for the same service stays signed in; Claude Code hides it while this server is set up.")
+                    .font(.caption).foregroundStyle(.secondary).padding(.leading, 18)
+            }
             if open {
                 Text(server.tools.joined(separator: "  "))
                     .font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)

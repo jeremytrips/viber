@@ -574,7 +574,7 @@ final class AppModel {
     /// While a sign-in is pending, the CLI finishes it on its own; poll so the row turns connected.
     private func pollSignIns() {
         for pane in panes where pane.isRunning && !pane.chat.controls.signingIn.isEmpty {
-            pane.chat.controls.signingIn = pane.chat.controls.signingIn.filter { now.timeIntervalSince($0.value) < 120 }
+            pane.chat.controls.expireSignIns(now: now)
             guard !pane.chat.controls.signingIn.isEmpty, !pane.chat.controls.busy.contains("mcp") else { continue }
             pane.run { $0.refresh(.mcp) }
         }

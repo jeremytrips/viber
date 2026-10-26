@@ -315,6 +315,38 @@ final class ChatTranscriptTests: XCTestCase {
         XCTAssertTrue(chat.controls.reconnectOnReturn.isEmpty)
     }
 
+    func testSignInThatNeverConnectsIsMarkedUntilTheServerConnects() {
+        var chat = ChatTranscript()
+        let start = Date(timeIntervalSince1970: 50)
+        chat.apply(reply(to: chat.mcpAuthenticate("atlassian"),
+                         ["authUrl": "https://auth.atlassian.com/authorize", "requiresUserAction": true, "callbackExpected": true]), now: start)
+        chat.controls.expireSignIns(now: start.addingTimeInterval(119))
+        XCTAssertNotNil(chat.controls.signingIn["atlassian"])
+        XCTAssertTrue(chat.controls.signInsUnfinished.isEmpty)
+
+        chat.controls.expireSignIns(now: start.addingTimeInterval(120))
+        XCTAssertTrue(chat.controls.signingIn.isEmpty)
+        XCTAssertEqual(chat.controls.signInsUnfinished, ["atlassian"])
+
+        // Signing in again starts over; the server connecting ends it.
+        _ = chat.mcpAuthenticate("atlassian")
+        XCTAssertTrue(chat.controls.signInsUnfinished.isEmpty)
+        chat.controls.signInsUnfinished = ["atlassian"]
+        chat.apply(reply(to: chat.refresh(.mcp)[0], ["mcpServers": [["name": "atlassian", "status": "connected"]]]))
+        XCTAssertTrue(chat.controls.signInsUnfinished.isEmpty)
+        chat.controls.signInsUnfinished = ["atlassian"]
+        chat.apply(["type": "system", "subtype": "init", "mcp_servers": [["name": "atlassian", "status": "connected"]]])
+        XCTAssertTrue(chat.controls.signInsUnfinished.isEmpty)
+    }
+
+    func testOAuthSignInsLastOneSessionUnderClauth() {
+        let own = McpServer(name: "atlassian", status: .needsAuth, transport: "http")
+        let connector = McpServer(name: "claude.ai Atlassian MCP", status: .needsAuth, transport: "claudeai-proxy")
+        XCTAssertTrue(own.signInLastsOneSession(underClauth: true))
+        XCTAssertFalse(own.signInLastsOneSession(underClauth: false))
+        XCTAssertFalse(connector.signInLastsOneSession(underClauth: true))
+    }
+
     func testSettingsErrorsStayOutOfTheChat() {
         var chat = ChatTranscript()
         chat.apply(reply(to: chat.mcpReconnect("a"), error: "Server not found: a"))

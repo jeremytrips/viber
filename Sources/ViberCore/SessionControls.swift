@@ -62,6 +62,9 @@ public struct McpServer: Equatable, Sendable, Identifiable {
 
     /// OAuth tokens the CLI holds itself; claude.ai connectors are signed out on claude.ai.
     public var canSignOut: Bool { transport == "http" || transport == "sse" }
+    /// clauth gives each session its own config folder and Keychain item, which is where the CLI keeps a server's
+    /// OAuth login, so a sign-in there is gone once Claude restarts. claude.ai connectors sign in with the account.
+    public func signInLastsOneSession(underClauth: Bool) -> Bool { underClauth && transport != "claudeai-proxy" }
     public var needsAttention: Bool { status == .needsAuth || status == .failed }
 
     public static func parse(_ list: JSON?) -> [McpServer] {
@@ -234,6 +237,10 @@ public struct SessionControls: Equatable, Sendable {
     public var errors: [String: String] = [:]
     /// Servers waiting for a browser sign-in, and when it started.
     public var signingIn: [String: Date] = [:]
+    /// Sign-ins that ran out of time without the server connecting, until it connects or a new sign-in starts.
+    /// The browser can say it worked when Claude then failed to use the login, and nothing else would tell.
+    public var signInsUnfinished: Set<String> = []
+    public static let signInTimeout: TimeInterval = 120
     /// Signed in on a web page that does not call the CLI back: reconnect when the user returns.
     public var reconnectOnReturn: Set<String> = []
     /// A sign-in page the app should open, then clear.
@@ -245,6 +252,14 @@ public struct SessionControls: Equatable, Sendable {
     public mutating func takeReturnReconnects() -> [String] {
         defer { reconnectOnReturn.removeAll() }
         return reconnectOnReturn.sorted()
+    }
+
+    /// Stops waiting on sign-ins older than `signInTimeout` and marks them unfinished.
+    public mutating func expireSignIns(now: Date) {
+        for (server, started) in signingIn where now.timeIntervalSince(started) >= Self.signInTimeout {
+            signingIn[server] = nil
+            signInsUnfinished.insert(server)
+        }
     }
 
     public var runningTasks: [SessionTask] { tasks.filter(\.isRunning) }
