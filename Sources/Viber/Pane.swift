@@ -156,6 +156,8 @@ final class Pane: Identifiable {
         return branch.isEmpty ? nil : branch
     }
     var isRunning: Bool { process?.isRunning == true }
+    /// A read-only chat about the project (ProjectChat), not a session that works on it.
+    var isChat: Bool { spec.readOnly == true }
 
     func start(binDir: String?, pluginDir: String?) {
         guard process == nil || process?.isRunning == false else { return }
@@ -166,6 +168,7 @@ final class Pane: Identifiable {
         started = true
         accountChanged = false
         spec.pluginDir = pluginDir
+        chat.keepsMode = isChat
         let before = chat.state
         chat.state = .starting
         do {

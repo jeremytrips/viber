@@ -28,6 +28,8 @@ enum Prefs {
     static let jiraSites = "jiraSites"
     /// Each project's check after a request (RequestCheck), by its path, as JSON.
     static let requestChecks = "requestChecks"
+    /// Session IDs of read-only chats that were closed, so resuming one keeps it a chat.
+    static let chatSessions = "chatSessions"
 
     /// New worktrees' branch patterns, by the repository's main checkout. A missing one is Worktree.defaultBranchPattern.
     static let branchPatterns = "branchPatterns"

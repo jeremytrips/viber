@@ -12,6 +12,9 @@ struct PaneView: View {
             HSplitView {
                 VStack(spacing: 0) {
                     ChatList(pane: pane, readOnly: false)
+                        .overlay {
+                            if pane.isChat, pane.chat.items.isEmpty, pane.chat.streamingText.isEmpty { ChatIntro(project: pane.projectName) }
+                        }
                     ChecklistPanel(pane: pane)
                     RunningAgentsPanel(pane: pane)
                     UsageLimitPanel(pane: pane)
@@ -61,6 +64,27 @@ struct PaneView: View {
     }
 }
 
+/// What an empty read-only chat is for.
+struct ChatIntro: View {
+    let project: String
+
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(systemName: ChatMark.symbol).font(.system(size: 30)).foregroundStyle(.tertiary)
+            Text("Chat about \(project)").font(.title3.weight(.semibold))
+            Text("Ask how something works, where it lives or what changed, or plan the next piece of work. "
+                 + "Claude reads the code and the git history but can't edit files, and commands that could change something ask you first, "
+                 + "unless your settings already allow them. "
+                 + "Ask it to add a plan you want to keep as an issue.")
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: 440)
+        }
+        .padding(24)
+        .allowsHitTesting(false)
+    }
+}
+
 struct PaneHeader: View {
     @Environment(AppModel.self) private var model
     let pane: Pane
@@ -68,7 +92,10 @@ struct PaneHeader: View {
     var body: some View {
         HStack(alignment: .center, spacing: 16) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(pane.title).font(.headline).lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(pane.title).font(.headline).lineLimit(1)
+                    if pane.isChat { Chip(text: "read-only chat").help(ProjectChat.summary) }
+                }
                 HStack(spacing: 0) {
                     Button(model.projectName(pane.projectPath)) { model.select(.project(pane.projectPath)) }
                         .buttonStyle(.link)

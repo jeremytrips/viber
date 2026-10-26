@@ -185,6 +185,13 @@ struct ProjectRow: View {
                     ProjectIssuesPopover(name: project.name, path: project.path) { showingIdeas = false }
                 }
             }
+            if hovering {
+                Button { model.newChat(in: project.path) } label: { Image(systemName: ChatMark.symbol) }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.secondary)
+                    .help("Chat about \(project.name): questions and planning, read-only")
+                    .accessibilityLabel("New Chat in \(project.name)")
+            }
             if hovering || panes.isEmpty {
                 Button { model.newSession(in: project.path) } label: { Image(systemName: "plus") }
                     .buttonStyle(.borderless)
@@ -210,6 +217,7 @@ struct ProjectMenu: View {
     var body: some View {
         if !onPage {
             Button("New Session…") { model.newSession(in: path) }
+            Button("New Chat") { model.newChat(in: path) }
             Button("Show Project") { model.select(.project(path)) }
             Divider()
         }
@@ -238,6 +246,7 @@ struct PaneRow: View {
                         Image(systemName: "airplane").font(.caption).foregroundStyle(Color.accentColor)
                             .help("The autopilot started this session for an issue")
                     }
+                    if pane.isChat { ChatMark() }
                     Text(pane.title).lineLimit(1).fontWeight(.medium)
                 }
                 HStack(spacing: 5) {
@@ -453,6 +462,17 @@ private struct PulsingDot: NSViewRepresentable {
             pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             layer.add(pulse, forKey: "pulse")
         }
+    }
+}
+
+/// Marks a read-only chat in lists.
+struct ChatMark: View {
+    static let symbol = "bubble.left.and.bubble.right"
+
+    var body: some View {
+        Image(systemName: Self.symbol).font(.caption).foregroundStyle(.secondary)
+            .help(ProjectChat.summary)
+            .accessibilityLabel("Read-only chat")
     }
 }
 

@@ -177,6 +177,8 @@ public struct ChatTranscript {
     public var model: String?
     /// As reported by the CLI.
     public var permissionMode: String?
+    /// A read-only chat stays in its mode: Always Allow leaves out the CLI's suggestions to switch it.
+    public var keepsMode = false
     /// The CLI's auto-memory folder, as its init message names it.
     public var memoryFolder: String?
     public var streamingText = ""
@@ -1116,7 +1118,8 @@ public struct ChatTranscript {
         default:
             var prompt = PermissionPrompt(requestID: requestID, toolName: toolName, input: input, toolUseID: toolUseID,
                                           description: request["description"]?.string ?? request["decision_reason"]?.string,
-                                          suggestions: request["permission_suggestions"]?.array ?? [])
+                                          suggestions: (request["permission_suggestions"]?.array ?? [])
+                                              .filter { !keepsMode || $0["type"]?.string != "setMode" })
             if let agentID = request["agent_id"]?.string {
                 let task = controls.tasks.first { $0.id == agentID }
                 prompt.agent = task?.subagentType.map { "the \($0) agent" } ?? "a subagent"

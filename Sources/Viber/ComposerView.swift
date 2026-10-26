@@ -123,6 +123,7 @@ struct ComposerView: View {
         case .permission, .input, .plan: return "Answer the card above, or type to send a message"
         case .working: return "Claude is working. Messages you send now are queued."
         case _ where !pane.pickedElements.isEmpty: return "Say what to do with the picked element"
+        case _ where pane.isChat: return "Ask about \(pane.projectName), or plan something. Type / for commands, @ for files"
         default: return "Message Claude. Type / for commands, @ for files, // to message another session"
         }
     }
@@ -233,12 +234,16 @@ struct ComposerView: View {
             Button(action: pickFiles) { Image(systemName: "paperclip") }
                 .buttonStyle(.plain).foregroundStyle(.secondary)
                 .help("Attach images, or mention files (you can also paste or drop them)")
-            Menu {
-                ForEach(PermissionMode.offered, id: \.self) { mode in
-                    Button(mode.label) { model.setMode(mode.rawValue, in: pane) }
-                }
-            } label: { Text(PermissionMode.label(for: pane.chat.permissionMode ?? pane.spec.permissionMode)) }
-                .menuStyle(.borderlessButton).fixedSize()
+            if pane.isChat {
+                Text("Read-only").foregroundStyle(.secondary).help(ProjectChat.summary)
+            } else {
+                Menu {
+                    ForEach(PermissionMode.offered, id: \.self) { mode in
+                        Button(mode.label) { model.setMode(mode.rawValue, in: pane) }
+                    }
+                } label: { Text(PermissionMode.label(for: pane.chat.permissionMode ?? pane.spec.permissionMode)) }
+                    .menuStyle(.borderlessButton).fixedSize()
+            }
             Menu {
                 if pane.chat.models.isEmpty { Text("Start the session to load models") }
                 ForEach(pane.chat.models, id: \.value) { option in

@@ -34,6 +34,9 @@ struct ViberApp: App {
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("New Session…") { model.showNewSession = true }.keyboardShortcut("n")
+                Button("New Chat") { if let path = model.selectedProject { model.newChat(in: path) } }
+                    .keyboardShortcut("n", modifiers: [.command, .option])
+                    .disabled(model.selectedProject == nil)
                 Button("Add Project…") { model.chooseProject() }.keyboardShortcut("n", modifiers: [.command, .shift])
                 Button("Resume Session…") { model.reloadRecent(); model.showResume = true }.keyboardShortcut("r", modifiers: [.command, .shift])
             }

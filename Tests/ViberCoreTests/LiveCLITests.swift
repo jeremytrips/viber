@@ -429,4 +429,65 @@ final class LiveCLITests: XCTestCase {
         XCTAssertNotNil(run.tokens)
         XCTAssertTrue(askers.allSatisfy { $0 == "the general-purpose agent" }, "permission cards came from: \(askers)")
     }
+
+    /// A read-only chat: no tools that edit files, reads and `viber issue` run without asking, anything else asks.
+    func testReadOnlyChatAgainstRealCLI() throws {
+        let env = ProcessInfo.processInfo.environment
+        try XCTSkipUnless(env["VIBER_LIVE_TEST"] == "1", "set VIBER_LIVE_TEST=1 to run")
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("viber-live-\(UUID().uuidString)")
+        let bin = fm.temporaryDirectory.appendingPathComponent("viber-live-bin-\(UUID().uuidString)")
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: bin, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: dir); try? fm.removeItem(at: bin) }
+        try Data("hello\n".utf8).write(to: dir.appendingPathComponent("README.md"))
+        for args in [["init", "-q"], ["add", "."], ["-c", "user.email=a@b", "-c", "user.name=t", "commit", "-qm", "First commit"]] {
+            XCTAssertTrue(Shell.run("git", args, cwd: dir.path).ok)
+        }
+        // Stands in for the viber CLI, so nothing reaches a running Viber.
+        let fake = bin.appendingPathComponent("viber")
+        try Data("#!/bin/sh\necho 'KIWI-7 Fake issue'\n".utf8).write(to: fake)
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fake.path)
+
+        var chat = ChatTranscript()
+        chat.keepsMode = true
+        let spec = LaunchSpec(profile: env["VIBER_LIVE_PROFILE"], cwd: dir.path, model: "haiku", readOnly: true,
+                              appendSystemPrompt: ProjectChat.systemPrompt(project: dir.path, tracker: nil))
+        let process = try ClaudeProcess(spec: spec, paneID: "live-chat", binDir: bin.path)
+        let finished = expectation(description: "turn finished")
+        var tools: [String] = []
+        var asked: [String] = []
+        process.onMessage = { message in
+            if message["type"]?.string == "system", message["subtype"]?.string == "init" {
+                tools = message["tools"]?.array?.compactMap(\.string) ?? []
+            }
+            for reply in chat.apply(message) { process.send(reply) }
+            for item in chat.items {
+                guard case .permission(let p) = item.kind, p.decision == nil,
+                      let reply = chat.decidePermission(itemID: item.id, allow: false) else { continue }
+                asked.append(p.input["command"]?.string ?? p.toolName)
+                process.send(reply)
+            }
+            if message["type"]?.string == "result" { finished.fulfill() }
+        }
+        process.send(chat.request("initialize"))
+        process.send(chat.setSessionPermissions(rules: [ProjectChat.issueRule]))
+        process.send(chat.userMessage("Run these with the Bash tool, one call each: `git log -1 --oneline`, `viber issue list`, "
+            + "`touch made.txt`. Don't retry anything that is refused. Then reply with one line: the commit subject, the issue key, "
+            + "and whether made.txt was created."))
+        wait(for: [finished], timeout: 180)
+        process.terminate()
+
+        XCTAssertFalse(tools.isEmpty, "the init message lists the tools")
+        XCTAssertTrue(Set(tools).isDisjoint(with: ProjectChat.disallowedTools), "tools were: \(tools)")
+        XCTAssertTrue(tools.contains("Bash") && tools.contains("Read"))
+        XCTAssertEqual(chat.permissionMode, "default")
+        // The chat's prompt can talk Claude out of trying touch at all; when it does try, it has to ask.
+        let commands = chat.items.compactMap { if case .tool(let c) = $0.kind { return c.input["command"]?.string }; return nil }
+        XCTAssertEqual(asked, commands.filter { $0.contains("touch") }, "only touch asks")
+        XCTAssertFalse(fm.fileExists(atPath: dir.appendingPathComponent("made.txt").path))
+        let results = chat.items.compactMap { if case .tool(let c) = $0.kind { return c.result }; return nil }.joined(separator: "\n")
+        XCTAssertTrue(results.contains("First commit"), "results: \(results)")
+        XCTAssertTrue(results.contains("KIWI-7"), "viber issue ran without asking; results: \(results)")
+    }
 }

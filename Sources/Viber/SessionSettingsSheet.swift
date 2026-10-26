@@ -628,12 +628,16 @@ private struct ModelTab: View {
                     .labelsHidden().fixedSize()
                 }
                 LabeledContent("Permission mode") {
-                    Menu(PermissionMode.label(for: pane.chat.permissionMode ?? pane.spec.permissionMode)) {
-                        ForEach(PermissionMode.offered, id: \.self) { mode in
-                            Button(mode.label) { model.setMode(mode.rawValue, in: pane) }.help(mode.summary ?? "")
+                    if pane.isChat {
+                        Text("Read-only chat").foregroundStyle(.secondary).help(ProjectChat.summary)
+                    } else {
+                        Menu(PermissionMode.label(for: pane.chat.permissionMode ?? pane.spec.permissionMode)) {
+                            ForEach(PermissionMode.offered, id: \.self) { mode in
+                                Button(mode.label) { model.setMode(mode.rawValue, in: pane) }.help(mode.summary ?? "")
+                            }
                         }
+                        .fixedSize()
                     }
-                    .fixedSize()
                 }
             } footer: {
                 Text("This session only. Set the model and effort new sessions start with in Settings → Model.")

@@ -19,6 +19,7 @@ struct ProjectView: View {
     @State private var editingPattern = false
     @State private var pattern = Worktree.defaultBranchPattern
     @State private var draft = ""
+    @State private var question = ""
     @AppStorage("projectTab") private var tab: Tab = .planning
     @AppStorage("issuesAsBoard") private var board = false
     @State private var editingPrefix = false
@@ -47,6 +48,7 @@ struct ProjectView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 26) {
                 header
+                askField
                 Picker("Tab", selection: $tab) {
                     ForEach(Tab.allCases) { Text($0.rawValue).tag($0) }
                 }
@@ -111,6 +113,34 @@ struct ProjectView: View {
                 .buttonStyle(.borderedProminent)
                 .help("Start a session in \(project.name) (⌘N)")
         }
+    }
+
+    /// Starts a read-only chat with what you typed.
+    private var askField: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: ChatMark.symbol).foregroundStyle(.secondary)
+            TextField("Ask about \(project.name), or plan something", text: $question, axis: .vertical)
+                .textFieldStyle(.plain)
+                .lineLimit(1...6)
+                .onSubmit(ask)
+            Text("read-only").font(.caption).foregroundStyle(.tertiary)
+            let empty = question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            Button(action: ask) { Image(systemName: "arrow.up.circle.fill").font(.title3) }
+                .buttonStyle(.plain)
+                .foregroundStyle(empty ? Color.secondary : Color.accentColor)
+                .disabled(empty)
+                .help("Open a chat with this message (Return). New Chat (⌥⌘N) opens an empty one.")
+        }
+        .padding(.horizontal, 12).padding(.vertical, 9)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .controlBackgroundColor)))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.separator))
+        .help(ProjectChat.summary)
+    }
+
+    private func ask() {
+        guard !question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        model.newChat(in: path, message: question)
+        question = ""
     }
 
     // MARK: Sessions
@@ -480,7 +510,10 @@ private struct ProjectSessionRow: View {
             HStack(spacing: 10) {
                 StateDot(state: pane.state)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(pane.title).lineLimit(1)
+                    HStack(spacing: 4) {
+                        if pane.isChat { ChatMark() }
+                        Text(pane.title).lineLimit(1)
+                    }
                     Text(subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                 }
                 Spacer(minLength: 8)
@@ -537,7 +570,10 @@ private struct EarlierSessionRow: View {
         let exists = FileManager.default.fileExists(atPath: folder)
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(session.title).lineLimit(1)
+                HStack(spacing: 4) {
+                    if model.isChatSession(session.id) { ChatMark() }
+                    Text(session.title).lineLimit(1)
+                }
                 Text(place(folder, in: project) + (session.updatedDate.map { " · " + IssueRow.relative($0, now: model.now) } ?? ""))
                     .font(.caption)
                     .foregroundStyle(.secondary)

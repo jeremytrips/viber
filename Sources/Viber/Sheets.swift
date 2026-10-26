@@ -409,8 +409,10 @@ struct NewSessionSheet: View {
         baseChoices = choices
         base = choices.available(.originDefault)
         guard let root else { useWorktree = false; return }
-        // Default to a worktree when another open session already works in this repo. Planning an issue always uses one.
+        // Default to a worktree when another open session already works in this repo (a chat doesn't). Planning an
+        // issue always uses one.
         useWorktree = issueID != nil || model.panes.contains { pane in
+            guard !pane.isChat else { return false }
             let paneRepo = pane.worktree?.repo ?? pane.spec.cwd
             return paneRepo == root || paneRepo.hasPrefix(root + "/") || paneRepo == dir
         }

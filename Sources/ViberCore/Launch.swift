@@ -8,11 +8,16 @@ public struct LaunchSpec: Codable, Equatable {
     public var permissionMode: String?
     public var model: String?
     public var pluginDir: String?
+    /// A read-only chat (ProjectChat): no tools that edit files, no plan mode, and the mode that asks.
+    public var readOnly: Bool?
+    /// Added to the end of Claude Code's system prompt.
+    public var appendSystemPrompt: String?
 
     public init(profile: String?, cwd: String, resume: String? = nil, permissionMode: String? = nil,
-                model: String? = nil, pluginDir: String? = nil) {
+                model: String? = nil, pluginDir: String? = nil, readOnly: Bool? = nil, appendSystemPrompt: String? = nil) {
         self.profile = profile; self.cwd = cwd; self.resume = resume
         self.permissionMode = permissionMode; self.model = model; self.pluginDir = pluginDir
+        self.readOnly = readOnly; self.appendSystemPrompt = appendSystemPrompt
     }
 
     /// The `claude` arguments for a headless session that speaks the Agent SDK protocol on stdio.
@@ -22,7 +27,15 @@ public struct LaunchSpec: Codable, Equatable {
                     "--include-partial-messages", "--permission-prompt-tool", "stdio", "--replay-user-messages",
                     "--thinking-display", "summarized"]
         if let resume { args += ["--resume", resume] }
-        if let permissionMode { args += ["--permission-mode", permissionMode] }
+        if readOnly == true {
+            // Named even though it is the CLI's default: a settings file's defaultMode would otherwise win, and the
+            // modes past this one run commands that write without asking.
+            args += ["--permission-mode", PermissionMode.default.rawValue,
+                     "--disallowedTools", ProjectChat.disallowedTools.joined(separator: ",")]
+        } else if let permissionMode {
+            args += ["--permission-mode", permissionMode]
+        }
+        if let appendSystemPrompt { args += ["--append-system-prompt", appendSystemPrompt] }
         if let model { args += ["--model", model] }
         if let pluginDir { args += ["--plugin-dir", pluginDir] }
         return args

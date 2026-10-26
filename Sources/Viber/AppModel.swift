@@ -100,6 +100,9 @@ struct NewSessionRequest {
     /// The Jira issue a Jira autopilot run starts this session for, and rules the session starts with.
     var jiraRunKey: String? = nil
     var sessionRules: [RuleEdit] = []
+    /// A read-only chat (ProjectChat), with the text added to its system prompt.
+    var readOnly = false
+    var systemPrompt: String? = nil
     var permissionMode: String
     var firstMessage: String
     /// The issue this session is started for, linked to it once it opens.
@@ -146,6 +149,8 @@ final class AppModel {
     var trackers = TrackerList()
     /// What each project's sessions do once a request is done, by its path. A missing one is off.
     var requestChecks: [String: RequestCheck] = [:]
+    /// Conversations that were read-only chats, by session ID, so resuming one keeps it a chat. Newest last.
+    var chatSessions: [String] = []
     var jiraSites: [JiraSite] = []
     /// What each Jira project's Planning tab shows, kept while the app runs.
     var jiraBoards: [String: JiraBoard] = [:]
@@ -275,7 +280,8 @@ final class AppModel {
             if selecting { select(.job(job.id)) }
             run(job)
         } else {
-            open(title: title, spec: LaunchSpec(profile: request.profile, cwd: request.folder, permissionMode: mode, model: launchModel),
+            open(title: title, spec: LaunchSpec(profile: request.profile, cwd: request.folder, permissionMode: mode, model: launchModel,
+                                                readOnly: request.readOnly ? true : nil, appendSystemPrompt: request.systemPrompt),
                  worktree: nil, firstMessage: request.firstMessage, issueID: request.issueID, jiraRunKey: request.jiraRunKey,
                  rules: request.sessionRules, selecting: selecting)
         }
@@ -286,7 +292,55 @@ final class AppModel {
             select(.pane(existing.id)); return
         }
         guard let folder = session.workspace else { errorMessage = "This session has no recorded folder."; return }
-        open(title: session.title, spec: LaunchSpec(profile: profile, cwd: folder, resume: session.id), worktree: nil, firstMessage: "")
+        let spec = LaunchSpec(profile: profile, cwd: folder, resume: session.id)
+        if isChatSession(session.id) {
+            open(title: session.title, spec: chatSpec(spec), worktree: nil, firstMessage: "", rules: [ProjectChat.issueRule])
+        } else {
+            open(title: session.title, spec: spec, worktree: nil, firstMessage: "")
+        }
+    }
+
+    // MARK: Chats
+
+    /// A read-only chat in the project's folder, for questions and planning. `message`, if any, is sent as its first.
+    func newChat(in project: String, message: String = "") {
+        let text = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        createSession(NewSessionRequest(folder: project, profile: launchProfile(for: project), useWorktree: false,
+                                        name: ProjectChat.title(from: text), sessionRules: [ProjectChat.issueRule], readOnly: true,
+                                        systemPrompt: chatPrompt(project), permissionMode: PermissionMode.default.rawValue,
+                                        firstMessage: text, issueID: nil))
+    }
+
+    private func chatPrompt(_ project: String) -> String {
+        ProjectChat.systemPrompt(project: project, tracker: trackers.tracker(for: project))
+    }
+
+    private func chatSpec(_ spec: LaunchSpec) -> LaunchSpec {
+        var spec = spec
+        spec.readOnly = true
+        spec.appendSystemPrompt = chatPrompt(ProjectRoot.resolve(spec.cwd))
+        return spec
+    }
+
+    func isChatSession(_ id: String) -> Bool { chatSessions.contains(id) }
+
+    /// A chat opened without a message takes its title from the first one you send (not from a command).
+    private func nameChat(_ pane: Pane, from message: String) {
+        let title = ProjectChat.title(from: message)
+        guard pane.isChat, pane.title == ProjectChat.untitled, title != ProjectChat.untitled else { return }
+        pane.title = title
+        save()
+    }
+
+    /// Notes a chat's conversation before it goes (closed, or replaced by /clear), so Resume brings it back as a chat.
+    private func rememberChat(_ pane: Pane) {
+        guard pane.isChat, let id = pane.chat.sessionID ?? pane.spec.resume else { return }
+        // Another Viber running at the same time may have saved some since this one read the list.
+        let saved = UserDefaults.standard.stringArray(forKey: Prefs.chatSessions) ?? []
+        var all = saved + chatSessions.filter { !saved.contains($0) }
+        all.removeAll { $0 == id }
+        chatSessions = Array((all + [id]).suffix(500))
+        UserDefaults.standard.set(chatSessions, forKey: Prefs.chatSessions)
     }
 
     /// Restart a session's Claude process, keeping the conversation (e.g. after logging in again).
@@ -300,8 +354,12 @@ final class AppModel {
             select(.pane(existing.id)); return
         }
         let title = recent.first(where: { $0.id == session.id })?.title ?? session.projectName
-        open(title: title, spec: LaunchSpec(profile: launchProfile(for: ProjectRoot.resolve(session.project)), cwd: session.project, resume: session.id),
-             worktree: nil, firstMessage: "")
+        let spec = LaunchSpec(profile: launchProfile(for: ProjectRoot.resolve(session.project)), cwd: session.project, resume: session.id)
+        if isChatSession(session.id) {
+            open(title: title, spec: chatSpec(spec), worktree: nil, firstMessage: "", rules: [ProjectChat.issueRule])
+        } else {
+            open(title: title, spec: spec, worktree: nil, firstMessage: "")
+        }
     }
 
     @discardableResult
@@ -451,11 +509,16 @@ final class AppModel {
         switch SlashRouter.route(text, commands: pane.chat.commands) {
         case .send(let message):
             guard !message.isEmpty || !images.isEmpty else { return true }
+            nameChat(pane, from: message)
             pane.sendUser(message, images: images, binDir: binDir, pluginDir: pluginDir)
             return true
         case .setMode(let mode, let then):
             setMode(mode, in: pane)
-            if let then { pane.sendUser(then, images: images, binDir: binDir, pluginDir: pluginDir); return true }
+            if let then {
+                nameChat(pane, from: then)
+                pane.sendUser(then, images: images, binDir: binDir, pluginDir: pluginDir)
+                return true
+            }
         case .setModel(let model):
             ensureRunning(pane)
             pane.run { [$0.setModel(model)] }
@@ -464,6 +527,7 @@ final class AppModel {
             let names = pane.chat.models.map(\.value).joined(separator: ", ")
             pane.chat.note(names.isEmpty ? "Use /model <name>, for example /model opus." : "Available models: \(names). Use /model <name> or the model menu.")
         case .clear:
+            rememberChat(pane)
             pane.restartFresh(binDir: binDir, pluginDir: pluginDir)
             save()
         case .resume:
@@ -931,6 +995,8 @@ final class AppModel {
 
     func setTracker(_ tracker: ProjectTracker?, for project: String) {
         trackers.set(tracker, for: project)
+        // Open chats in the project get the new tracker in their prompt when Claude next starts.
+        for pane in panes where pane.isChat && pane.projectPath == project { pane.spec.appendSystemPrompt = chatPrompt(project) }
         do { try trackers.save() } catch { errorMessage = "Could not save the project's tracker: \(error.localizedDescription)" }
         if let tracker {
             if let board = jiraBoards[project] { board.update(tracker: tracker, site: jiraSites.first { $0.host == tracker.site }) }
@@ -1463,8 +1529,12 @@ final class AppModel {
         if !pane.isRunning { pane.start(binDir: binDir, pluginDir: pluginDir) }
     }
 
-    /// The chat notes the new mode once the CLI confirms it.
+    /// The chat notes the new mode once the CLI confirms it. A read-only chat keeps its own.
     func setMode(_ mode: String, in pane: Pane) {
+        if pane.isChat {
+            pane.chat.note("This chat stays read-only, whatever the mode. To make changes, start a session from the project.")
+            return
+        }
         ensureRunning(pane)
         pane.run { [$0.setPermissionMode(mode)] }
     }
@@ -1473,6 +1543,7 @@ final class AppModel {
     /// WorktreeRemove hook can take a while), and stays there with its output if it fails.
     func close(_ pane: Pane, removeWorktree: Bool = false, deleteBranch: Bool = false) {
         let wasSelected = selection == .pane(pane.id)
+        rememberChat(pane)
         pane.onStateChange = nil
         pane.stop()
         pane.closePreview()
@@ -1602,7 +1673,7 @@ final class AppModel {
     /// The check a session gets after each request: the project's, except in autopilot sessions, whose first
     /// message already has it before they ship.
     private func checksRequests(_ pane: Pane) -> RequestCheck? {
-        guard pane.jiraRunKey == nil, !startedByAutopilot(pane) else { return nil }
+        guard pane.jiraRunKey == nil, !pane.isChat, !startedByAutopilot(pane) else { return nil }
         return requestCheck(for: pane.projectPath)
     }
 
@@ -1905,6 +1976,7 @@ final class AppModel {
            let checks = try? JSONDecoder().decode([String: RequestCheck].self, from: data) {
             requestChecks = checks
         }
+        chatSessions = UserDefaults.standard.stringArray(forKey: Prefs.chatSessions) ?? []
         // Issues were filed under a session's folder; a subfolder's or worktree's now belong to its repository.
         if issues.moveProjects(ProjectRoot.resolve) { saveIssues() }
         if let data = try? Data(contentsOf: ViberPaths.panes),
