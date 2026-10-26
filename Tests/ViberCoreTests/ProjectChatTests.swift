@@ -51,6 +51,16 @@ final class ProjectChatTests: XCTestCase {
         let jira = ProjectChat.systemPrompt(project: "/Users/me/dev/nexus", tracker: ProjectTracker(site: "acme.atlassian.net"))
         XCTAssertTrue(jira.contains("acme.atlassian.net"))
         XCTAssertFalse(jira.contains("viber issue"))
+
+        for prompt in [own, jira] {
+            XCTAssertTrue(prompt.contains("one simple command"), "asks for commands Claude Code can tell only read")
+            XCTAssertTrue(prompt.contains("Grep"))
+        }
+    }
+
+    func testChatsStartWithTheIssueAndWebRules() {
+        XCTAssertEqual(Set(ProjectChat.sessionRules.map(\.rule)), ["Bash(viber issue:*)", "WebSearch", "WebFetch"])
+        XCTAssertTrue(ProjectChat.sessionRules.allSatisfy { $0.behavior == "allow" })
     }
 
     func testAlwaysAllowCantSwitchAChatsMode() {

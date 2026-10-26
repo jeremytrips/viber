@@ -294,7 +294,7 @@ final class AppModel {
         guard let folder = session.workspace else { errorMessage = "This session has no recorded folder."; return }
         let spec = LaunchSpec(profile: profile, cwd: folder, resume: session.id)
         if isChatSession(session.id) {
-            open(title: session.title, spec: chatSpec(spec), worktree: nil, firstMessage: "", rules: [ProjectChat.issueRule])
+            open(title: session.title, spec: chatSpec(spec), worktree: nil, firstMessage: "", rules: ProjectChat.sessionRules)
         } else {
             open(title: session.title, spec: spec, worktree: nil, firstMessage: "")
         }
@@ -306,7 +306,7 @@ final class AppModel {
     func newChat(in project: String, message: String = "") {
         let text = message.trimmingCharacters(in: .whitespacesAndNewlines)
         createSession(NewSessionRequest(folder: project, profile: launchProfile(for: project), useWorktree: false,
-                                        name: ProjectChat.title(from: text), sessionRules: [ProjectChat.issueRule], readOnly: true,
+                                        name: ProjectChat.title(from: text), sessionRules: ProjectChat.sessionRules, readOnly: true,
                                         systemPrompt: chatPrompt(project), permissionMode: PermissionMode.default.rawValue,
                                         firstMessage: text, issueID: nil))
     }
@@ -356,7 +356,7 @@ final class AppModel {
         let title = recent.first(where: { $0.id == session.id })?.title ?? session.projectName
         let spec = LaunchSpec(profile: launchProfile(for: ProjectRoot.resolve(session.project)), cwd: session.project, resume: session.id)
         if isChatSession(session.id) {
-            open(title: title, spec: chatSpec(spec), worktree: nil, firstMessage: "", rules: [ProjectChat.issueRule])
+            open(title: title, spec: chatSpec(spec), worktree: nil, firstMessage: "", rules: ProjectChat.sessionRules)
         } else {
             open(title: title, spec: spec, worktree: nil, firstMessage: "")
         }

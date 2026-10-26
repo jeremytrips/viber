@@ -471,10 +471,10 @@ final class LiveCLITests: XCTestCase {
             if message["type"]?.string == "result" { finished.fulfill() }
         }
         process.send(chat.request("initialize"))
-        process.send(chat.setSessionPermissions(rules: [ProjectChat.issueRule]))
-        process.send(chat.userMessage("Run these with the Bash tool, one call each: `git log -1 --oneline`, `viber issue list`, "
-            + "`touch made.txt`. Don't retry anything that is refused. Then reply with one line: the commit subject, the issue key, "
-            + "and whether made.txt was created."))
+        process.send(chat.setSessionPermissions(rules: ProjectChat.sessionRules))
+        process.send(chat.userMessage("Run these with the Bash tool, one call each: `git log -1 --oneline`, "
+            + "`viber issue list`, `touch made.txt`. Then search the web once for \"Swift programming language\". Don't retry "
+            + "anything that is refused. Then reply with one line: the commit subject, the issue key, and whether made.txt was created."))
         wait(for: [finished], timeout: 180)
         process.terminate()
 
@@ -485,6 +485,8 @@ final class LiveCLITests: XCTestCase {
         // The chat's prompt can talk Claude out of trying touch at all; when it does try, it has to ask.
         let commands = chat.items.compactMap { if case .tool(let c) = $0.kind { return c.input["command"]?.string }; return nil }
         XCTAssertEqual(asked, commands.filter { $0.contains("touch") }, "only touch asks")
+        let searched = chat.items.contains { if case .tool(let c) = $0.kind { return c.name == "WebSearch" && c.done }; return false }
+        XCTAssertTrue(searched, "the web search ran without asking")
         XCTAssertFalse(fm.fileExists(atPath: dir.appendingPathComponent("made.txt").path))
         let results = chat.items.compactMap { if case .tool(let c) = $0.kind { return c.result }; return nil }.joined(separator: "\n")
         XCTAssertTrue(results.contains("First commit"), "results: \(results)")

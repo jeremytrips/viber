@@ -14,8 +14,11 @@ public enum ProjectChat {
     /// Claude Code; older ones still have it.
     public static let disallowedTools = ["Edit", "MultiEdit", "Write", "NotebookEdit", "EnterPlanMode", "ExitPlanMode"]
 
-    /// Keeping a plan as an issue on Viber's own list doesn't ask; each change shows in Viber and can be undone there.
-    public static let issueRule = RuleEdit(behavior: "allow", rule: "Bash(viber issue:*)")
+    /// The session rules a chat starts with. Keeping a plan as an issue on Viber's own list doesn't ask, since each
+    /// change shows in Viber and can be undone there. Neither do web searches and pages, which change nothing here.
+    public static let sessionRules = [RuleEdit(behavior: "allow", rule: "Bash(viber issue:*)"),
+                                      RuleEdit(behavior: "allow", rule: "WebSearch"),
+                                      RuleEdit(behavior: "allow", rule: "WebFetch")]
 
     /// A chat's title: the first line of its first message, cut to fit the sidebar. A command (`/model opus`) names
     /// nothing, so the question after it does.
@@ -56,8 +59,12 @@ public enum ProjectChat {
         around that with the shell (no redirects into files, `sed -i`, commits, checkouts, installs, or builds and \
         scripts that write).
         - Answer from the code, the docs and the git history, and say where things are (files, functions, commits).
-        - Commands that only read run without asking; anything else asks the user, so run one only when the answer \
-        needs it, and say why.
+        - Commands that only read run without asking, but only when Claude Code can tell that they only read. So keep \
+        each Bash call to one simple command in the folder you start in: plain `git …` and paths inside the project, \
+        with no `cd`, `git -C`, loops, `$(…)`, `${…}` or `echo` separators; make several calls instead. Read files with \
+        Read and search with Grep and Glob, not `cat`, `sed`, `head` or `grep`.
+        - Anything else asks the user, and so does reading outside the project, so do it only when the answer needs it, \
+        and say why. Web searches and fetching pages don't ask.
         - When the user plans something, work it out with them: what would change and where, in what order, the risks \
         and the open questions. Keep it concrete enough that a later session can do the work from it.
         - \(issues)
