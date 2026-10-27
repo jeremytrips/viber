@@ -222,6 +222,8 @@ final class AppModel {
     var waitingCount: Int { panes.filter { $0.state.needsYou }.count + externals.filter { [.input, .plan, .permission].contains($0.state) }.count }
     var profiles: [ClauthStatus.Profile] { status?.profiles ?? [] }
     var defaultProfile: String? { status?.activeProfile }
+    /// clauth's fallback chain. In projects on clauth's default, clauth picks a member for each session and moves it along.
+    var chain: [String] { status?.chain ?? [] }
     /// The account the top bar shows: the selected chat's, else the selected project's, else clauth's default.
     /// Nil means the plain `claude` login.
     var shownProfileName: String? {
@@ -491,6 +493,10 @@ final class AppModel {
         pane.onJiraHold = { [weak self] pane, what in self?.holdJiraRun(pane, what) }
         pane.onOpenURL = { NSWorkspace.shared.open($0) }
         pane.onPersist = { [weak self] in self?.save() }
+        pane.clauthPicks = { [weak self, weak pane] profile in
+            guard let self, let pane else { return false }
+            return self.account(of: pane.projectPath) == .clauthDefault && self.chain.contains(profile)
+        }
         pane.deviceHub = deviceHub
     }
 
@@ -790,7 +796,7 @@ final class AppModel {
         projectAccounts[project] = account.stored
         UserDefaults.standard.set(projectAccounts, forKey: Prefs.projectAccounts)
         let profile = launchProfile(for: project)
-        let others = panes.filter { $0.projectPath == project && $0.spec.profile != profile }
+        let others = panes.filter { $0.projectPath == project && runsElsewhere($0, than: profile) }
         accountMove = others.isEmpty ? nil
             : AccountMove(project: project, profile: profile, sessions: others.count, waiting: others.filter { $0.continueAt != nil }.count,
                           autopilot: autopilots[project] != nil || jiraRuns[project] != nil)
@@ -800,12 +806,20 @@ final class AppModel {
     func moveSessions(_ move: AccountMove) {
         autopilots[move.project]?.profile = move.profile
         jiraRuns[move.project]?.profile = move.profile
-        for pane in panes where pane.projectPath == move.project && pane.spec.profile != move.profile {
+        for pane in panes where pane.projectPath == move.project && runsElsewhere(pane, than: move.profile) {
             pane.switchAccount(to: move.profile, binDir: binDir, pluginDir: pluginDir)
             // The limit it was waiting out was the old account's. The next tick carries on once Claude is up again.
             if pane.continueAt != nil { pane.continueAt = now }
         }
         save()
+    }
+
+    /// Whether an open session runs on another account than its project's. One on clauth's default that is already on the
+    /// fallback chain stays: the chain moves it along by itself.
+    private func runsElsewhere(_ pane: Pane, than profile: String?) -> Bool {
+        guard pane.spec.profile != profile else { return false }
+        guard let current = pane.spec.profile else { return true }
+        return !(account(of: pane.projectPath) == .clauthDefault && chain.contains(current))
     }
 
     /// Opens the New Session sheet on a project, or on a folder in it.
@@ -1747,7 +1761,7 @@ final class AppModel {
                 Task { @MainActor in self?.tick() }
             },
             Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-                Task { @MainActor in self?.pollExternal(); self?.drainRequests(); self?.pollSignIns() }
+                Task { @MainActor in self?.pollExternal(); self?.drainRequests(); self?.pollSignIns(); self?.followClauth() }
             },
             Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
                 Task { @MainActor in self?.reloadStatus(); self?.deviceHub.reap(); self?.checkStalledAutopilots(); self?.refreshJira() }
@@ -1871,6 +1885,18 @@ final class AppModel {
         }
         // The daemon writes its first snapshot within a second or two.
         if starting { reloadStatus(after: 3) }
+    }
+
+    /// Shows where clauth runs the sessions it picks the account for: soon after they start, and after each swap.
+    private func followClauth() {
+        let picked = panes.filter { $0.spec.autoAccount == true && $0.processID != nil }
+        guard !picked.isEmpty else { return }
+        Task.detached {
+            let live = ClauthLiveSession.load()
+            await MainActor.run {
+                for pane in picked { if let pid = pane.processID, let session = live[pid] { pane.follow(session) } }
+            }
+        }
     }
 
     private func reloadStatus(after seconds: Double) {

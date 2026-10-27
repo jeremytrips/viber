@@ -7,6 +7,34 @@ import XCTest
 /// Talks to the real `claude` CLI (costs a few cents). Run with: VIBER_LIVE_TEST=1 swift test --filter LiveCLITests
 /// Set VIBER_LIVE_PROFILE to go through `clauth start <profile>` instead of plain `claude`.
 final class LiveCLITests: XCTestCase {
+    /// Needs clauth 0.16+ with a fallback chain: VIBER_LIVE_TEST=1 VIBER_LIVE_AUTO=1 swift test --filter testClauthPicksTheAccountAgainstRealCLI
+    func testClauthPicksTheAccountAgainstRealCLI() throws {
+        let env = ProcessInfo.processInfo.environment
+        try XCTSkipUnless(env["VIBER_LIVE_TEST"] == "1" && env["VIBER_LIVE_AUTO"] == "1", "set VIBER_LIVE_TEST=1 VIBER_LIVE_AUTO=1 to run")
+        let status = try XCTUnwrap(ClauthStatus.decode(Data(contentsOf: ViberPaths.clauthStatus)))
+        try XCTSkipIf(status.chain.isEmpty, "clauth has no fallback chain")
+
+        var chat = ChatTranscript()
+        var spec = LaunchSpec(profile: nil, cwd: FileManager.default.temporaryDirectory.path, model: "haiku")
+        spec.autoAccount = true
+        let process = try ClaudeProcess(spec: spec, paneID: "live-auto", binDir: nil)
+        let finished = expectation(description: "turn finished")
+        var result: JSON?
+        process.onMessage = { message in
+            for reply in chat.apply(message) { process.send(reply) }
+            if message["type"]?.string == "result" { result = message; finished.fulfill() }
+        }
+        process.send(chat.request("initialize"))
+        process.send(chat.userMessage("Reply with the single word DONE."))
+        wait(for: [finished], timeout: 120)
+        let session = ClauthLiveSession.load()[process.pid]
+        process.terminate()
+
+        XCTAssertEqual(result?["is_error"]?.bool, false, result?["result"]?.string ?? "")
+        let profile = try XCTUnwrap(session?.profile, "clauth files the session under its process")
+        XCTAssertTrue(status.chain.contains(profile), "\(profile) is a chain member")
+    }
+
     func testPermissionRoundTripAgainstRealCLI() throws {
         let env = ProcessInfo.processInfo.environment
         try XCTSkipUnless(env["VIBER_LIVE_TEST"] == "1", "set VIBER_LIVE_TEST=1 to run")

@@ -18,6 +18,8 @@ public struct ClauthStatus: Decodable, Equatable {
         public var fetchStatus: String?
         public var fetchedAt: String?
         public var windows: [Window]?
+        /// Set for members of clauth's fallback chain.
+        public var fallback: Fallback?
         public var id: String { name }
         public var loginProblem: String? {
             switch authStatus {
@@ -27,6 +29,10 @@ public struct ClauthStatus: Decodable, Equatable {
             }
         }
     }
+    public struct Fallback: Decodable, Equatable {
+        /// 1 for the chain's first member.
+        public var position: Int?
+    }
     public var generatedAt: String?
     public var activeProfile: String?
     public var profiles: [Profile]
@@ -35,6 +41,38 @@ public struct ClauthStatus: Decodable, Equatable {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         return try? decoder.decode(ClauthStatus.self, from: data)
+    }
+
+    /// clauth's fallback chain, in its order.
+    public var chain: [String] {
+        profiles.filter { $0.fallback != nil }.sorted { ($0.fallback?.position ?? 0) < ($1.fallback?.position ?? 0) }.map(\.name)
+    }
+}
+
+/// A `clauth start` process as clauth tracks it in ~/.clauth/live_sessions.
+public struct ClauthLiveSession: Decodable, Equatable {
+    public var pid: Int32
+    /// The account it started on, which `--auto` picked.
+    public var startProfile: String?
+    /// The chain member a session that follows the chain was swapped onto; nil until a swap.
+    public var currentMember: String?
+    public var profile: String? { currentMember ?? startProfile }
+
+    public static var directory: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".clauth/live_sessions")
+    }
+
+    /// Every session clauth tracks, by the ID of its `clauth start` process.
+    public static func load(from directory: URL = directory) -> [Int32: ClauthLiveSession] {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+        var sessions: [Int32: ClauthLiveSession] = [:]
+        for file in files where file.pathExtension == "json" {
+            guard let data = try? Data(contentsOf: file), let session = try? decoder.decode(ClauthLiveSession.self, from: data) else { continue }
+            sessions[session.pid] = session
+        }
+        return sessions
     }
 }
 
@@ -67,7 +105,8 @@ public struct ClauthSession: Decodable, Equatable, Identifiable {
 
 /// The login a project's sessions start with, chosen on its Settings tab or under the toolbar's account button.
 public enum ProjectAccount: Hashable, Sendable {
-    /// clauth's default account, whichever that is when a session starts.
+    /// clauth's default account, whichever that is when a session starts. With a fallback chain, clauth picks a member
+    /// at launch instead, and moves the session along the chain.
     case clauthDefault
     /// Plain `claude` with its own login, outside clauth.
     case plain
@@ -91,14 +130,22 @@ public enum ProjectAccount: Hashable, Sendable {
         }
     }
 
-    /// The clauth profile a new session starts under; nil starts plain `claude`. clauth's default falls back to plain
-    /// `claude` while its login is broken. A profile the project names is used as it is, even with a broken login:
-    /// its sessions never run on an account the project didn't choose, and the chat says when the login fails.
+    /// The clauth profile a new session starts under; nil starts plain `claude`. With a fallback chain, clauth's default
+    /// is a chain member: clauth picks the real one at launch (`--auto`), and this is the one to show until it does,
+    /// so an account outside the chain, such as a personal one, never shows up for the project. Without a chain it
+    /// falls back to plain `claude` while its login is broken. A profile the project names is used as it is, even with
+    /// a broken login: its sessions never run on an account the project didn't choose, and the chat says when the
+    /// login fails.
     public func launchProfile(status: ClauthStatus?) -> String? {
         switch self {
         case .plain: return nil
         case .profile(let name): return name
         case .clauthDefault:
+            if let status, let first = status.chain.first {
+                let working = status.chain.filter { name in status.profiles.first { $0.name == name }?.loginProblem == nil }
+                if let active = status.activeProfile, working.contains(active) { return active }
+                return working.first ?? first
+            }
             guard let name = status?.activeProfile,
                   let profile = status?.profiles.first(where: { $0.name == name }), profile.loginProblem == nil else { return nil }
             return name

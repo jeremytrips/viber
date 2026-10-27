@@ -108,6 +108,69 @@ final class ClauthTests: XCTestCase {
         XCTAssertNil(ProjectAccount.clauthDefault.launchProfile(status: nil))
     }
 
+    /// Shaped like status.json on 2026-10-27: creator's week spent, creator3's login expired, Private outside the chain.
+    private let chainJSON = #"""
+    {"active_profile":"Private","profiles":[
+      {"name":"Private","auth_status":"ok","fallback":null,
+       "windows":[{"label":"5h","utilization_pct":9.0},{"label":"7d","utilization_pct":1.0}]},
+      {"name":"creator","auth_status":"ok","fallback":{"position":1,"threshold":95.0,"armed":false},
+       "windows":[{"label":"5h","utilization_pct":0.0},{"label":"7d","utilization_pct":100.0}]},
+      {"name":"creator3","auth_status":"expired","stale":true,"fallback":{"position":3,"threshold":95.0,"armed":true},
+       "windows":[{"label":"7d","utilization_pct":0.0}]},
+      {"name":"creator1","auth_status":"ok","fallback":{"position":2,"threshold":95.0,"armed":false},
+       "windows":[{"label":"5h","utilization_pct":11.0},{"label":"7d","utilization_pct":40.0},{"label":"7d fable","utilization_pct":0.0}]}]}
+    """#
+
+    func testClauthPicksInTheChainAndViberShowsAMemberWithAWorkingLogin() throws {
+        let status = try XCTUnwrap(ClauthStatus.decode(Data(chainJSON.utf8)))
+        XCTAssertEqual(status.chain, ["creator", "creator1", "creator3"])
+        XCTAssertEqual(ProjectAccount.clauthDefault.launchProfile(status: status), "creator",
+                       "the active account is outside the chain, so it isn't shown")
+        XCTAssertEqual(ProjectAccount.profile("Private").launchProfile(status: status), "Private")
+
+        var activeInChain = status
+        activeInChain.activeProfile = "creator1"
+        XCTAssertEqual(ProjectAccount.clauthDefault.launchProfile(status: activeInChain), "creator1")
+        activeInChain.activeProfile = "creator3"
+        XCTAssertEqual(ProjectAccount.clauthDefault.launchProfile(status: activeInChain), "creator", "creator3 can't log in")
+
+        var allBroken = status
+        for index in allBroken.profiles.indices where allBroken.profiles[index].fallback != nil { allBroken.profiles[index].authStatus = "broken" }
+        XCTAssertEqual(ProjectAccount.clauthDefault.launchProfile(status: allBroken), "creator", "still the chain, never the account outside it")
+
+        var noChain = status
+        for index in noChain.profiles.indices { noChain.profiles[index].fallback = nil }
+        XCTAssertEqual(noChain.chain, [])
+        XCTAssertEqual(ProjectAccount.clauthDefault.launchProfile(status: noChain), "Private", "without a chain, clauth's default")
+    }
+
+    func testClauthPickingStartsWithAutoAndFallback() {
+        var spec = LaunchSpec(profile: "creator1", cwd: "/tmp")
+        XCTAssertEqual(Array(spec.command.arguments.prefix(3)), ["start", "creator1", "--"])
+        spec.autoAccount = true
+        XCTAssertEqual(spec.command.tool, "clauth")
+        XCTAssertEqual(Array(spec.command.arguments.prefix(5)), ["start", "--auto", "--with-fallback", "--", "-p"],
+                       "--auto takes the profile's place, so claude's args need the --")
+        XCTAssertFalse(spec.command.arguments.contains("creator1"))
+    }
+
+    func testLiveSessionsSayWhereClauthRunsThem() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("viber-live-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        // As clauth 0.18.0 writes them, trimmed.
+        try #"{"session_id":"68340-0","start_profile":"creator","pid":68340,"claude_pid":68357,"follows_chain":true,"current_member":null}"#
+            .write(to: dir.appendingPathComponent("68340-0.json"), atomically: true, encoding: .utf8)
+        try #"{"session_id":"23964-0","start_profile":"creator1","pid":23964,"follows_chain":true,"chain_cursor":2,"current_member":"creator3","last_swap_at":1793091226456}"#
+            .write(to: dir.appendingPathComponent("23964-0.json"), atomically: true, encoding: .utf8)
+        try "{".write(to: dir.appendingPathComponent("broken.json"), atomically: true, encoding: .utf8)
+        let live = ClauthLiveSession.load(from: dir)
+        XCTAssertEqual(live.count, 2)
+        XCTAssertEqual(live[68340]?.profile, "creator", "where --auto started it")
+        XCTAssertNil(live[68340]?.currentMember)
+        XCTAssertEqual(live[23964]?.profile, "creator3", "where it was swapped to")
+    }
+
     func testSessionTitleStripsWrappers() {
         let json = #"[{"id":"1","workspace":"/w","updated":"2026-10-23T08:23:36+00:00","first_message":"<ide_opened_file>The user opened x.py</ide_opened_file>Refactor the board UI\nmore","last_message":"ok"}]"#
         let sessions = ClauthSession.decodeList(Data(json.utf8))

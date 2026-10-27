@@ -12,6 +12,9 @@ public struct LaunchSpec: Codable, Equatable {
     public var readOnly: Bool?
     /// Added to the end of Claude Code's system prompt.
     public var appendSystemPrompt: String?
+    /// clauth picks the account from its fallback chain at launch (`--auto`) and moves the session along the chain as each
+    /// runs out (`--with-fallback`). `profile` then only says where it runs, once clauth tells.
+    public var autoAccount: Bool?
 
     public init(profile: String?, cwd: String, resume: String? = nil, permissionMode: String? = nil,
                 model: String? = nil, pluginDir: String? = nil, readOnly: Bool? = nil, appendSystemPrompt: String? = nil) {
@@ -43,6 +46,7 @@ public struct LaunchSpec: Codable, Equatable {
 
     /// Executable name and full argument list. clauth forwards everything after `--` to claude untouched.
     public var command: (tool: String, arguments: [String]) {
+        if autoAccount == true { return ("clauth", ["start", "--auto", "--with-fallback", "--"] + claudeArguments) }
         if let profile { return ("clauth", ["start", profile, "--"] + claudeArguments) }
         return ("claude", claudeArguments)
     }

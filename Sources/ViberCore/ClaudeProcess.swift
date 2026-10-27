@@ -15,6 +15,7 @@ public final class ClaudeProcess {
     public var onExit: ((Int32, String) -> Void)?
 
     public var isRunning: Bool { process.isRunning }
+    public var pid: Int32 { process.processIdentifier }
 
     public init(spec: LaunchSpec, paneID: String, binDir: String?, project: String? = nil) throws {
         let command = spec.command

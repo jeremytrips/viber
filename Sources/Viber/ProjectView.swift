@@ -591,9 +591,10 @@ private struct EarlierSessionRow: View {
         .padding(.horizontal, 12).padding(.vertical, 8)
     }
 
-    /// The project's account when it chose one. Else the account it last ran on, if that login still works, else clauth's default.
+    /// The project's account when it chose one. Else the account it last ran on, if that login still works, else clauth's
+    /// default. With a fallback chain, clauth picks, as for a new session.
     private var profile: String? {
-        if model.account(of: project) == .clauthDefault, let name = session.lastRanProfile,
+        if model.account(of: project) == .clauthDefault, model.chain.isEmpty, let name = session.lastRanProfile,
            model.profiles.contains(where: { $0.name == name && $0.loginProblem == nil }) { return name }
         return model.launchProfile(for: project)
     }

@@ -39,7 +39,7 @@ struct ProjectAccountPicker: View {
     var body: some View {
         let account = model.account(of: project)
         Picker("Account", selection: Binding(get: { account }, set: { model.setAccount($0, for: project) })) {
-            Text(model.defaultProfile.map { "clauth's default (\($0.capitalized))" } ?? "clauth's default").tag(ProjectAccount.clauthDefault)
+            Text(defaultTitle).tag(ProjectAccount.clauthDefault)
             Text("Default login (plain claude)").tag(ProjectAccount.plain)
             if !model.profiles.isEmpty { Divider() }
             ForEach(model.profiles) { profile in
@@ -49,7 +49,14 @@ struct ProjectAccountPicker: View {
                 Text(model.status == nil ? name : "\(name) — not in clauth").tag(account)
             }
         }
-        .help("The Claude login new sessions in \(model.projectName(project)) start with")
+        .help(model.account(of: project) == .clauthDefault && !model.chain.isEmpty
+            ? "clauth picks an account from its fallback chain for each new session in \(model.projectName(project)), and moves it to the next one as it runs out"
+            : "The Claude login new sessions in \(model.projectName(project)) start with")
+    }
+
+    private var defaultTitle: String {
+        if !model.chain.isEmpty { return "Automatic (clauth's chain)" }
+        return model.defaultProfile.map { "clauth's default (\($0.capitalized))" } ?? "clauth's default"
     }
 }
 
