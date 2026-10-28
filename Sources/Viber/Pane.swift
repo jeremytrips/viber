@@ -81,6 +81,9 @@ final class Pane: Identifiable {
     var deviceActivity: String?
     /// Images the device panel attached, picked up by the composer.
     var pendingAttachments: [ImageAttachment] = []
+    /// What's typed in the message box and the images attached to it, kept while another session is shown.
+    @ObservationIgnored var draft = ""
+    @ObservationIgnored var draftAttachments: [ImageAttachment] = []
     var extraDirs: [String] = []
     /// The project's files for `@` mentions, loaded when first asked for.
     var files: [String]?
