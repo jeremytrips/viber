@@ -96,6 +96,8 @@ struct NewSessionRequest {
     var name: String
     /// The worktree's branch; nil for `branchPattern` filled in with the name.
     var branch: String? = nil
+    /// `branch` already exists: the worktree checks it out instead of making it.
+    var useExistingBranch = false
     /// Where a git worktree's branch starts.
     var base: WorktreeBase = .originDefault
     /// A branch to start from instead: what an autopilot issue builds on when that isn't merged yet.
@@ -404,7 +406,8 @@ final class AppModel {
         case .create(let request):
             let worktreeRequest = WorktreeRequest(folder: request.folder, name: request.name.isEmpty ? job.title : request.name,
                                                   branch: request.branch, branchPattern: request.branchPattern, issueKey: request.issueKey,
-                                                  base: request.base, startBranch: request.startBranch, permissionMode: request.permissionMode)
+                                                  base: request.base, startBranch: request.startBranch,
+                                                  useExistingBranch: request.useExistingBranch, permissionMode: request.permissionMode)
             job.task = Task {
                 do {
                     let info = try await Worktree.create(worktreeRequest, progress: report)

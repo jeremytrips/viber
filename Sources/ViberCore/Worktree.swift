@@ -46,12 +46,16 @@ public struct WorktreeRequest: Sendable {
     public var base: WorktreeBase
     /// A branch to start from instead, such as one an issue builds on that isn't merged yet.
     public var startBranch: String?
+    /// `branch` already exists (locally, or on origin): check it out as it is instead of making it.
+    public var useExistingBranch: Bool
     public var permissionMode: String?
 
     public init(folder: String, name: String, branch: String? = nil, branchPattern: String = Worktree.defaultBranchPattern,
-                issueKey: String? = nil, base: WorktreeBase = .originDefault, startBranch: String? = nil, permissionMode: String? = nil) {
+                issueKey: String? = nil, base: WorktreeBase = .originDefault, startBranch: String? = nil,
+                useExistingBranch: Bool = false, permissionMode: String? = nil) {
         self.folder = folder; self.name = name; self.branch = branch; self.branchPattern = branchPattern
-        self.issueKey = issueKey; self.base = base; self.startBranch = startBranch; self.permissionMode = permissionMode
+        self.issueKey = issueKey; self.base = base; self.startBranch = startBranch
+        self.useExistingBranch = useExistingBranch; self.permissionMode = permissionMode
     }
 }
 
@@ -90,6 +94,16 @@ public enum BranchCheck: Equatable, Sendable {
     case problem(String)
 }
 
+/// A branch name typed for a new worktree that the repository already has, which the worktree can check out as it is.
+public enum ExistingBranch: Equatable, Sendable {
+    /// A local branch no worktree has checked out.
+    case local
+    /// Only on origin, as last fetched (`origin/<name>`): the worktree gets a local branch that tracks it.
+    case remote
+    /// Checked out at this path already, and git checks a branch out in one place only.
+    case checkedOut(String)
+}
+
 /// How far creating or removing a worktree has got, for showing while it runs.
 public enum WorktreeProgress: Sendable {
     /// What is happening now.
@@ -111,6 +125,21 @@ public enum Worktree {
         let stopped = WorktreeError(message: "Stopped before the worktree was made.")
         let hooks = try WorktreeHooks.hooks(.create, folder: request.folder)
         if Task.isCancelled { throw stopped }
+        if request.useExistingBranch {
+            guard let branch = request.branch else { throw WorktreeError(message: "Enter the branch to check out.") }
+            guard hooks.isEmpty else {
+                throw WorktreeError(message: "The project's WorktreeCreate hook makes a new branch for each worktree, so it can't check out \(branch).")
+            }
+            if !branchExists(branch, repo: root), hasOrigin(root) {
+                // Only on origin: get its latest commits before making the local branch that tracks it.
+                progress(.step("Fetching \(branch) from origin"))
+                if let note = await fetchOrigin(root, branches: [branch]) { progress(.output(note + "; using the cached origin/\(branch).\n")) }
+                if Task.isCancelled { throw stopped }
+            }
+            progress(.step("Checking out \(branch) with git"))
+            return try checkOut(repoDir: request.folder, name: request.name, branch: branch,
+                                pattern: request.branchPattern, issueKey: request.issueKey)
+        }
         guard !hooks.isEmpty else {
             var base: String?
             if let start = request.startBranch, branchExists(start, repo: root) {
@@ -187,16 +216,23 @@ public enum Worktree {
     /// and never waiting for a password. Offline, the cached ref is used. Returns the ref to start from, if any.
     public static func fetchOriginDefault(_ root: String, timeout: TimeInterval = 8) async -> (ref: String?, note: String?) {
         let known = originDefaultBranch(root)
+        let target = known.map { [String($0.dropFirst("origin/".count))] } ?? []
+        let failed = await fetchOrigin(root, branches: target, timeout: timeout)
+        let ref = originDefaultBranch(root)
+        guard let failed else { return (ref, nil) }
+        return (ref, failed + (ref.map { "; starting from the cached \($0)." } ?? "."))
+    }
+
+    /// Fetches `branches` from origin (all of it when empty), giving up after `timeout` seconds and never waiting for
+    /// a password. Returns "Couldn't fetch origin (why)" when that failed, nil when it worked or was cancelled.
+    static func fetchOrigin(_ root: String, branches: [String], timeout: TimeInterval = 8) async -> String? {
         var env = Executables.environment()
         env["GIT_TERMINAL_PROMPT"] = "0"
-        let target = known.map { [String($0.dropFirst("origin/".count))] } ?? []
-        let result = await Subprocess.run("git", ["-C", root, "fetch", "--quiet", "origin"] + target, environment: env, timeout: timeout)
-        if result.cancelled { return (known, nil) }
-        let ref = originDefaultBranch(root)
-        guard !result.ok else { return (ref, nil) }
+        let result = await Subprocess.run("git", ["-C", root, "fetch", "--quiet", "origin"] + branches, environment: env, timeout: timeout)
+        guard !result.cancelled, !result.ok else { return nil }
         let why = result.timedOut ? "it took longer than \(Int(timeout)) seconds"
             : result.stderr.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: "\n").last.map(String.init) ?? "git fetch failed"
-        return (ref, "Couldn't fetch origin (\(why))" + (ref.map { "; starting from the cached \($0)." } ?? "."))
+        return "Couldn't fetch origin (\(why))"
     }
 
     /// The branch checked out at `path`, or nil when HEAD is detached or it isn't a git checkout.
@@ -282,6 +318,29 @@ public enum Worktree {
         Shell.run("git", ["-C", repo, "rev-parse", "--verify", "--quiet", "refs/heads/\(branch)"]).ok
     }
 
+    /// Whether `name` is a branch the repository already has, locally or on origin as last fetched, and whether a
+    /// worktree (the main checkout counts) has it checked out. Nil when it is a new name. Blocking: runs git.
+    public static func existingBranch(_ name: String, repo: String) -> ExistingBranch? {
+        guard !name.hasPrefix("-"), Shell.run("git", ["-C", repo, "check-ref-format", "--branch", name]).output == name else { return nil }
+        if branchExists(name, repo: repo) { return checkoutPath(of: name, repo: repo).map { .checkedOut($0) } ?? .local }
+        return Shell.run("git", ["-C", repo, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/\(name)"]).ok ? .remote : nil
+    }
+
+    /// Where `branch` is checked out: the main checkout or a worktree whose folder is still there.
+    public static func checkoutPath(of branch: String, repo: String) -> String? {
+        let list = Shell.run("git", ["-C", repo, "worktree", "list", "--porcelain"])
+        guard list.ok else { return nil }
+        // Entries are blank-line separated: "worktree <path>", then "branch refs/heads/<name>" and "prunable …" lines.
+        for entry in list.stdout.components(separatedBy: "\n\n") {
+            let lines = entry.split(separator: "\n").map(String.init)
+            guard let path = lines.first(where: { $0.hasPrefix("worktree ") })?.dropFirst("worktree ".count),
+                  lines.contains("branch refs/heads/\(branch)"),
+                  !lines.contains(where: { $0.hasPrefix("prunable") }) else { continue }
+            return String(path)
+        }
+        return nil
+    }
+
     /// Whether `name` can be a new branch: `git check-ref-format --branch` must accept it, and it may not exist yet.
     /// Blocking: call it off the main thread.
     public static func checkBranch(_ name: String, repo: String?) -> BranchCheck {
@@ -361,6 +420,35 @@ public enum Worktree {
         let add = Shell.run("git", ["-C", root, "worktree", "add", "--no-track", "-b", branch, path, base])
         guard add.ok else { throw WorktreeError(message: "git worktree add failed: \(add.stderr.trimmingCharacters(in: .whitespacesAndNewlines))") }
         WorktreeInclude.copy(from: root, to: path)
+        return WorktreeInfo(repo: root, path: path, branch: branch, base: base, folder: repoDir)
+    }
+
+    /// Checks out `branch`, which already exists, in a new `<repo>/.claude/worktrees/<slug>` instead of making a branch
+    /// (`git worktree add <path> <branch>`): a local branch as it is, one only on origin as a new local branch that
+    /// tracks `origin/<branch>`. Copies the files `.worktreeinclude` lists, as `create` does. The base recorded for the
+    /// diff stat is origin's default branch (what the work will be merged into), else the folder's current branch.
+    public static func checkOut(repoDir: String, name: String, branch: String,
+                                pattern: String = defaultBranchPattern, issueKey: String? = nil) throws -> WorktreeInfo {
+        guard let root = repoRoot(repoDir) else { throw WorktreeError(message: "\(repoDir) is not inside a git repository.") }
+        // A worktree whose folder was deleted by hand still holds its branch until it is pruned.
+        Shell.run("git", ["-C", root, "worktree", "prune"])
+        let found = existingBranch(branch, repo: root)
+        switch found {
+        case .local, .remote: break
+        case .checkedOut(let path): throw WorktreeError(message: "\(branch) is already checked out in \(path).")
+        case nil: throw WorktreeError(message: "There is no branch named \(branch), here or on origin.")
+        }
+        let slug = slug(forName: name, pattern: pattern, key: issueKey)
+        let dir = URL(fileURLWithPath: root).appendingPathComponent(directory)
+        var candidate = slug, n = 2
+        while FileManager.default.fileExists(atPath: dir.appendingPathComponent(candidate).path) { candidate = "\(slug)-\(n)"; n += 1 }
+        let path = dir.appendingPathComponent(candidate).path
+        excludeWorktreeDir(root: root)
+        let checkout = found == .local ? [path, branch] : ["--track", "-b", branch, path, "origin/\(branch)"]
+        let add = Shell.run("git", ["-C", root, "worktree", "add"] + checkout)
+        guard add.ok else { throw WorktreeError(message: "git worktree add failed: \(add.stderr.trimmingCharacters(in: .whitespacesAndNewlines))") }
+        WorktreeInclude.copy(from: root, to: path)
+        let base = originDefaultBranch(root) ?? currentBranch(root) ?? "HEAD"
         return WorktreeInfo(repo: root, path: path, branch: branch, base: base, folder: repoDir)
     }
 

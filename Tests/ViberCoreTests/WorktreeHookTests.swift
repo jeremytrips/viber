@@ -476,6 +476,48 @@ final class BaseBranchTests: XCTestCase {
         XCTAssertTrue(fetched.note?.contains("longer than 1 seconds") == true, fetched.note ?? "")
     }
 
+    func testChecksOutAnExistingLocalBranch() async throws {
+        XCTAssertTrue(Shell.run("git", ["-C", clone.path, "branch", "feat/NEX-7-login", "feature"]).ok)
+        XCTAssertEqual(Worktree.existingBranch("feat/NEX-7-login", repo: clone.path), .local)
+        let info = try await Worktree.create(WorktreeRequest(folder: clone.path, name: "Login", branch: "feat/NEX-7-login",
+                                                             useExistingBranch: true)) { _ in }
+        XCTAssertEqual(info.branch, "feat/NEX-7-login")
+        XCTAssertEqual(Worktree.currentBranch(info.path), "feat/NEX-7-login")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: URL(fileURLWithPath: info.path).appendingPathComponent("feature.txt").path),
+                      "the branch is checked out as it is, not started from origin/main")
+        XCTAssertEqual(info.base, "origin/main", "the diff stat compares with what the work will be merged into")
+        guard case .checkedOut = Worktree.existingBranch("feat/NEX-7-login", repo: clone.path) else {
+            return XCTFail("the branch now counts as checked out in the worktree")
+        }
+    }
+
+    func testChecksOutABranchOnlyOnOriginAfterFetchingIt() async throws {
+        XCTAssertTrue(Shell.run("git", ["-C", upstream.path, "checkout", "-q", "-b", "feat/NEX-8-pushed"]).ok)
+        try commit("pushed.txt", in: upstream)
+        XCTAssertTrue(Shell.run("git", ["-C", clone.path, "fetch", "-q", "origin"]).ok)
+        XCTAssertEqual(Worktree.existingBranch("feat/NEX-8-pushed", repo: clone.path), .remote)
+        try commit("later.txt", in: upstream)
+        let info = try await Worktree.create(WorktreeRequest(folder: clone.path, name: "Pushed", branch: "feat/NEX-8-pushed",
+                                                             useExistingBranch: true)) { _ in }
+        let worktree = URL(fileURLWithPath: info.path)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: worktree.appendingPathComponent("later.txt").path), "the branch was fetched first")
+        XCTAssertEqual(Shell.run("git", ["-C", info.path, "rev-parse", "--abbrev-ref", "@{u}"]).output, "origin/feat/NEX-8-pushed")
+    }
+
+    func testRefusesABranchCheckedOutElsewhere() async throws {
+        guard case .checkedOut = Worktree.existingBranch("feature", repo: clone.path) else {
+            return XCTFail("the clone has feature checked out")
+        }
+        XCTAssertNil(Worktree.existingBranch("feat/new", repo: clone.path))
+        XCTAssertNil(Worktree.existingBranch("feat/NEX-<id>", repo: clone.path))
+        do {
+            _ = try await Worktree.create(WorktreeRequest(folder: clone.path, name: "x", branch: "feature", useExistingBranch: true)) { _ in }
+            XCTFail("git checks a branch out in one place only")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("already checked out"), error.localizedDescription)
+        }
+    }
+
     func testFallbacks() async throws {
         XCTAssertTrue(Shell.run("git", ["-C", clone.path, "remote", "set-head", "origin", "-d"]).ok)
         XCTAssertEqual(Worktree.originDefaultBranch(clone.path), "origin/main", "without origin/HEAD, origin/main")
