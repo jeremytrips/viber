@@ -445,7 +445,7 @@ public enum Adb {
     }
 
     /// The runtime permissions a service stands for. The lists span Android versions (READ_EXTERNAL_STORAGE before 13,
-    /// READ_MEDIA_* from 13), and `set` grants the ones the app asks for.
+    /// READ_MEDIA_* from 13), and `set` changes the ones the app asks for.
     public static func permissions(for service: PrivacyService) -> [String] {
         let names: [String]
         switch service {
@@ -488,8 +488,8 @@ public enum Adb {
             if let ko = result.output.split(whereSeparator: \.isNewline).first(where: { $0.hasPrefix("KO") }) {
                 throw DeviceError.failed("Could not \(setting.what): \(ko)")
             }
-        case .grant(let service, let app):
-            try await grant(serial, service, app: app)
+        case .permission(let change, let service, let app):
+            try await changePermission(serial, change, service, app: app)
         case .statusBar(let clean):
             try await shell(serial, statusBarCommand(clean: clean), what: setting.what)
         }
@@ -511,26 +511,38 @@ public enum Adb {
         return found
     }
 
-    /// Grants the service's permissions that the app asks for in its manifest. `pm grant` quietly does nothing for one
-    /// the app doesn't ask for, so the manifest decides what is granted, and asking for none of them is an error.
-    static func grant(_ serial: String, _ service: PrivacyService, app: String) async throws {
+    /// The shell commands that make one permission granted, denied for good, or not asked yet. `pm revoke` kills the app
+    /// and leaves the "user decided" flags alone, so the flags decide whether the app may show the prompt again.
+    public static func permissionCommand(_ change: PermissionChange, app: String, permission: String) -> String {
+        let flags = "\(quote(app)) \(permission) user-set user-fixed"
+        switch change {
+        case .grant: return "pm grant \(quote(app)) \(permission)"
+        case .revoke: return "pm revoke \(quote(app)) \(permission) && pm set-permission-flags \(flags)"
+        case .reset: return "pm revoke \(quote(app)) \(permission) && pm clear-permission-flags \(flags)"
+        }
+    }
+
+    /// Changes the service's permissions that the app asks for in its manifest. `pm grant` and `pm revoke` quietly do
+    /// nothing for one the app doesn't ask for, so the manifest decides what changes, and asking for none of them is an
+    /// error. (`pm reset-permissions` takes no package on Android 17: it resets every app.)
+    static func changePermission(_ serial: String, _ change: PermissionChange, _ service: PrivacyService, app: String) async throws {
         let dumpsys = await run(serial, ["shell", "dumpsys package \(quote(app))"], timeout: 20).stdout
         guard dumpsys.contains("Package [\(app)]") else { throw DeviceError.failed("\(app) is not installed on the device.") }
         let wanted = permissions(for: service)
         let requested = requestedPermissions(dumpsys: dumpsys)
         let asked = wanted.filter(requested.contains)
         guard !asked.isEmpty else {
-            throw DeviceError.failed("\(app) doesn't ask for \(service.rawValue) in its manifest (none of \(wanted.joined(separator: ", "))), and Android only grants permissions an app asks for.")
+            throw DeviceError.failed("\(app) doesn't ask for \(service.rawValue) in its manifest (none of \(wanted.joined(separator: ", "))), and Android only \(change.rawValue)s permissions an app asks for.")
         }
-        var granted = 0, lastError = ""
+        var changed = 0, lastError = ""
         for permission in asked {
-            let result = await run(serial, ["shell", "pm grant \(quote(app)) \(permission)"], timeout: 10)
-            if result.ok, !result.output.contains("Exception") { granted += 1 } else { lastError = result.output }
+            let result = await run(serial, ["shell", permissionCommand(change, app: app, permission: permission)], timeout: 10)
+            if result.ok, !result.output.contains("Exception"), !result.output.contains("Error:") { changed += 1 } else { lastError = result.output }
         }
-        guard granted == 0 else { return }
+        guard changed == 0 else { return }
         // pm prints a stack trace; its message is the line naming the exception.
         let detail = lastError.split(whereSeparator: \.isNewline).first { $0.contains("Exception: ") }.map(String.init) ?? String(lastError.suffix(300))
-        throw DeviceError.failed("Could not grant \(service.rawValue) to \(app): \(detail.trimmingCharacters(in: .whitespaces))")
+        throw DeviceError.failed("Could not \(DeviceSetting.permission(change, service, app: app).what): \(detail.trimmingCharacters(in: .whitespaces))")
     }
 
     // MARK: Screen

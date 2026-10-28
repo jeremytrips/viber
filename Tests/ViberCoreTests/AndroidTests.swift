@@ -108,6 +108,12 @@ final class AdbCatalogTests: XCTestCase {
         let all = Adb.permissions(for: .all)
         XCTAssertEqual(Set(all).count, all.count, "no duplicates")
         for service in PrivacyService.allCases { XCTAssertTrue(Set(Adb.permissions(for: service)).isSubset(of: all), "\(service)") }
+        let camera = "android.permission.CAMERA"
+        XCTAssertEqual(Adb.permissionCommand(.grant, app: "com.x", permission: camera), "pm grant 'com.x' android.permission.CAMERA")
+        XCTAssertEqual(Adb.permissionCommand(.revoke, app: "com.x", permission: camera),
+                       "pm revoke 'com.x' android.permission.CAMERA && pm set-permission-flags 'com.x' android.permission.CAMERA user-set user-fixed")
+        XCTAssertEqual(Adb.permissionCommand(.reset, app: "com.x", permission: camera),
+                       "pm revoke 'com.x' android.permission.CAMERA && pm clear-permission-flags 'com.x' android.permission.CAMERA user-set user-fixed")
         let clean = Adb.statusBarCommand(clean: true)
         XCTAssertTrue(clean.hasPrefix("settings put global sysui_demo_allowed 1 && am broadcast -a com.android.systemui.demo -e command enter && "), clean)
         XCTAssertTrue(clean.contains("-e command clock -e hhmm 0941"))
@@ -312,9 +318,13 @@ final class AndroidToolboxTests: XCTestCase {
         let host = FakeHost([pixel, phone])
         let camera = await DeviceToolbox.call("device_set", ["grant": ["camera"], "app_id": "com.x", "latitude": 1, "longitude": 2], host: host)
         XCTAssertFalse(camera.isError, camera.text)
-        XCTAssertEqual(host.drivers["Pixel_8"]?.settings, [.location(latitude: 1, longitude: 2), .grant(.camera, app: "com.x")])
+        XCTAssertEqual(host.drivers["Pixel_8"]?.settings, [.location(latitude: 1, longitude: 2), .permission(.grant, .camera, app: "com.x")])
         let reminders = await DeviceToolbox.call("device_set", ["grant": ["reminders"], "app_id": "com.x"], host: host)
         XCTAssertEqual(reminders.text, "Android has no permission matching reminders. Nothing was changed.")
+        let notifications = await DeviceToolbox.call("device_set", ["revoke": ["notifications"], "reset": ["camera"], "app_id": "com.x"], host: host)
+        XCTAssertFalse(notifications.isError, notifications.text)
+        let siri = await DeviceToolbox.call("device_set", ["reset": ["siri"], "app_id": "com.x"], host: host)
+        XCTAssertEqual(siri.text, "Android has no permission matching siri. Nothing was changed.")
         host.sessionDeviceID = "R58M"
         let location = await DeviceToolbox.call("device_set", ["latitude": 1, "longitude": 2], host: host)
         XCTAssertEqual(location.text, "The location can only be set on simulators and emulators. Nothing was changed.")
@@ -328,7 +338,10 @@ final class LiveAdbTests: XCTestCase {
     func runningEmulator() async throws -> (DeviceInfo, String) {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["VIBER_LIVE_ANDROID"] == "1", "set VIBER_LIVE_ANDROID=1 to run")
         let devices = await Adb.devices()
-        let emulator = try XCTUnwrap(devices.first { $0.kind == .emulator && $0.isBooted }, "boot an AVD first: \(devices)")
+        // ANDROID_SERIAL picks one when several emulators run, as it does for adb.
+        let serial = ProcessInfo.processInfo.environment["ANDROID_SERIAL"]
+        let emulator = try XCTUnwrap(devices.first { $0.kind == .emulator && $0.isBooted && (serial == nil || $0.serial == serial) },
+                                     "boot an AVD first: \(devices)")
         return (emulator, try XCTUnwrap(emulator.serial))
     }
 
@@ -354,7 +367,12 @@ final class LiveAdbTests: XCTestCase {
         let (_, serial) = try await runningEmulator()
         func shell(_ command: String) async -> String { await Adb.run(serial, ["shell", command]).output }
         let maps = "com.google.android.apps.maps"
-        func mapsHasLocation() async -> Bool { await shell("dumpsys package \(maps)").contains("ACCESS_FINE_LOCATION: granted=true") }
+        /// "granted=false, flags=[ USER_SET|USER_FIXED|…]", Maps' runtime state for precise location.
+        func mapsLocation() async -> String {
+            let line = await shell("dumpsys package \(maps)").split(whereSeparator: \.isNewline).first { $0.contains("ACCESS_FINE_LOCATION: granted=") }
+            return line.map(String.init) ?? ""
+        }
+        func mapsHasLocation() async -> Bool { await mapsLocation().contains("granted=true") }
         let wasDark = await shell("cmd uimode night").contains("yes")
         let hadLocation = await mapsHasLocation()
         var failure: Error?
@@ -363,17 +381,39 @@ final class LiveAdbTests: XCTestCase {
             let night = await shell("cmd uimode night")
             XCTAssertTrue(night.contains("Night mode: yes"), night)
             try await Adb.set(serial, .location(latitude: 52.3731, longitude: 4.8922))
-            try await Adb.set(serial, .grant(.location, app: maps))
+            try await Adb.set(serial, .permission(.grant, .location, app: maps))
             let granted = await mapsHasLocation()
             XCTAssertTrue(granted)
+            // Revoking kills the app and marks the permission as the user's final no, so the app can't ask again.
+            try await Adb.launch(serial, package: maps, arguments: [], terminateRunning: true)
+            var pid = ""
+            for _ in 0..<20 where pid.isEmpty {
+                try await Task.sleep(nanoseconds: 250_000_000)
+                pid = await shell("pidof \(maps)")
+            }
+            XCTAssertFalse(pid.isEmpty, "Maps started")
+            try await Adb.set(serial, .permission(.revoke, .location, app: maps))
+            let revoked = await mapsLocation()
+            XCTAssertTrue(revoked.contains("granted=false") && revoked.contains("USER_SET") && revoked.contains("USER_FIXED"), revoked)
+            let after = await shell("pidof \(maps)")
+            XCTAssertNotEqual(after, pid, "pm revoke stops the app")
+            try await Adb.set(serial, .permission(.reset, .location, app: maps))
+            let reset = await mapsLocation()
+            XCTAssertTrue(reset.contains("granted=false") && !reset.contains("USER_SET") && !reset.contains("USER_FIXED"), reset)
             do {
-                try await Adb.set(serial, .grant(.motion, app: "com.android.camera2"))
+                try await Adb.set(serial, .permission(.revoke, .motion, app: "com.android.camera2"))
+                XCTFail("Camera2 doesn't ask for ACTIVITY_RECOGNITION, so nothing can be revoked")
+            } catch {
+                XCTAssertTrue(error.localizedDescription.hasPrefix("com.android.camera2 doesn't ask for motion"), error.localizedDescription)
+            }
+            do {
+                try await Adb.set(serial, .permission(.grant, .motion, app: "com.android.camera2"))
                 XCTFail("Camera2 doesn't ask for ACTIVITY_RECOGNITION, so nothing can be granted")
             } catch {
                 XCTAssertTrue(error.localizedDescription.hasPrefix("com.android.camera2 doesn't ask for motion"), error.localizedDescription)
             }
             do {
-                try await Adb.set(serial, .grant(.camera, app: "com.example.nope"))
+                try await Adb.set(serial, .permission(.grant, .camera, app: "com.example.nope"))
                 XCTFail("not installed")
             } catch {
                 XCTAssertEqual(error.localizedDescription, "com.example.nope is not installed on the device.")
@@ -388,7 +428,7 @@ final class LiveAdbTests: XCTestCase {
             // Put the emulator back the way it was.
             _ = await shell(Adb.nightModeCommand(dark: wasDark))
             _ = await shell(Adb.statusBarCommand(clean: false))
-            if !hadLocation { _ = await shell("pm revoke \(maps) android.permission.ACCESS_FINE_LOCATION; pm revoke \(maps) android.permission.ACCESS_COARSE_LOCATION") }
+            try? await Adb.set(serial, .permission(hadLocation ? .grant : .reset, .location, app: maps))
         }
         if let failure { throw failure }
     }
