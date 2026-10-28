@@ -104,7 +104,7 @@ public enum DeviceToolbox {
 
     public static let instructions = """
         Viber can show an iOS simulator or an Android emulator beside this chat; the user sees the same screen you do. Use it to check mobile UI work yourself:
-        - device_open boots a device and shows it ("iPhone 17", "Pixel 8"; device_list lists them). Build the app (a .app for the iOS simulator, or an .apk), device_install it, then device_launch its bundle id or package name. device_open_url opens deep links and exp:// URLs for Expo Go; on Android it also forwards localhost ports to the Mac.
+        - device_open boots a device and shows it ("iPhone 17", "Pixel 8"; device_list lists them). Build the app (a .app for the iOS simulator, or an .apk), device_install it, then device_launch its bundle id or package name. device_open_url opens deep links and exp:// URLs for Expo Go; on Android it also forwards localhost ports to the Mac. `expo start` run without a terminal prints only `Waiting on http://<host>:<port>`: open exp://<host>:<port> for Expo Go, or <scheme>://expo-development-client/?url=<that URL, percent-encoded> for a development build (its scheme is the exp+ one in ios/<app>/Info.plist, else exp+<slug>).
         - device_snapshot lists what is on screen with refs; pass a ref or visible text to device_tap and device_type. device_screenshot's pixel coordinates are the x/y the tools take (points on iOS, dp on Android).
         - After changing the app, rebuild, reinstall and relaunch, then take a screenshot before saying the change works. device_logs shows recent log lines.
         - device_set switches light and dark mode, sets the location, grants an app permissions without the prompt, and cleans up the status bar for screenshots.
