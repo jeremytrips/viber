@@ -55,8 +55,10 @@ final class DeviceCatalogTests: XCTestCase {
         XCTAssertEqual(Simctl.logArguments("U", process: nil, seconds: 0).suffix(4), ["--last", "1s", "--style", "compact"])
         XCTAssertEqual(Simctl.settingArguments("U", .appearance(dark: true)), ["ui", "U", "appearance", "dark"])
         XCTAssertEqual(Simctl.settingArguments("U", .location(latitude: 52.3731, longitude: -4.5)), ["location", "U", "set", "52.373100,-4.500000"])
-        XCTAssertEqual(Simctl.settingArguments("U", .grant(.contacts_limited, app: "com.x")), ["privacy", "U", "grant", "contacts-limited", "com.x"])
-        XCTAssertNil(Simctl.settingArguments("U", .grant(.camera, app: "com.x")))
+        XCTAssertEqual(Simctl.settingArguments("U", .permission(.grant, .contacts_limited, app: "com.x")), ["privacy", "U", "grant", "contacts-limited", "com.x"])
+        XCTAssertEqual(Simctl.settingArguments("U", .permission(.revoke, .location_always, app: "com.x")), ["privacy", "U", "revoke", "location-always", "com.x"])
+        XCTAssertEqual(Simctl.settingArguments("U", .permission(.reset, .all, app: "com.x")), ["privacy", "U", "reset", "all", "com.x"])
+        XCTAssertNil(Simctl.settingArguments("U", .permission(.grant, .camera, app: "com.x")))
         let clean = try XCTUnwrap(Simctl.settingArguments("U", .statusBar(clean: true)))
         XCTAssertEqual(Array(clean.prefix(5)), ["status_bar", "U", "override", "--time", "9:41"])
         XCTAssertEqual(clean.firstIndex(of: "--operatorName").map { clean[$0 + 1] }, "")
@@ -279,11 +281,17 @@ final class DeviceToolboxTests: XCTestCase {
         XCTAssertEqual(result.text, "Changed: dark appearance; location 52.3731, 4.8922; granted photos, location to com.x; clean status bar.\nDevice: iPhone 17 Pro · iOS 26.5")
         let driver = try XCTUnwrap(host.drivers["P"])
         XCTAssertEqual(driver.settings, [.appearance(dark: true), .location(latitude: 52.3731, longitude: 4.8922),
-                                         .grant(.photos, app: "com.x"), .grant(.location, app: "com.x"), .statusBar(clean: true)])
+                                         .permission(.grant, .photos, app: "com.x"), .permission(.grant, .location, app: "com.x"), .statusBar(clean: true)])
         let single = await DeviceToolbox.call("device_set", ["grant": "contacts-limited", "app_id": "com.x"], host: host)
         XCTAssertTrue(single.text.hasPrefix("Changed: granted contacts_limited to com.x."), single.text)
         driver.settings = []
+        let all = await DeviceToolbox.call("device_set", ["reset": ["location"], "revoke": ["photos", "microphone"], "grant": ["contacts"], "app_id": "com.x"], host: host)
+        XCTAssertTrue(all.text.hasPrefix("Changed: granted contacts to com.x; revoked photos, microphone from com.x; reset location for com.x."), all.text)
+        XCTAssertEqual(driver.settings, [.permission(.grant, .contacts, app: "com.x"), .permission(.revoke, .photos, app: "com.x"),
+                                         .permission(.revoke, .microphone, app: "com.x"), .permission(.reset, .location, app: "com.x")])
+        driver.settings = []
         for bad: JSON in [[:], ["latitude": 1], ["latitude": 120, "longitude": 0], ["grant": ["photos"]], ["grant": ["teleport"], "app_id": "com.x"],
+                          ["revoke": ["photos"]], ["reset": [], "app_id": "com.x"], ["revoke": ["notifications"], "app_id": "com.x"],
                           ["appearance": "sepia"], ["status_bar": "messy"], ["appearance": "dark", "grant": ["camera"], "app_id": "com.x"]] {
             let result = await DeviceToolbox.call("device_set", bad, host: host)
             XCTAssertTrue(result.isError, "\(bad): \(result.text)")
@@ -291,9 +299,14 @@ final class DeviceToolboxTests: XCTestCase {
         XCTAssertEqual(driver.settings, [], "a bad argument changes nothing")
         let camera = await DeviceToolbox.call("device_set", ["grant": ["camera"], "app_id": "com.x"], host: host)
         XCTAssertEqual(camera.text, "iOS simulators can't grant camera (simctl privacy has no such service). Nothing was changed.")
-        driver.failingSetting = .grant(.photos, app: "com.x")
+        let notifications = await DeviceToolbox.call("device_set", ["reset": ["notifications"], "app_id": "com.x"], host: host)
+        XCTAssertEqual(notifications.text, "iOS simulators can't reset notifications (simctl privacy has no such service). Nothing was changed.")
+        driver.failingSetting = .permission(.grant, .photos, app: "com.x")
         let partial = await DeviceToolbox.call("device_set", ["appearance": "light", "grant": ["photos"], "app_id": "com.x"], host: host)
         XCTAssertEqual(partial.text, "Could not grant photos to com.x: no. Already changed: light appearance.")
+        driver.failingSetting = .permission(.revoke, .photos, app: "com.x")
+        let revoke = await DeviceToolbox.call("device_set", ["grant": ["location"], "revoke": ["photos"], "app_id": "com.x"], host: host)
+        XCTAssertEqual(revoke.text, "Could not revoke photos from com.x: no. Already changed: granted location to com.x.")
     }
 
     func testPolicy() {
@@ -354,6 +367,8 @@ final class DeviceToolboxTests: XCTestCase {
         XCTAssertEqual(ToolSummary.summary(name: "mcp__viber__device_set", input: ["appearance": "dark", "latitude": 52.37, "longitude": 4.89,
                                                                               "grant": ["photos", "location"], "app_id": "com.x", "status_bar": "clean"]),
                        "dark · 52.37, 4.89 · photos, location · clean status bar")
+        XCTAssertEqual(ToolSummary.summary(name: "mcp__viber__device_set", input: ["revoke": ["camera"], "reset": "location", "app_id": "com.x"]),
+                       "revoke camera · reset location")
         XCTAssertTrue(devices.tools.contains { $0.name == "device_set" })
     }
 }
@@ -477,6 +492,8 @@ final class LiveSimctlTests: XCTestCase {
         let overrides = await Simctl.run(["status_bar", phone.id, "list"]).stdout
         XCTAssertTrue(overrides.contains("9:41"), overrides)
         try await Simctl.set(phone.id, .location(latitude: 52.3731, longitude: 4.8922))
-        try await Simctl.set(phone.id, .grant(.location, app: "com.apple.Maps"))
+        try await Simctl.set(phone.id, .permission(.grant, .location, app: "com.apple.Maps"))
+        try await Simctl.set(phone.id, .permission(.revoke, .location, app: "com.apple.Maps"))
+        try await Simctl.set(phone.id, .permission(.reset, .location, app: "com.apple.Maps"))
     }
 }

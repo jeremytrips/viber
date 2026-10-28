@@ -125,7 +125,7 @@ public enum Simctl {
 
     // MARK: Settings
 
-    /// The service's name for `simctl privacy`; nil when simctl can't grant it.
+    /// The service's name for `simctl privacy`; nil when simctl has no such service.
     public static func privacyService(_ service: PrivacyService) -> String? {
         switch service {
         case .camera, .notifications: return nil
@@ -141,8 +141,8 @@ public enum Simctl {
         case .location(let latitude, let longitude):
             // simctl wants "." as the decimal separator, whatever the Mac's locale.
             return ["location", udid, "set", String(format: "%.6f,%.6f", latitude, longitude)]
-        case .grant(let service, let app):
-            return privacyService(service).map { ["privacy", udid, "grant", $0, app] }
+        case .permission(let change, let service, let app):
+            return privacyService(service).map { ["privacy", udid, change.rawValue, $0, app] }
         case .statusBar(clean: true):
             return ["status_bar", udid, "override", "--time", "9:41", "--dataNetwork", "wifi", "--wifiMode", "active", "--wifiBars", "3",
                     "--cellularMode", "active", "--cellularBars", "4", "--operatorName", "", "--batteryState", "charged", "--batteryLevel", "100"]
