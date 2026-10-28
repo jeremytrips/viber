@@ -192,8 +192,8 @@ private struct McpRow: View {
                 Text("Still not connected 2 minutes after you started signing in. If the browser said it worked, Claude couldn't use the login. Sign in again.")
                     .font(.caption).foregroundStyle(.orange).padding(.leading, 18)
             }
-            if server.status == .needsAuth, server.signInLastsOneSession(underClauth: pane.spec.profile != nil) {
-                Text("Under clauth, a sign-in here lasts only until Claude restarts. A claude.ai connector for the same service stays signed in; Claude Code hides it while this server is set up.")
+            if server.status == .needsAuth, server.signInIsPerAccount(onAccount: pane.spec.profile != nil) {
+                Text("A sign-in here holds for \(pane.profileLabel) only: a chat on another account signs in again. A claude.ai connector for the same service signs in with each Claude account; Claude Code hides it while this server is set up.")
                     .font(.caption).foregroundStyle(.secondary).padding(.leading, 18)
             }
             if open {

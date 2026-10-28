@@ -1,7 +1,7 @@
 import Foundation
 
 /// Claude Code saves its memory files without asking, except when its memory folder sits behind a symlink.
-/// Under clauth it does: the runtime config folder's `projects` links to `~/.claude/projects`, and Claude Code
+/// On a Viber account it does: the account's config folder links `projects` to `~/.claude/projects`, and Claude Code
 /// also checks where a path leads on disk, which falls outside the folder it knows and fails a check only a
 /// person can pass. Viber answers those requests itself, as Claude Code would without the link.
 public enum MemoryWrite {

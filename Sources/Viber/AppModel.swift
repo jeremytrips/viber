@@ -53,8 +53,10 @@ struct JiraRunSheetRequest: Identifiable {
 /// A project's account changed while some of its open sessions run on another; an alert offers to move them.
 struct AccountMove: Identifiable {
     var project: String
-    /// The clauth profile they would move to; nil for the plain `claude` login.
+    /// The account they would move to; nil for the plain `claude` login, or on Automatic, where each gets its own.
     var profile: String?
+    /// The project is on Automatic: each moves to the account Automatic picks for it.
+    var automatic = false
     var sessions: Int
     /// How many of them wait out a usage limit, which they would carry on from at once.
     var waiting: Int
@@ -63,11 +65,12 @@ struct AccountMove: Identifiable {
     var id: String { project }
 
     var title: String {
-        "Move " + (sessions == 1 ? "the open session" : "the \(sessions) open sessions") + " to \(profile ?? "the plain claude login")?"
+        "Move " + (sessions == 1 ? "the open session" : "the \(sessions) open sessions") + " to \(name)?"
     }
 
+    private var name: String { automatic ? "an account Automatic picks" : profile ?? "the plain claude login" }
+
     var message: String {
-        let name = profile ?? "the plain claude login"
         var text = sessions == 1
             ? "Claude restarts on \(name) and keeps the conversation; if it is working, it moves once it's done. "
                 + "Its next message reads the whole conversation again, uncached."
@@ -117,12 +120,13 @@ struct NewSessionRequest {
 final class AppModel {
     var panes: [Pane] = []
     var selection: Target?
-    var status: ClauthStatus?
-    var statusNote: String?
-    /// clauth profiles with a browser login in flight.
+    /// The accounts Viber signs in to, and what the last fetch said about each, by name.
+    var accountList = AccountList()
+    var accountStatuses: [String: AccountStatus] = [:]
+    /// Accounts with a browser login in flight.
     var loggingIn: Set<String> = []
     var externals: [Session] = []
-    var recent: [ClauthSession] = []
+    var recent: [SessionSummary] = []
     var now = Date()
     var errorMessage: String?
     var showNewSession = false
@@ -132,8 +136,12 @@ final class AppModel {
     var newSessionFolder: String?
     /// The projects in the sidebar, kept while none of their sessions is open.
     var projects = ProjectList()
-    /// Each project's account by its path, as `ProjectAccount` stores it. One not in it uses clauth's default.
+    /// Each project's account by its path, as `ProjectAccount` stores it. One not in it is on Automatic.
     var projectAccounts: [String: String] = [:]
+    /// The accounts Automatic leaves out in each project, by its path.
+    var projectExclusions: [String: [String]] = [:]
+    /// The account Viber last ran each session on, by session ID.
+    @ObservationIgnored var sessionAccounts: [String: String] = [:]
     var accountMove: AccountMove?
     /// The project being renamed, by its path.
     var renamingProject: String?
@@ -200,7 +208,7 @@ final class AppModel {
             MainActor.assumeIsolated { self?.returnedToApp() }
         }
         startTimers()
-        reloadStatus()
+        refreshAccounts()
         reloadRecent()
         pollExternal()
     }
@@ -220,19 +228,15 @@ final class AppModel {
     /// The project of whatever is selected: its page, one of its sessions, or a worktree being set up for it.
     var selectedProject: String? { selectedProjectPage ?? selectedPane?.projectPath ?? selectedJob?.project }
     var waitingCount: Int { panes.filter { $0.state.needsYou }.count + externals.filter { [.input, .plan, .permission].contains($0.state) }.count }
-    var profiles: [ClauthStatus.Profile] { status?.profiles ?? [] }
-    var defaultProfile: String? { status?.activeProfile }
-    /// clauth's fallback chain. In projects on clauth's default, clauth picks a member for each session and moves it along.
-    var chain: [String] { status?.chain ?? [] }
-    /// The account the top bar shows: the selected chat's, else the selected project's, else clauth's default.
-    /// Nil means the plain `claude` login.
+    /// The account the top bar shows: the selected chat's, else the one a session in the selected project would start on,
+    /// else the one Automatic would pick. Nil means the plain `claude` login.
     var shownProfileName: String? {
         if let pane = selectedPane { return pane.spec.profile }
         if let project = selectedProject { return launchProfile(for: project) }
-        return defaultProfile
+        return pickAutomatic(allowed: Set(accountList.accounts.filter(\.automatic).map(\.name)))
     }
 
-    /// Folders seen in clauth's session list, most recent first.
+    /// Folders of earlier sessions, most recent first.
     var recentFolders: [String] {
         var seen = Set<String>()
         return recent.compactMap(\.workspace).filter { seen.insert($0).inserted && FileManager.default.fileExists(atPath: $0) }
@@ -289,7 +293,7 @@ final class AppModel {
         }
     }
 
-    func resume(_ session: ClauthSession, profile: String?) {
+    func resume(_ session: SessionSummary, profile: String?) {
         if let existing = panes.first(where: { $0.spec.resume == session.id || $0.chat.sessionID == session.id }) {
             select(.pane(existing.id)); return
         }
@@ -493,9 +497,9 @@ final class AppModel {
         pane.onJiraHold = { [weak self] pane, what in self?.holdJiraRun(pane, what) }
         pane.onOpenURL = { NSWorkspace.shared.open($0) }
         pane.onPersist = { [weak self] in self?.save() }
-        pane.clauthPicks = { [weak self, weak pane] profile in
-            guard let self, let pane else { return false }
-            return self.account(of: pane.projectPath) == .clauthDefault && self.chain.contains(profile)
+        pane.automaticAccount = { [weak self, weak pane] current in
+            guard let self, let pane else { return nil }
+            return self.automaticAccount(for: pane, current: current)
         }
         pane.deviceHub = deviceHub
     }
@@ -787,18 +791,49 @@ final class AppModel {
 
     func account(of project: String) -> ProjectAccount { ProjectAccount(stored: projectAccounts[project]) }
 
-    /// The clauth profile a new session in the project starts under; nil for the plain `claude` login.
-    func launchProfile(for project: String) -> String? { account(of: project).launchProfile(status: status) }
+    /// The account a new session in the project starts on; nil for the plain `claude` login. On Automatic, the one
+    /// Automatic picks; when the project allows none with a working login, the first it allows, whose chat then says
+    /// to log in.
+    func launchProfile(for project: String) -> String? {
+        switch account(of: project) {
+        case .plain: return nil
+        case .profile(let name): return name
+        case .automatic:
+            let allowed = automaticAccounts(in: project)
+            return pickAutomatic(allowed: allowed) ?? accountList.accounts.first { allowed.contains($0.name) }?.name
+        }
+    }
 
     /// Sets the account the project's new sessions start with. When open ones run on another, an alert offers to move them.
     func setAccount(_ account: ProjectAccount, for project: String) {
         guard account != self.account(of: project) else { return }
         projectAccounts[project] = account.stored
         UserDefaults.standard.set(projectAccounts, forKey: Prefs.projectAccounts)
+        offerMove(project)
+    }
+
+    /// Whether Automatic may use an account in the project. Leaving one out offers to move the sessions on it.
+    func setExcluded(_ name: String, _ excluded: Bool, in project: String) {
+        var names = Set(projectExclusions[project] ?? [])
+        if excluded { names.insert(name) } else { names.remove(name) }
+        projectExclusions[project] = names.isEmpty ? nil : names.sorted()
+        UserDefaults.standard.set(projectExclusions, forKey: Prefs.projectExcludedAccounts)
+        if excluded { offerMove(project) }
+    }
+
+    func isExcluded(_ name: String, in project: String) -> Bool { projectExclusions[project]?.contains(name) == true }
+
+    /// The accounts Automatic may use in the project: those Automatic uses, less the ones the project leaves out.
+    func automaticAccounts(in project: String) -> Set<String> {
+        Set(accountList.accounts.filter { $0.automatic && !isExcluded($0.name, in: project) }.map(\.name))
+    }
+
+    private func offerMove(_ project: String) {
         let profile = launchProfile(for: project)
-        let others = panes.filter { $0.projectPath == project && runsElsewhere($0, than: profile) }
+        let others = panes.filter { $0.projectPath == project && runsElsewhere($0) }
         accountMove = others.isEmpty ? nil
-            : AccountMove(project: project, profile: profile, sessions: others.count, waiting: others.filter { $0.continueAt != nil }.count,
+            : AccountMove(project: project, profile: profile, automatic: account(of: project) == .automatic, sessions: others.count,
+                          waiting: others.filter { $0.continueAt != nil }.count,
                           autopilot: autopilots[project] != nil || jiraRuns[project] != nil)
     }
 
@@ -806,20 +841,22 @@ final class AppModel {
     func moveSessions(_ move: AccountMove) {
         autopilots[move.project]?.profile = move.profile
         jiraRuns[move.project]?.profile = move.profile
-        for pane in panes where pane.projectPath == move.project && runsElsewhere(pane, than: move.profile) {
-            pane.switchAccount(to: move.profile, binDir: binDir, pluginDir: pluginDir)
+        for pane in panes where pane.projectPath == move.project && runsElsewhere(pane) {
+            pane.switchAccount(to: launchProfile(for: move.project), binDir: binDir, pluginDir: pluginDir)
             // The limit it was waiting out was the old account's. The next tick carries on once Claude is up again.
             if pane.continueAt != nil { pane.continueAt = now }
         }
         save()
     }
 
-    /// Whether an open session runs on another account than its project's. One on clauth's default that is already on the
-    /// fallback chain stays: the chain moves it along by itself.
-    private func runsElsewhere(_ pane: Pane, than profile: String?) -> Bool {
-        guard pane.spec.profile != profile else { return false }
-        guard let current = pane.spec.profile else { return true }
-        return !(account(of: pane.projectPath) == .clauthDefault && chain.contains(current))
+    /// Whether an open session runs on an account its project doesn't use. On Automatic, any account Automatic may use
+    /// there will do.
+    private func runsElsewhere(_ pane: Pane) -> Bool {
+        switch account(of: pane.projectPath) {
+        case .plain: return pane.spec.profile != nil
+        case .profile(let name): return pane.spec.profile != name
+        case .automatic: return pane.spec.profile.map { !automaticAccounts(in: pane.projectPath).contains($0) } ?? true
+        }
     }
 
     /// Opens the New Session sheet on a project, or on a folder in it.
@@ -1661,6 +1698,7 @@ final class AppModel {
         jiraTurnEnded(pane)
         checkAfterRequest(pane)
         settleAccountMove(pane)
+        moveIfOutOfRoom(pane)
     }
 
     /// Restarts a session on the account it moved to while busy, once its request is over: nothing sent it another
@@ -1761,10 +1799,10 @@ final class AppModel {
                 Task { @MainActor in self?.tick() }
             },
             Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-                Task { @MainActor in self?.pollExternal(); self?.drainRequests(); self?.pollSignIns(); self?.followClauth() }
+                Task { @MainActor in self?.pollExternal(); self?.drainRequests(); self?.pollSignIns() }
             },
             Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-                Task { @MainActor in self?.reloadStatus(); self?.deviceHub.reap(); self?.checkStalledAutopilots(); self?.refreshJira() }
+                Task { @MainActor in self?.refreshAccounts(); self?.deviceHub.reap(); self?.checkStalledAutopilots(); self?.refreshJira() }
             }
         ]
         for pane in panes where pane.worktree != nil { refreshWorktree(pane) }
@@ -1859,106 +1897,183 @@ final class AppModel {
         }
     }
 
-    /// Usage comes from `clauth daemon`, the only clauth process that fetches it; `clauth status`
-    /// just reads the daemon's cache. So when the daemon's snapshot goes stale, start the daemon.
-    func reloadStatus() {
-        let path = ViberPaths.clauthStatus
-        // The daemon rewrites its snapshot every refresh (90s by default).
-        let fresh = (try? path.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-            .map { Date().timeIntervalSince($0) < 300 } ?? false
-        let starting = !fresh && startDaemon()
-        Task.detached {
-            var status: ClauthStatus?
-            var note: String?
-            if fresh, let data = try? Data(contentsOf: path) { status = ClauthStatus.decode(data) }
-            if status == nil {
-                let result = Shell.run("clauth", ["status", "--json"])
-                status = result.ok ? ClauthStatus.decode(Data(result.stdout.utf8)) : nil
-                if status == nil { note = result.status == 127 ? "clauth not found" : "clauth status failed" }
-                else if !starting { note = "The clauth daemon is not running, so usage and login states are out of date. Check ~/.clauth/daemon.log." }
-            }
-            let loaded = status, message = note
-            await MainActor.run {
-                if let loaded { self.status = loaded }
-                self.statusNote = message
+    // MARK: Accounts
+
+    /// Every account, in the order they were added, with what the last fetch said, and the usage a working session
+    /// reported since.
+    var accounts: [AccountStatus] { accountList.accounts.map(status) }
+
+    func status(of name: String) -> AccountStatus? { accountList.account(name).map(status) }
+
+    private func status(_ account: Account) -> AccountStatus {
+        var status = accountStatuses[account.name] ?? AccountStatus(name: account.name)
+        status.email = account.email
+        status.automatic = account.automatic
+        let live = panes.filter { $0.spec.profile == account.name }.compactMap(\.chat.liveUsage).max { $0.at < $1.at }
+        if let live, live.at > status.fetchedAt ?? .distantPast {
+            for window in live.windows {
+                if let index = status.windows.firstIndex(where: { $0.label == window.label }) { status.windows[index] = window }
+                else { status.windows.append(window) }
             }
         }
-        // The daemon writes its first snapshot within a second or two.
-        if starting { reloadStatus(after: 3) }
+        return status
     }
 
-    /// Shows where clauth runs the sessions it picks the account for: soon after they start, and after each swap.
-    private func followClauth() {
-        let picked = panes.filter { $0.spec.autoAccount == true && $0.processID != nil }
-        guard !picked.isEmpty else { return }
-        Task.detached {
-            let live = ClauthLiveSession.load()
-            await MainActor.run {
-                for pane in picked { if let pid = pane.processID, let session = live[pid] { pane.follow(session) } }
+    /// Sessions running on each account.
+    private var runningCounts: [String: Int] {
+        panes.filter(\.isRunning).compactMap(\.spec.profile).reduce(into: [:]) { $0[$1, default: 0] += 1 }
+    }
+
+    /// Accounts whose sessions are waiting out a limit, which their usage numbers may not show yet. Not `pane`'s own:
+    /// one that just moved still has the wait from the account it left.
+    private func limitedAccounts(besides pane: Pane? = nil) -> Set<String> {
+        Set(panes.filter { $0 !== pane && $0.continueAt != nil }.compactMap(\.spec.profile))
+    }
+
+    /// The account Automatic would start a session on among `allowed`; nil when none has a working login.
+    func pickAutomatic(allowed: Set<String>, avoiding: String? = nil, besides pane: Pane? = nil) -> String? {
+        AccountChoice.pick(from: accounts, allowed: allowed, running: runningCounts, limited: limitedAccounts(besides: pane),
+                           avoiding: avoiding, now: now)
+    }
+
+    /// Where a session on Automatic runs when it starts: on the account it is on while that has room, else on the one
+    /// Automatic picks. Nil leaves it where it is: its project isn't on Automatic, or doesn't allow that account.
+    private func automaticAccount(for pane: Pane, current: String?) -> String? {
+        let allowed = automaticAccounts(in: pane.projectPath)
+        guard account(of: pane.projectPath) == .automatic, let current, allowed.contains(current) else { return nil }
+        if let status = status(of: current), status.loginProblem == nil, AccountChoice.hasRoom(status),
+           !limitedAccounts(besides: pane).contains(current) { return current }
+        return pickAutomatic(allowed: allowed, avoiding: current, besides: pane) ?? current
+    }
+
+    /// After a turn: a session on Automatic whose account ran out, or is about to, moves to one with room, keeping the
+    /// conversation. One stopped at the limit then carries on there. Busy again (a check, an autopilot nudge), it moves
+    /// once that request is over.
+    private func moveIfOutOfRoom(_ pane: Pane) {
+        guard pane.spec.autoAccount == true, account(of: pane.projectPath) == .automatic, let current = pane.spec.profile else { return }
+        let limited = pane.chat.usageLimit != nil
+        guard limited || status(of: current).map({ !AccountChoice.hasRoom($0) }) == true else { return }
+        guard let target = pickAutomatic(allowed: automaticAccounts(in: pane.projectPath), avoiding: current) else { return }
+        pane.chat.note(limited ? "\(current) hit its \(pane.chat.usageLimit?.name ?? "usage limit"). Moving this chat to \(target)."
+                               : "\(current) is almost out of room. Moving this chat to \(target).")
+        pane.switchAccount(to: target, binDir: binDir, pluginDir: pluginDir)
+        // The limit was the old account's: carry on as soon as Claude is up on the new one.
+        if limited, Prefs.bool(Prefs.continueAfterLimit), pane.chat.usageLimit?.continueAt(now: now) != nil { pane.continueAt = now }
+        save()
+    }
+
+    @ObservationIgnored private var fetching: Set<String> = []
+    /// When each account was last asked, failed or not, so a broken login isn't retried every 30 seconds.
+    @ObservationIgnored private var lastFetch: [String: Date] = [:]
+
+    /// Reads each account's login and usage, at most every two minutes each, or now for `force`.
+    func refreshAccounts(force: Set<String> = []) {
+        let running = runningCounts
+        for account in accountList.accounts where !fetching.contains(account.name) {
+            let previous = accountStatuses[account.name]
+            let due = force.contains(account.name) || previous == nil
+                || now.timeIntervalSince(lastFetch[account.name] ?? .distantPast) >= 120
+            guard due else { continue }
+            fetching.insert(account.name)
+            lastFetch[account.name] = now
+            let sessionRunning = running[account.name] != nil
+            Task.detached {
+                let status = await AccountUsage.status(of: account, sessionRunning: sessionRunning, previous: previous)
+                await MainActor.run {
+                    self.fetching.remove(account.name)
+                    guard self.accountList.account(account.name) != nil else { return }
+                    self.accountStatuses[account.name] = status
+                }
             }
         }
     }
 
-    private func reloadStatus(after seconds: Double) {
-        Task { @MainActor in
-            try? await Task.sleep(for: .seconds(seconds))
-            self.reloadStatus()
-        }
+    /// Adds an account and signs it in.
+    func addAccount(_ name: String, email: String?, automatic: Bool) {
+        guard Accounts.isValidName(name) else { errorMessage = "An account's name can only have letters, digits, - and _."; return }
+        guard accountList.account(name) == nil else { errorMessage = "There is already an account named \(name)."; return }
+        accountList.upsert(Account(name: name, email: email?.isEmpty == false ? email : nil, automatic: automatic))
+        saveAccounts()
+        login(name)
     }
 
-    @ObservationIgnored private var daemonStartedAt: Date?
-
-    /// Launch `clauth daemon` in the background; it exits at once if one is already running, and keeps
-    /// running after Viber quits. Returns false when it was tried too recently or could not start.
-    private func startDaemon() -> Bool {
-        if let last = daemonStartedAt, Date().timeIntervalSince(last) < 120 { return false }
-        daemonStartedAt = Date()
-        guard let tool = Executables.find("clauth") else { return false }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: tool)
-        process.arguments = ["daemon"]
-        process.environment = Executables.environment()
-        process.standardInput = FileHandle.nullDevice
-        process.standardOutput = FileHandle.nullDevice
-        // clauth caps daemon.log's size only when stderr is opened for appending.
-        let log = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".clauth/daemon.log").path
-        let fd = Darwin.open(log, O_WRONLY | O_CREAT | O_APPEND, 0o600)
-        process.standardError = fd >= 0 ? FileHandle(fileDescriptor: fd, closeOnDealloc: true) : FileHandle.nullDevice
-        return (try? process.run()) != nil
-    }
-
-    /// Re-authenticate a clauth profile. clauth opens the browser itself and waits for the redirect,
-    /// so this finishes once the user completes (or abandons) the sign-in there.
-    func login(_ profile: String) {
-        guard loggingIn.insert(profile).inserted else { return }
+    /// Signs an account in through the browser: `claude auth login` in its folder, which waits for the sign-in there.
+    /// Its refresh token keeps it signed in from then on.
+    func login(_ name: String) {
+        guard loggingIn.insert(name).inserted else { return }
+        let hint = accountList.account(name)?.email
         Task.detached {
-            let result = Shell.run("clauth", ["login", profile])
+            let result = Accounts.signIn(name, email: hint)
+            let check = Shell.run("claude", ["auth", "status", "--json"],
+                                  environment: Accounts.environment(Executables.environment(), account: name), timeout: 30)
+            let email = JSON(data: Data(check.stdout.utf8))?["email"]?.string
             await MainActor.run {
-                self.loggingIn.remove(profile)
-                if !result.ok {
+                self.loggingIn.remove(name)
+                guard result.ok, let email else {
                     let detail = (result.stderr.isEmpty ? result.stdout : result.stderr).trimmingCharacters(in: .whitespacesAndNewlines)
-                    self.errorMessage = "Login for \(profile) failed." + (detail.isEmpty ? "" : "\n\n\(detail)")
+                    self.errorMessage = "Login for \(name) failed." + (detail.isEmpty ? "" : "\n\n\(String(detail.suffix(600)))")
+                    return
+                }
+                if var account = self.accountList.account(name) {
+                    account.email = email
+                    self.accountList.upsert(account)
+                    self.saveAccounts()
+                }
+                if let other = self.accountList.accounts.first(where: { $0.name != name && $0.email == email }) {
+                    self.errorMessage = "\(name) is signed in as \(email), the same address as \(other.name). The browser was probably signed in to the wrong account: sign out of claude.ai there, then log in to \(name) again."
                 }
                 // Chats that hit the dead login pick up the new one on a fresh process.
-                if result.ok {
-                    for pane in self.panes where pane.authFailed && pane.spec.profile == profile { self.restart(pane) }
-                }
-                // The daemon picks up the new login on its next pass; check back a few times.
-                self.reloadStatus()
-                for delay in [5.0, 15, 45] { self.reloadStatus(after: delay) }
+                for pane in self.panes where pane.authFailed && pane.spec.profile == name { self.restart(pane) }
+                self.refreshAccounts(force: [name])
             }
         }
+    }
+
+    func setAutomatic(_ name: String, _ automatic: Bool) {
+        guard var account = accountList.account(name) else { return }
+        account.automatic = automatic
+        accountList.upsert(account)
+        saveAccounts()
+    }
+
+    /// Forgets an account: its folder and its login in the Keychain. Sessions on it stay there, and say to log in.
+    func removeAccount(_ name: String) {
+        accountList.accounts.removeAll { $0.name == name }
+        accountStatuses[name] = nil
+        saveAccounts()
+        Task.detached {
+            Keychain.delete(Accounts.keychainService(name))
+            try? FileManager.default.removeItem(at: Accounts.directory(name))
+        }
+    }
+
+    private func saveAccounts() {
+        do { try accountList.save() } catch { errorMessage = "Could not save accounts: \(error.localizedDescription)" }
+    }
+
+    /// Account folders from before accounts.json, or made by hand, join the list; Automatic leaves them out until asked.
+    private func loadAccounts() {
+        accountList = AccountList.load()
+        let folders = (try? FileManager.default.contentsOfDirectory(atPath: Accounts.root.path)) ?? []
+        let found = folders.filter { Accounts.isValidName($0) && accountList.account($0) == nil }.sorted()
+        guard !found.isEmpty else { return }
+        for name in found { accountList.upsert(Account(name: name, automatic: false)) }
+        saveAccounts()
     }
 
     func reloadRecent() {
         Task.detached {
-            let result = Shell.run("clauth", ["sessions", "--json"])
-            let sessions = result.ok ? ClauthSession.decodeList(Data(result.stdout.utf8)) : []
+            let sessions = SessionIndex.scan()
             var roots: [String: String] = [:]
             for folder in Set(sessions.compactMap(\.workspace)) { roots[folder] = ProjectRoot.resolve(folder) }
             let found = roots
             await MainActor.run {
-                if !sessions.isEmpty { self.recent = sessions; self.recentRoots = found }
+                self.recent = sessions.map { session in
+                    var session = session
+                    session.lastRanProfile = self.sessionAccounts[session.id]
+                    return session
+                }
+                self.recentRoots = found
             }
         }
     }
@@ -1967,12 +2082,25 @@ final class AppModel {
 
     func save() {
         let records = panes.map(\.record)
+        recordSessionAccounts()
         do {
             try FileManager.default.createDirectory(at: ViberPaths.support, withIntermediateDirectories: true)
             try JSONEncoder().encode(records).write(to: ViberPaths.panes, options: .atomic)
         } catch {
             errorMessage = "Could not save open sessions: \(error.localizedDescription)"
         }
+    }
+
+    /// Remembers the account each open session runs on, for Earlier Sessions.
+    private func recordSessionAccounts() {
+        var changed = false
+        for pane in panes {
+            guard let session = pane.chat.sessionID, let profile = pane.spec.profile, sessionAccounts[session] != profile else { continue }
+            sessionAccounts[session] = profile
+            changed = true
+        }
+        guard changed, let data = try? JSONEncoder().encode(sessionAccounts) else { return }
+        try? data.write(to: ViberPaths.sessionAccounts, options: .atomic)
     }
 
     func saveIssues() {
@@ -1995,6 +2123,10 @@ final class AppModel {
         issues = IssueList.load()
         trackers = TrackerList.load()
         projectAccounts = UserDefaults.standard.dictionary(forKey: Prefs.projectAccounts) as? [String: String] ?? [:]
+        projectExclusions = UserDefaults.standard.dictionary(forKey: Prefs.projectExcludedAccounts) as? [String: [String]] ?? [:]
+        loadAccounts()
+        if let data = try? Data(contentsOf: ViberPaths.sessionAccounts),
+           let saved = try? JSONDecoder().decode([String: String].self, from: data) { sessionAccounts = saved }
         if let data = UserDefaults.standard.data(forKey: Prefs.jiraSites), let sites = try? JSONDecoder().decode([JiraSite].self, from: data) {
             jiraSites = sites
         }

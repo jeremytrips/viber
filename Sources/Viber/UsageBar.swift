@@ -1,22 +1,17 @@
 import SwiftUI
 import ViberCore
 
-/// The toolbar's account button: usage for the selected chat's account (else the selected project's, else clauth's
-/// default), with every account in a popover, where the project's account can be switched.
+/// The toolbar's account button: usage for the selected chat's account (else the one the selected project's next session
+/// would start on), with every account in a popover, where accounts are added and the project's account is switched.
 struct UsageBar: View {
     @Environment(AppModel.self) private var model
     @State private var showing = false
 
-    /// The chat's account; nil when the chat uses the plain `claude` login, which clauth has no usage for.
-    private var active: ClauthStatus.Profile? {
-        guard let name = model.shownProfileName else { return nil }
-        return model.profiles.first { $0.name == name }
-    }
+    /// The chat's account; nil when the chat uses the plain `claude` login, which Viber has no usage for.
+    private var active: AccountStatus? { model.shownProfileName.flatMap { model.status(of: $0) } }
     /// The selected chat, or the selected project's new sessions, use the plain `claude` login.
-    private var plain: Bool {
-        model.shownProfileName == nil && (model.selectedPane != nil || model.selectedProject != nil && model.status != nil)
-    }
-    private var brokenCount: Int { model.profiles.filter { $0.loginProblem != nil }.count }
+    private var plain: Bool { model.shownProfileName == nil && (model.selectedPane != nil || model.selectedProject != nil) }
+    private var brokenCount: Int { model.accounts.filter { $0.loginProblem != nil }.count }
 
     var body: some View {
         Button { showing.toggle() } label: { label }
@@ -30,8 +25,8 @@ struct UsageBar: View {
             if let active {
                 StatusDot(color: dotColor)
                 Text(active.name).font(.callout.weight(.medium))
-                if active.loginProblem != nil {
-                    Text(active.loginProblem!).font(.caption).foregroundStyle(.red)
+                if let problem = active.loginProblem {
+                    Text(problem).font(.caption).foregroundStyle(.red)
                 } else {
                     let windows = UsageWindows.main(active)
                     if windows.isEmpty {
@@ -42,11 +37,11 @@ struct UsageBar: View {
                         }
                     }
                 }
-            } else if plain {
+            } else if plain || model.shownProfileName == nil {
                 StatusDot(color: .secondary)
-                Text("Default login").font(.callout.weight(.medium))
+                Text(model.accounts.isEmpty ? "Add an account" : "Default login").font(.callout.weight(.medium))
             } else {
-                Text(model.statusNote ?? "Loading accounts…").font(.caption).foregroundStyle(.secondary)
+                Text(model.shownProfileName ?? "").font(.callout.weight(.medium))
             }
             Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
         }
@@ -54,22 +49,22 @@ struct UsageBar: View {
         .contentShape(Rectangle())
     }
 
-    /// Red when this account needs a login, orange when its data is out of date.
+    /// Red when this account needs a login, orange when its usage couldn't be read.
     private var dotColor: Color {
         if active?.loginProblem != nil { return .red }
-        if model.statusNote != nil || active?.stale == true { return .orange }
+        if active?.fetchFailed == true { return .orange }
         return .green
     }
 
     private var helpText: String {
         let subject = model.selectedPane != nil ? "This chat's account"
-            : model.selectedProject.map { "\(model.projectName($0))'s account. Click to switch it" } ?? "Default account"
+            : model.selectedProject.map { "\(model.projectName($0))'s account. Click to switch it" } ?? "Accounts"
         if brokenCount == 1 { return "\(subject). One account needs you to log in again" }
         if brokenCount > 1 { return "\(subject). \(brokenCount) accounts need you to log in again" }
         if active == nil, plain {
-            return (model.selectedPane != nil ? "This chat uses" : "New sessions here use") + " the plain claude login, which clauth has no usage for"
+            return (model.selectedPane != nil ? "This chat uses" : "New sessions here use") + " the plain claude login, which Viber has no usage for"
         }
-        return model.statusNote ?? subject
+        return subject
     }
 }
 
@@ -80,7 +75,7 @@ private struct StatusDot: View {
 
 /// A label, a short bar and the percentage, sized for the toolbar.
 private struct MiniMeter: View {
-    let window: ClauthStatus.Window
+    let window: UsageWindow
 
     var body: some View {
         let pct = window.utilizationPct ?? 0
@@ -106,44 +101,47 @@ private struct UsageBarShape: View {
 }
 
 enum UsageWindows {
-    /// The 5h and 7d windows, or the first two when clauth labels them differently.
-    static func main(_ profile: ClauthStatus.Profile) -> [ClauthStatus.Window] {
-        let all = profile.windows ?? []
-        let main = all.filter { ["5h", "7d"].contains($0.label) }
-        return main.isEmpty ? Array(all.prefix(2)) : main
+    /// The 5h and 7d windows, or the first two when there are neither.
+    static func main(_ account: AccountStatus) -> [UsageWindow] {
+        let main = account.windows.filter { ["5h", "7d"].contains($0.label) }
+        return main.isEmpty ? Array(account.windows.prefix(2)) : main
     }
 
-    static func emptyText(_ profile: ClauthStatus.Profile) -> String {
-        switch profile.fetchStatus {
-        case "Failed": return "Usage unavailable"
-        case nil: return "Fetching usage…"
-        default: return "No usage yet"
-        }
+    static func emptyText(_ account: AccountStatus) -> String {
+        if account.fetchFailed { return "Usage unavailable" }
+        if account.fetchedAt == nil { return "Fetching usage…" }
+        return "No usage yet"
     }
 
     static func color(_ pct: Double) -> Color {
         pct >= 90 ? .red : pct >= 75 ? .orange : .accentColor
     }
 
-    static func resetText(_ window: ClauthStatus.Window, now: Date) -> String {
-        guard let reset = window.resetDate else { return "" }
+    static func resetText(_ window: UsageWindow, now: Date) -> String {
+        guard let reset = window.resetsAt else { return "" }
         return "resets in " + AppModel.span(reset.timeIntervalSince(now))
     }
 }
 
-/// Every clauth account: usage, reset times, and a way to log in again. With a project selected, its account too.
+/// Every account: usage, reset times, logging in, and whether Automatic uses it. With a project selected, its account
+/// too, and on Automatic which accounts it may use.
 private struct AccountsPopover: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
+    @State private var adding = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text("Accounts").font(.headline).padding([.horizontal, .top], 14).padding(.bottom, 8)
             if let project = model.selectedProject {
-                HStack(spacing: 8) {
-                    Text("\(model.projectName(project)) uses").lineLimit(1).truncationMode(.middle)
-                    Spacer(minLength: 4)
-                    ProjectAccountPicker(project: project).labelsHidden().fixedSize()
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        Text("\(model.projectName(project)) uses").lineLimit(1).truncationMode(.middle).layoutPriority(1)
+                        ProjectAccountPicker(project: project).labelsHidden()
+                    }
+                    if model.account(of: project) == .automatic {
+                        ProjectAutomaticAccounts(project: project).font(.caption)
+                    }
                 }
                 .font(.callout)
                 .padding(.horizontal, 14).padding(.bottom, 10)
@@ -151,76 +149,115 @@ private struct AccountsPopover: View {
                 .onChange(of: model.accountMove?.id) { if model.accountMove != nil { dismiss() } }
                 Divider()
             }
-            if model.profiles.isEmpty {
-                Text(model.statusNote ?? "Loading accounts…").font(.callout).foregroundStyle(.secondary)
-                    .padding(.horizontal, 14).padding(.bottom, 14)
+            if model.accounts.isEmpty && !adding {
+                Text("No accounts yet. Add each Claude account once; Viber keeps it signed in.")
+                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 14).padding(.vertical, 10)
             }
-            ForEach(Array(model.profiles.enumerated()), id: \.element.id) { index, profile in
+            ForEach(Array(model.accounts.enumerated()), id: \.element.id) { index, account in
                 if index > 0 { Divider().padding(.horizontal, 14) }
-                AccountRow(profile: profile, active: profile.name == model.shownProfileName,
-                           badge: profile.name == model.shownProfileName && model.selectedPane != nil ? "This chat"
-                               : profile.name == model.shownProfileName && model.selectedProject != nil ? "This project"
-                               : profile.name == model.defaultProfile ? "Default" : nil,
-                           loggingIn: model.loggingIn.contains(profile.name), now: model.now) { model.login(profile.name) }
+                AccountRow(account: account, active: account.name == model.shownProfileName,
+                           badge: account.name == model.shownProfileName && model.selectedPane != nil ? "This chat"
+                               : account.name == model.shownProfileName && model.selectedProject != nil ? "This project" : nil,
+                           loggingIn: model.loggingIn.contains(account.name), now: model.now)
             }
             Divider()
-            footer.padding(.horizontal, 14).padding(.vertical, 10)
+            if adding {
+                AddAccountForm { adding = false }.padding(14)
+                Divider()
+            }
+            HStack {
+                Text(updatedText).font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                if !adding { Button("Add Account…") { adding = true }.controlSize(.small) }
+            }
+            .padding(.horizontal, 14).padding(.vertical, 10)
         }
-        .frame(width: 320)
-    }
-
-    @ViewBuilder private var footer: some View {
-        if let note = model.statusNote {
-            Label(note, systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(.orange)
-                .fixedSize(horizontal: false, vertical: true)
-        } else {
-            Text(updatedText).font(.caption).foregroundStyle(.secondary)
-        }
+        .frame(width: 340)
     }
 
     private var updatedText: String {
-        guard let date = Dates.parse(model.status?.generatedAt) else { return "Usage from clauth" }
+        guard let date = model.accounts.compactMap(\.fetchedAt).max() else { return "Usage from Anthropic" }
         let seconds = model.now.timeIntervalSince(date)
         if seconds < 60 { return "Updated just now" }
         return "Updated " + RelativeDateTimeFormatter().localizedString(for: date, relativeTo: model.now)
     }
 }
 
+/// A name for the account, the address to sign in with, and whether Automatic uses it. Adding opens the browser.
+private struct AddAccountForm: View {
+    @Environment(AppModel.self) private var model
+    let done: () -> Void
+    @State private var name = ""
+    @State private var email = ""
+    @State private var automatic = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TextField("Name, such as creator1", text: $name)
+            TextField("Email (optional, fills in the sign-in page)", text: $email)
+            Toggle("Automatic may use it", isOn: $automatic)
+                .help("Projects on Automatic spread their sessions over these accounts. Leave it off for a personal account.")
+            Text("Your browser opens to sign in. Check it is signed in to this account's address, or the wrong account gets saved under this name.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Spacer()
+                Button("Cancel", action: done)
+                Button("Add and Log In") {
+                    model.addAccount(name.trimmingCharacters(in: .whitespaces), email: email.trimmingCharacters(in: .whitespaces), automatic: automatic)
+                    done()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(!Accounts.isValidName(name.trimmingCharacters(in: .whitespaces)))
+            }
+            .controlSize(.small)
+        }
+        .textFieldStyle(.roundedBorder)
+        .font(.callout)
+    }
+}
+
 private struct AccountRow: View {
-    let profile: ClauthStatus.Profile
+    @Environment(AppModel.self) private var model
+    let account: AccountStatus
     let active: Bool
     let badge: String?
     let loggingIn: Bool
     let now: Date
-    let login: () -> Void
+    @State private var confirmingRemove = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 Image(systemName: "checkmark").font(.caption.weight(.bold))
                     .foregroundStyle(Color.accentColor).opacity(active ? 1 : 0)
-                Text(profile.name).font(.callout.weight(.semibold))
-                if let tier = profile.tier { Text(tier).font(.caption).foregroundStyle(.secondary) }
+                Text(account.name).font(.callout.weight(.semibold))
+                if let tier = account.tier { Text(tier).font(.caption).foregroundStyle(.secondary) }
                 Spacer()
                 if let badge { Text(badge).font(.caption).foregroundStyle(.secondary) }
+                if !account.automatic {
+                    Text("Not in Automatic").font(.caption).foregroundStyle(.secondary)
+                        .help("Automatic never starts sessions here; choose it as a project's account or in New Session")
+                }
             }
             Group {
+                if let email = account.email { Text(email).font(.caption).foregroundStyle(.secondary) }
                 if loggingIn {
                     HStack(spacing: 6) {
                         ProgressView().controlSize(.small)
                         Text("Finish signing in in your browser…").font(.caption).foregroundStyle(.secondary)
                     }
-                } else if let problem = profile.loginProblem {
+                } else if let problem = account.loginProblem {
                     HStack {
                         Label(problem, systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(.red)
                         Spacer()
-                        Button("Log In…", action: login).controlSize(.small)
+                        Button("Log In…") { model.login(account.name) }.controlSize(.small)
                     }
-                } else if (profile.windows ?? []).isEmpty {
-                    Text(UsageWindows.emptyText(profile)).font(.caption).foregroundStyle(.secondary)
+                } else if account.windows.isEmpty {
+                    Text(UsageWindows.emptyText(account)).font(.caption).foregroundStyle(.secondary)
                 } else {
                     VStack(spacing: 6) {
-                        ForEach(profile.windows ?? [], id: \.label) { window in
+                        ForEach(account.windows, id: \.label) { window in
                             WindowRow(window: window, now: now)
                         }
                     }
@@ -229,15 +266,24 @@ private struct AccountRow: View {
             .padding(.leading, 18)
         }
         .padding(.horizontal, 14).padding(.vertical, 10)
-        .opacity(profile.stale == true ? 0.7 : 1)
+        .opacity(account.fetchFailed ? 0.7 : 1)
+        .contentShape(Rectangle())
         .contextMenu {
-            if profile.loginProblem == nil { Button("Log In Again…", action: login).disabled(loggingIn) }
+            Button("Log In Again…") { model.login(account.name) }.disabled(loggingIn)
+            Toggle("Automatic May Use It", isOn: Binding(get: { account.automatic }, set: { model.setAutomatic(account.name, $0) }))
+            Divider()
+            Button("Remove…", role: .destructive) { confirmingRemove = true }
+        }
+        .confirmationDialog("Remove \(account.name)?", isPresented: $confirmingRemove) {
+            Button("Remove", role: .destructive) { model.removeAccount(account.name) }
+        } message: {
+            Text("Viber signs it out and forgets it. Sessions on it stay open and ask you to log in.")
         }
     }
 }
 
 private struct WindowRow: View {
-    let window: ClauthStatus.Window
+    let window: UsageWindow
     let now: Date
 
     var body: some View {

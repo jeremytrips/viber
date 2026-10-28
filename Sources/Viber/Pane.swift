@@ -116,8 +116,9 @@ final class Pane: Identifiable {
     @ObservationIgnored var jiraServers: [String] = []
     /// Opens a sign-in page for an MCP server.
     @ObservationIgnored var onOpenURL: ((URL) -> Void)?
-    /// Whether clauth picks the account for a session that would start on this one.
-    @ObservationIgnored var clauthPicks: ((String) -> Bool)?
+    /// The account Automatic runs the session on when it starts, given the one it is on; nil when the project isn't on
+    /// Automatic or doesn't allow that account, so the session stays where it is.
+    @ObservationIgnored var automaticAccount: ((String?) -> String?)?
 
     init(id: String = UUID().uuidString, title: String, spec: LaunchSpec, worktree: WorktreeInfo? = nil) {
         self.id = id; self.title = title; self.spec = spec; self.worktree = worktree
@@ -170,10 +171,18 @@ final class Pane: Identifiable {
            let data = try? Data(contentsOf: url) {
             chat.loadHistory(data, transcript: url)
         }
+        let restarting = started
         started = true
         accountChanged = false
         spec.pluginDir = pluginDir
-        spec.autoAccount = spec.profile.flatMap { clauthPicks?($0) } == true ? true : nil
+        if let picked = automaticAccount?(spec.profile) {
+            if picked != spec.profile { chat.forgetLiveUsage() }
+            if restarting, let old = spec.profile, picked != old { chat.note("Automatic moved this chat from \(old) to \(picked), which has more room.") }
+            spec.profile = picked
+            spec.autoAccount = true
+        } else {
+            spec.autoAccount = nil
+        }
         chat.keepsMode = isChat
         let before = chat.state
         chat.state = .starting
@@ -218,7 +227,7 @@ final class Pane: Identifiable {
         if message["type"]?.string == "result" {
             if message["is_error"]?.bool == true, Self.isAuthError(message["result"]?.string ?? ""), !authFailed {
                 authFailed = true
-                chat.note("Log in to \(profileLabel) again (click its chip in the top bar), then send your message again. Viber will restart Claude with the new login and keep this conversation.", isError: true)
+                chat.note("Log in to \(profileLabel) again (under the account button in the toolbar), then send your message again. Viber will restart Claude with the new login and keep this conversation.", isError: true)
             }
             onTurnFinished?(self)
         }
@@ -322,6 +331,7 @@ final class Pane: Identifiable {
     func switchAccount(to profile: String?, binDir: String?, pluginDir: String?) {
         guard profile != spec.profile else { return }
         spec.profile = profile
+        chat.forgetLiveUsage()
         onPersist?()
         if !isRunning {
             // A session not opened yet still loads its history into an empty chat, which a note would stop.
@@ -343,20 +353,6 @@ final class Pane: Identifiable {
     }
 
     private var accountName: String { spec.profile ?? "the plain claude login" }
-
-    /// The running `clauth start` process, which clauth's live sessions are filed under.
-    var processID: Int32? { process?.isRunning == true ? process?.pid : nil }
-
-    /// Where clauth runs a session it picks the account for: the account `--auto` started it on, or the one it swapped it
-    /// onto since. Not while a move Viber made waits for the request to end: the old process still reports the account
-    /// it is leaving.
-    func follow(_ session: ClauthLiveSession) {
-        guard spec.autoAccount == true, !accountChanged, let profile = session.profile, profile != spec.profile else { return }
-        let old = spec.profile
-        spec.profile = profile
-        onPersist?()
-        if session.currentMember != nil, let old { chat.note("clauth moved this chat from \(old) to \(profile).") }
-    }
 
     static func isAuthError(_ text: String) -> Bool {
         let lower = text.lowercased()

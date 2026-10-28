@@ -34,8 +34,8 @@ struct ProjectView: View {
     private var panes: [Pane] { model.panes.filter { $0.projectPath == path } }
     private var jobs: [WorktreeJob] { model.jobs.filter { $0.project == path } }
 
-    /// Sessions clauth knows of in this project that are not open, newest first.
-    private var earlier: [ClauthSession] {
+    /// Earlier sessions in this project that are not open, newest first.
+    private var earlier: [SessionSummary] {
         let open = Set(model.panes.compactMap(\.chat.sessionID) + model.panes.compactMap(\.spec.resume))
         return model.recent.filter { session in
             guard let folder = session.workspace, !open.contains(session.id) else { return false }
@@ -175,8 +175,7 @@ struct ProjectView: View {
             }
         } content: {
             if all.isEmpty {
-                Text(model.recent.isEmpty ? "Earlier sessions come from clauth's session list, which is empty or unavailable."
-                                          : "No earlier sessions in this project.")
+                Text("No earlier sessions in this project.")
                     .foregroundStyle(.secondary)
             } else {
                 PageCard {
@@ -325,9 +324,16 @@ struct ProjectView: View {
         return PageSection(title: "Settings") {
             PageCard {
                 SettingRow(label: "Account",
-                           note: "The Claude login new sessions here start with, autopilot runs too. Changing it offers to move the open sessions."
+                           note: "The Claude login new sessions here start with, autopilot runs too. Automatic starts each on the least-used account it may use here. Changing it offers to move the open sessions."
                                + (jira ? " Jira's skills need the account to have the Atlassian connector." : "")) {
                     ProjectAccountPicker(project: path).labelsHidden().fixedSize()
+                }
+                if model.account(of: path) == .automatic {
+                    Divider()
+                    SettingRow(label: "Automatic uses",
+                               note: "Untick an account to keep this project's sessions off it. Sessions on it are offered a move.") {
+                        ProjectAutomaticAccounts(project: path)
+                    }
                 }
                 Divider()
                 TrackerSettingsRows(project: path)
@@ -562,7 +568,7 @@ private struct ProjectJobRow: View {
 
 private struct EarlierSessionRow: View {
     @Environment(AppModel.self) private var model
-    let session: ClauthSession
+    let session: SessionSummary
     let project: String
 
     var body: some View {
@@ -591,13 +597,8 @@ private struct EarlierSessionRow: View {
         .padding(.horizontal, 12).padding(.vertical, 8)
     }
 
-    /// The project's account when it chose one. Else the account it last ran on, if that login still works, else clauth's
-    /// default. With a fallback chain, clauth picks, as for a new session.
-    private var profile: String? {
-        if model.account(of: project) == .clauthDefault, model.chain.isEmpty, let name = session.lastRanProfile,
-           model.profiles.contains(where: { $0.name == name && $0.loginProblem == nil }) { return name }
-        return model.launchProfile(for: project)
-    }
+    /// The account a new session in the project would start on.
+    private var profile: String? { model.launchProfile(for: project) }
 }
 
 private struct WorktreeEntryRow: View {

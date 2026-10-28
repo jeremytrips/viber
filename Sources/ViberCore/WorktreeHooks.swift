@@ -41,7 +41,7 @@ public enum WorktreeHooks {
     /// macOS's managed settings: `managed-settings.json` and the drop-in folder beside it.
     public static var managedDirectory = URL(fileURLWithPath: "/Library/Application Support/ClaudeCode")
     /// Where `~/.claude/settings.json` is looked for. Like the rest of Viber's settings screens this is the plain
-    /// home folder, also for clauth profiles (whose runtime settings start from it). Tests point it elsewhere.
+    /// home folder, also for Viber's accounts (whose folders link to it). Tests point it elsewhere.
     public static var userHome = FileManager.default.homeDirectoryForCurrentUser
 
     /// The settings files Claude Code reads hooks from for a session in `folder`, lowest precedence first:

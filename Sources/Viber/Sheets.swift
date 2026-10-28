@@ -4,7 +4,7 @@ import ViberCore
 
 // MARK: - Shared pieces
 
-/// Account choice: nil is the plain `claude` login, otherwise a clauth profile name.
+/// Account choice: nil is the plain `claude` login, otherwise an account's name.
 struct AccountPicker: View {
     @Environment(AppModel.self) private var model
     @Binding var selection: String?
@@ -13,19 +13,19 @@ struct AccountPicker: View {
     var body: some View {
         Picker(label, selection: $selection) {
             Text("Default login (plain claude)").tag(String?.none)
-            if !model.profiles.isEmpty { Divider() }
-            ForEach(model.profiles) { profile in
-                Text(Self.title(for: profile))
-                    .tag(String?.some(profile.name))
-                    .disabled(profile.loginProblem != nil)
+            if !model.accounts.isEmpty { Divider() }
+            ForEach(model.accounts) { account in
+                Text(Self.title(for: account))
+                    .tag(String?.some(account.name))
+                    .disabled(account.loginProblem != nil)
             }
         }
     }
 
-    static func title(for profile: ClauthStatus.Profile) -> String {
-        var text = profile.name.capitalized
-        if let tier = profile.tier, !tier.isEmpty { text += " (\(tier))" }
-        if let problem = profile.loginProblem { text += " — \(problem)" }
+    static func title(for account: AccountStatus) -> String {
+        var text = account.name.capitalized
+        if let tier = account.tier, !tier.isEmpty { text += " (\(tier))" }
+        if let problem = account.loginProblem { text += " — \(problem)" }
         return text
     }
 }
@@ -39,24 +39,44 @@ struct ProjectAccountPicker: View {
     var body: some View {
         let account = model.account(of: project)
         Picker("Account", selection: Binding(get: { account }, set: { model.setAccount($0, for: project) })) {
-            Text(defaultTitle).tag(ProjectAccount.clauthDefault)
+            Text("Automatic").tag(ProjectAccount.automatic)
             Text("Default login (plain claude)").tag(ProjectAccount.plain)
-            if !model.profiles.isEmpty { Divider() }
-            ForEach(model.profiles) { profile in
-                Text(AccountPicker.title(for: profile)).tag(ProjectAccount.profile(profile.name))
+            if !model.accounts.isEmpty { Divider() }
+            ForEach(model.accounts) { status in
+                Text(AccountPicker.title(for: status)).tag(ProjectAccount.profile(status.name))
             }
-            if case .profile(let name) = account, !model.profiles.contains(where: { $0.name == name }) {
-                Text(model.status == nil ? name : "\(name) — not in clauth").tag(account)
+            if case .profile(let name) = account, model.status(of: name) == nil {
+                Text("\(name) — not added in Viber").tag(account)
             }
         }
-        .help(model.account(of: project) == .clauthDefault && !model.chain.isEmpty
-            ? "clauth picks an account from its fallback chain for each new session in \(model.projectName(project)), and moves it to the next one as it runs out"
+        .help(account == .automatic
+            ? "Each new session in \(model.projectName(project)) starts on the least-used account Automatic may use here, and moves to another as that one runs out"
             : "The Claude login new sessions in \(model.projectName(project)) start with")
     }
+}
 
-    private var defaultTitle: String {
-        if !model.chain.isEmpty { return "Automatic (clauth's chain)" }
-        return model.defaultProfile.map { "clauth's default (\($0.capitalized))" } ?? "clauth's default"
+/// The accounts Automatic may use in a project: a tick for each account Automatic uses.
+struct ProjectAutomaticAccounts: View {
+    @Environment(AppModel.self) private var model
+    let project: String
+
+    var body: some View {
+        let automatic = model.accounts.filter(\.automatic)
+        if automatic.isEmpty {
+            Text("No account is set for Automatic. Add one, or turn Automatic on for one, under the account button in the toolbar.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        } else {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(automatic) { status in
+                    Toggle(isOn: Binding(get: { !model.isExcluded(status.name, in: project) },
+                                         set: { model.setExcluded(status.name, !$0, in: project) })) {
+                        Text(status.name) + Text(status.email.map { "  \($0)" } ?? "").foregroundStyle(.secondary)
+                    }
+                    .toggleStyle(.checkbox)
+                }
+            }
+            .help("Accounts Automatic may use in \(model.projectName(project)). Untick one to keep its sessions off it.")
+        }
     }
 }
 
@@ -524,7 +544,7 @@ struct ResumeSheet: View {
     @State private var selected: String?
     @State private var profile: String?
 
-    private var sessions: [ClauthSession] {
+    private var sessions: [SessionSummary] {
         let sorted = model.recent.sorted { ($0.updatedDate ?? .distantPast) > ($1.updatedDate ?? .distantPast) }
         let q = query.trimmingCharacters(in: .whitespaces)
         let filtered = q.isEmpty ? sorted : sorted.filter {
@@ -554,7 +574,7 @@ struct ResumeSheet: View {
             if items.isEmpty {
                 VStack(spacing: 8) {
                     Image(systemName: "clock.arrow.circlepath").font(.largeTitle).foregroundStyle(.secondary)
-                    Text(model.recent.isEmpty ? "No sessions found. Is clauth installed?" : "No sessions match “\(query)”.")
+                    Text(model.recent.isEmpty ? "No sessions found in ~/.claude/projects." : "No sessions match “\(query)”.")
                         .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -585,7 +605,7 @@ struct ResumeSheet: View {
         .frame(width: 620, height: 520)
         .onAppear {
             model.reloadRecent()
-            profile = ProjectAccount.clauthDefault.launchProfile(status: model.status)
+            profile = model.pickAutomatic(allowed: Set(model.accounts.filter(\.automatic).map(\.name)))
         }
         // The chosen session's project decides, as for a new session there.
         .onChange(of: selected) {
@@ -602,7 +622,7 @@ struct ResumeSheet: View {
 }
 
 private struct ResumeRow: View {
-    let session: ClauthSession
+    let session: SessionSummary
 
     var body: some View {
         HStack(spacing: 8) {

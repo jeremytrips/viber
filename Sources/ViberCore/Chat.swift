@@ -230,6 +230,11 @@ public struct ChatTranscript {
     private var relayUpdates: [RelayUpdate] = []
     /// The last `rate_limit_event` that turned requests away, until a turn gets through.
     private var rejection: (resetsAt: Date?, kind: String?)?
+    /// The account's usage as the last `rate_limit_event` gave it, and when: fresher than a fetch while the session works.
+    public private(set) var liveUsage: (windows: [UsageWindow], at: Date)?
+
+    /// Forgets the usage the session reported: it moves to another account, whose usage that isn't.
+    public mutating func forgetLiveUsage() { liveUsage = nil }
     /// The text of the CLI's rate-limit error, when the turn's last message was one.
     private var limitError: String?
     /// Times in a row a usage limit outlasted the reset time it gave, counting the first stop; and that reset time.
@@ -711,7 +716,9 @@ public struct ChatTranscript {
         case "control_request": return applyControlRequest(message)
         case "control_cancel_request": cancelPrompt(requestID: message["request_id"]?.string ?? "")
         case "control_response": return applyControlResponse(message, now: now)
-        case "rate_limit_event": rejection = UsageLimit.rejected(message["rate_limit_info"])
+        case "rate_limit_event":
+            rejection = UsageLimit.rejected(message["rate_limit_info"])
+            if let windows = UsageLimit.windows(message["rate_limit_info"]) { liveUsage = (windows, now) }
         case "attachment":
             // In transcripts, a task notification that came in mid-turn is stored as a queued command.
             if let prompt = message["attachment"]?["prompt"]?.string, let note = TaskNotification.parse(prompt) { applyNotification(note) }

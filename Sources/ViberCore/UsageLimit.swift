@@ -51,6 +51,20 @@ public struct UsageLimit: Codable, Equatable, Sendable {
         return (info["resetsAt"]?.double.map(Date.init(timeIntervalSince1970:)), info["rateLimitType"]?.string)
     }
 
+    /// The usage a `rate_limit_info` object reports, as 0–100: each window in `unifiedWindows`, else the one it names.
+    static func windows(_ info: JSON?) -> [UsageWindow]? {
+        guard let info else { return nil }
+        let labels = ["five_hour": "5h", "seven_day": "7d"]
+        func window(_ kind: String?, _ value: JSON?) -> UsageWindow? {
+            guard let kind, let label = labels[kind], let fraction = value?["utilization"]?.double else { return nil }
+            return UsageWindow(label: label, utilizationPct: fraction * 100,
+                               resetsAt: value?["resetsAt"]?.double.map(Date.init(timeIntervalSince1970:)))
+        }
+        var windows = ["five_hour", "seven_day"].compactMap { window($0, info["unifiedWindows"]?[$0]) }
+        if windows.isEmpty, let one = window(info["rateLimitType"]?.string, info) { windows = [one] }
+        return windows.isEmpty ? nil : windows
+    }
+
     /// The reset time in the CLI's error text, for when no `rate_limit_event` said it:
     /// "You've hit your session limit · resets 11:30pm (Europe/Paris)", or older CLIs' "Claude AI usage limit reached|1729789200".
     static func resetTime(in text: String, now: Date) -> Date? {
