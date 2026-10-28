@@ -192,6 +192,8 @@ struct ChatList: View {
     private var chat: ChatTranscript { pane?.chat ?? readOnlyChat ?? ChatTranscript() }
     /// A scroll to the bottom is queued.
     @State private var following = false
+    /// You are at the end of the conversation, so new text scrolls into view. Off while you scroll up to read.
+    @State private var pinned = true
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -207,14 +209,24 @@ struct ChatList: View {
                     if !readOnly, chat.state == .working || chat.state == .starting {
                         WorkingRow(pane: pane, starting: chat.state == .starting).id("working")
                     }
-                    Color.clear.frame(height: 1).id("bottom")
+                    // The bottom margin, so scrolling to it reaches the very end: only there does the
+                    // scroll anchor keep new text in view.
+                    Color.clear.frame(height: 8).id("bottom")
                 }
                 .frame(maxWidth: 760)
-                .padding(.horizontal, 24).padding(.vertical, 20)
+                .padding(.horizontal, 24).padding(.top, 20)
                 .frame(maxWidth: .infinity)
             }
+            // Rows off screen start with guessed heights. Without the anchor, measuring them moved the view
+            // away from the end, sometimes thousands of points, into history it had not drawn yet.
+            .defaultScrollAnchor(.bottom)
+            .modifier(TrackPinned(pinned: $pinned))
             .onAppear { follow(proxy) }
-            .onChange(of: chat.items.count) { follow(proxy) }
+            .onChange(of: chat.items.count) {
+                // Sending a message takes you back to the end, wherever you were reading.
+                if case .user = chat.items.last?.kind { pinned = true }
+                follow(proxy)
+            }
             .onChange(of: chat.streamingText) { follow(proxy) }
             .onChange(of: chat.state) { follow(proxy) }
         }
@@ -229,7 +241,29 @@ struct ChatList: View {
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(80))
             following = false
-            proxy.scrollTo("bottom", anchor: .bottom)
+            if pinned { proxy.scrollTo("bottom", anchor: .bottom) }
+        }
+    }
+}
+
+/// Keeps `pinned` true while the chat is scrolled to its end. Reaching the end always pins it. Text arriving and
+/// rows being measured also leave the end for a moment, so only a move at an unchanged content height, which is
+/// you scrolling, unpins it.
+private struct TrackPinned: ViewModifier {
+    @Binding var pinned: Bool
+
+    func body(content: Content) -> some View {
+        if #available(macOS 15, *) {
+            content.onScrollGeometryChange(for: ScrollGeometry.self, of: { $0 }) { old, new in
+                let atEnd = new.contentSize.height - new.visibleRect.maxY < 60
+                if atEnd {
+                    if !pinned { pinned = true }
+                } else if pinned, old.contentSize.height == new.contentSize.height, old.contentOffset != new.contentOffset {
+                    pinned = false
+                }
+            }
+        } else {
+            content
         }
     }
 }
