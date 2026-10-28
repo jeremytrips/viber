@@ -8,14 +8,21 @@ import ViberCore
 struct ComposerView: View {
     @Environment(AppModel.self) private var model
     let pane: Pane
-    @State private var draft = ""
-    @State private var attachments: [ImageAttachment] = []
+    @State private var draft: String
+    @State private var attachments: [ImageAttachment]
     @State private var highlighted = 0
     @State private var menuDismissed = false
     @State private var fileMenuDismissed = false
     @State private var dropTargeted = false
-    @State private var keyMonitor: Any?
-    @FocusState private var focused: Bool
+    @State private var focused = false
+    @State private var focusRequest = 0
+    @State private var inputHeight = ComposerTextView.lineHeight
+
+    init(pane: Pane) {
+        self.pane = pane
+        _draft = State(initialValue: pane.draft)
+        _attachments = State(initialValue: pane.draftAttachments)
+    }
 
     private var suggestions: [SlashCommand] {
         menuDismissed || Relay.isRelay(draft) ? [] : Array(SlashRouter.suggestions(for: draft, commands: pane.chat.commands).prefix(8))
@@ -36,7 +43,7 @@ struct ComposerView: View {
         Relay.isRelay(draft) ? relayTargets.count : !fileSuggestions.isEmpty ? fileSuggestions.count : suggestions.count
     }
 
-    private var canSend: Bool { !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty }
+    private var canSend: Bool { draft.contains { !$0.isWhitespace } || !attachments.isEmpty }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -44,23 +51,13 @@ struct ComposerView: View {
                 if Relay.isRelay(draft) { relayMenu } else if !fileSuggestions.isEmpty { fileMenu } else if !suggestions.isEmpty { slashMenu }
                 if !pane.pickedElements.isEmpty { pickedElementChips }
                 if !attachments.isEmpty { attachmentRow }
-                TextField(placeholder, text: $draft, axis: .vertical)
-                    .textFieldStyle(.plain)
-                    .font(.body)
-                    .lineLimit(1...10)
-                    .focused($focused)
-                    .padding(.horizontal, 13).padding(.top, 11).padding(.bottom, 6)
-                    .onSubmit(submitOrComplete)
-                    .onKeyPress(.upArrow) { move(-1) }
-                    .onKeyPress(.downArrow) { move(1) }
-                    .onKeyPress(.tab) { complete() }
-                    .onKeyPress(.escape) {
-                        if Relay.isRelay(draft) { draft = ""; return .handled }
-                        if !fileSuggestions.isEmpty { fileMenuDismissed = true; return .handled }
-                        if !suggestions.isEmpty { menuDismissed = true; return .handled }
-                        if pane.state == .working { pane.interrupt(); return .handled }
-                        return .ignored
+                ComposerTextView(text: $draft, height: $inputHeight, focused: $focused, focusRequest: focusRequest,
+                                 onSubmit: submitOrComplete, onKey: key, onPaste: paste)
+                    .frame(height: inputHeight)
+                    .background(alignment: .topLeading) {
+                        if draft.isEmpty { Text(placeholder).font(.body).foregroundStyle(.tertiary).lineLimit(1).allowsHitTesting(false) }
                     }
+                    .padding(.horizontal, 13).padding(.top, 11).padding(.bottom, 6)
                     .onChange(of: draft) {
                         highlighted = 0
                         if !draft.hasPrefix("/") { menuDismissed = false }
@@ -78,21 +75,18 @@ struct ComposerView: View {
         }
         .padding(.horizontal, 24).padding(.top, 8).padding(.bottom, 16)
         .frame(maxWidth: .infinity)
-        .onAppear {
-            focused = true
-            installKeyMonitor()
-        }
+        // Kept on the session, so switching to another chat and back doesn't lose it.
         .onDisappear {
-            if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
-            keyMonitor = nil
+            pane.draft = draft
+            pane.draftAttachments = attachments
         }
-        .onChange(of: pane.pickedElements.count) { old, new in if new > old { focused = true } }
+        .onChange(of: pane.pickedElements.count) { old, new in if new > old { focusRequest += 1 } }
         // Screenshots attached from the device panel.
         .onChange(of: pane.pendingAttachments.count) {
             guard !pane.pendingAttachments.isEmpty else { return }
             attachments += pane.pendingAttachments
             pane.pendingAttachments = []
-            focused = true
+            focusRequest += 1
         }
     }
 
@@ -158,7 +152,7 @@ struct ComposerView: View {
                 .padding(.horizontal, 12).padding(.top, 8).padding(.bottom, 4)
             ForEach(Array(fileSuggestions.enumerated()), id: \.element) { index, path in
                 let selected = index == highlighted
-                Button { highlighted = index; _ = complete() } label: {
+                Button { highlighted = index; complete() } label: {
                     HStack(spacing: 8) {
                         Image(systemName: "doc")
                         Text((path as NSString).lastPathComponent).fontWeight(.medium).lineLimit(1)
@@ -274,24 +268,39 @@ struct ComposerView: View {
         return pane.chat.models.first { $0.value == current }?.displayName ?? current
     }
 
-    private func move(_ delta: Int) -> KeyPress.Result {
-        guard menuCount > 0 else { return .ignored }
-        highlighted = (highlighted + delta + menuCount) % menuCount
-        return .handled
+    private func key(_ key: ComposerTextView.Key) -> Bool {
+        switch key {
+        case .up: return move(-1)
+        case .down: return move(1)
+        case .tab: return complete()
+        case .escape:
+            if Relay.isRelay(draft) { draft = ""; return true }
+            if !fileSuggestions.isEmpty { fileMenuDismissed = true; return true }
+            if !suggestions.isEmpty { menuDismissed = true; return true }
+            if pane.state == .working { pane.interrupt(); return true }
+            return false
+        }
     }
 
-    private func complete() -> KeyPress.Result {
+    private func move(_ delta: Int) -> Bool {
+        guard menuCount > 0 else { return false }
+        highlighted = (highlighted + delta + menuCount) % menuCount
+        return true
+    }
+
+    @discardableResult
+    private func complete() -> Bool {
         if Relay.isRelay(draft) { return move(1) }
         let files = fileSuggestions
         if !files.isEmpty {
-            guard files.indices.contains(highlighted) else { return .ignored }
+            guard files.indices.contains(highlighted) else { return false }
             draft = FileIndex.complete(draft, with: files[highlighted])
-            return .handled
+            return true
         }
-        guard suggestions.indices.contains(highlighted) else { return .ignored }
+        guard suggestions.indices.contains(highlighted) else { return false }
         draft = "/\(suggestions[highlighted].name) "
         menuDismissed = true
-        return .handled
+        return true
     }
 
     private func submitOrComplete() {
@@ -305,10 +314,10 @@ struct ComposerView: View {
             return
         }
         // Return while choosing a file mentions it instead of sending.
-        if !fileSuggestions.isEmpty { _ = complete(); return }
+        if !fileSuggestions.isEmpty { complete(); return }
         // Return on a partially typed command picks the highlighted one first.
         if !suggestions.isEmpty, suggestions.indices.contains(highlighted), text != "/\(suggestions[highlighted].name)" {
-            _ = complete()
+            complete()
             return
         }
         guard !text.isEmpty || !attachments.isEmpty else { return }
@@ -351,7 +360,7 @@ struct ComposerView: View {
         panel.directoryURL = URL(fileURLWithPath: pane.cwd)
         panel.prompt = "Attach"
         if panel.runModal() == .OK { add(panel.urls) }
-        focused = true
+        focusRequest += 1
     }
 
     private func drop(_ providers: [NSItemProvider]) -> Bool {
@@ -371,30 +380,17 @@ struct ComposerView: View {
         return !providers.isEmpty
     }
 
-    /// ⌘V with files or an image on the pasteboard attaches them; text pastes as usual.
-    /// Shift-Return starts a new line, as Option-Return does; Return alone sends.
-    private func installKeyMonitor() {
-        guard keyMonitor == nil else { return }
-        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            guard focused else { return event }
-            let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            // Return or the keypad's Enter. The field editor inserts at the cursor, replacing any selection.
-            if modifiers == .shift, [36, 76].contains(event.keyCode), let editor = event.window?.firstResponder as? NSTextView {
-                editor.insertNewlineIgnoringFieldEditor(nil)
-                return nil
-            }
-            guard modifiers == .command, event.charactersIgnoringModifiers == "v" else { return event }
-            let board = NSPasteboard.general
-            if let urls = board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty {
-                add(urls)
-                return nil
-            }
-            if board.string(forType: .string) == nil, let data = board.data(forType: .png) ?? board.data(forType: .tiff),
-               let image = ImageAttachment(data: data, label: "Pasted image") {
-                attachments.append(image)
-                return nil
-            }
-            return event
+    /// ⌘V or a drop with files or an image attaches them; text pastes as usual.
+    private func paste(from board: NSPasteboard) -> Bool {
+        if let urls = board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty {
+            add(urls)
+            return true
         }
+        if board.string(forType: .string) == nil, let data = board.data(forType: .png) ?? board.data(forType: .tiff),
+           let image = ImageAttachment(data: data, label: "Pasted image") {
+            attachments.append(image)
+            return true
+        }
+        return false
     }
 }
