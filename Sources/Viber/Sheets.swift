@@ -140,6 +140,9 @@ struct NewSessionSheet: View {
     @State private var branch = ""
     @State private var branchEdited = false
     @State private var branchProblem: String?
+    /// The typed branch already exists and can be checked out; it is used once `useExisting` is ticked.
+    @State private var existing: ExistingBranch?
+    @State private var useExisting = false
     /// The project's branch pattern, and the main checkout it is saved for.
     @State private var pattern = Worktree.defaultBranchPattern
     @State private var patternProject: String?
@@ -233,7 +236,10 @@ struct NewSessionSheet: View {
                         VStack(alignment: .leading, spacing: 4) {
                             LabeledContent("Branch") {
                                 HStack(spacing: 6) {
-                                    TextField("Branch", text: Binding(get: { branch }, set: { branch = $0; branchEdited = !$0.isEmpty && $0 != defaultBranch }),
+                                    TextField("Branch", text: Binding(get: { branch }, set: {
+                                        if $0 != branch { useExisting = false }
+                                        branch = $0; branchEdited = !$0.isEmpty && $0 != defaultBranch
+                                    }),
                                               prompt: Text(defaultBranch))
                                         .labelsHidden()
                                         .font(.body.monospaced())
@@ -257,8 +263,15 @@ struct NewSessionSheet: View {
                                     .foregroundStyle(Worktree.placeholders(in: chosenBranch ?? defaultBranch).isEmpty ? .red : .secondary)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
+                            if let existing, let name = chosenBranch { existingBranchRow(existing, name: name) }
                         }
-                        if !maker.usesHook { basePicker }
+                        if !maker.usesHook {
+                            if usesExistingBranch, let name = chosenBranch {
+                                LabeledContent("Start from") { Text(existing == .remote ? "origin/\(name) (fetched first)" : "\(name) as it is") }
+                            } else {
+                                basePicker
+                            }
+                        }
                     }
                     Picker("Mode", selection: $permissionMode) {
                         ForEach(PermissionMode.offered, id: \.self) { Text($0.label).tag($0.rawValue) }
@@ -282,6 +295,7 @@ struct NewSessionSheet: View {
                 Button("Start", action: start)
                     .keyboardShortcut(.defaultAction)
                     .disabled(folder.isEmpty || (useWorktree && repoRoot != nil && (maker.blocksWorktree || branchProblem != nil
+                                                                                   || (existing != nil && !useExisting)
                                                                                    || (!branchEdited && Worktree.needsInput(pattern, key: issueKey)))))
             }
             .padding(16)
@@ -327,6 +341,22 @@ struct NewSessionSheet: View {
         .fixedSize()
     }
 
+    /// Offers to check out a typed branch that already exists, instead of refusing the name.
+    private func existingBranchRow(_ found: ExistingBranch, name: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(found == .remote ? "\(name) is on origin." : "A branch named \(name) already exists.")
+                .font(.caption).foregroundStyle(.secondary)
+            Toggle("Use the existing branch", isOn: $useExisting)
+                .toggleStyle(.checkbox)
+                .help(found == .remote
+                    ? "Fetches \(name) from origin and checks it out in the new worktree, as a local branch that tracks origin/\(name)"
+                    : "Checks \(name) out in the new worktree as it is (git worktree add <path> \(name))")
+        }
+    }
+
+    /// The worktree checks out the typed branch, which exists, instead of making one.
+    private var usesExistingBranch: Bool { useExisting && existing != nil && chosenBranch != nil && !maker.usesHook }
+
     /// Where a git worktree's branch starts: origin's default branch (fetched first) or what is checked out here.
     /// A WorktreeCreate hook decides that itself, so this isn't shown then.
     @ViewBuilder private var basePicker: some View {
@@ -358,21 +388,34 @@ struct NewSessionSheet: View {
         return branchEdited && !typed.isEmpty ? typed : nil
     }
 
-    /// `git check-ref-format --branch`, that it doesn't exist yet, and what a hook can take, after a short pause in typing.
+    /// `git check-ref-format --branch`, that it doesn't exist yet (or, made with git, that an existing one is free to
+    /// check out), and what a hook can take, after a short pause in typing.
     private func checkBranch() async {
-        guard useWorktree, let root = repoRoot else { branchProblem = nil; return }
+        guard useWorktree, let root = repoRoot else { branchProblem = nil; existing = nil; return }
         try? await Task.sleep(for: .milliseconds(250))
         guard !Task.isCancelled else { return }
-        let name = chosenBranch ?? defaultBranch, hook = maker.usesHook
+        let name = chosenBranch ?? defaultBranch, hook = maker.usesHook, typed = chosenBranch != nil
         // An untouched default is numbered if taken, so only a typed name has to be new. A default with a part
         // like <id> left still has to be filled in.
-        let check = chosenBranch != nil || Worktree.needsInput(pattern, key: issueKey)
-        let problem = await Task.detached { () -> String? in
-            if check, case .problem(let problem) = Worktree.checkBranch(name, repo: root) { return problem }
-            return hook ? Worktree.hookNameProblem(name) : nil
+        let check = typed || Worktree.needsInput(pattern, key: issueKey)
+        let (problem, found) = await Task.detached { () -> (String?, ExistingBranch?) in
+            // git can check out a typed branch that exists, such as one pushed for a Jira issue; a hook only makes new ones.
+            switch typed ? Worktree.existingBranch(name, repo: root) : nil {
+            case .checkedOut(let path)?:
+                return ("\(name) is already checked out in \((path as NSString).abbreviatingWithTildeInPath).", nil)
+            case .local? where hook:
+                return ("A branch named \(name) already exists, and the project's WorktreeCreate hook only makes new ones.", nil)
+            case let found? where !hook:
+                return (nil, found)
+            default:
+                break
+            }
+            if check, case .problem(let problem) = Worktree.checkBranch(name, repo: root) { return (problem, nil) }
+            return (hook ? Worktree.hookNameProblem(name) : nil, nil)
         }.value
         guard !Task.isCancelled else { return }
         branchProblem = problem
+        existing = found
     }
 
     private func load() {
@@ -476,6 +519,7 @@ struct NewSessionSheet: View {
             useWorktree: useWorktree && repoRoot != nil,
             name: name.trimmingCharacters(in: .whitespacesAndNewlines),
             branch: useWorktree ? chosenBranch : nil,
+            useExistingBranch: useWorktree && usesExistingBranch,
             base: baseChoices.available(base),
             permissionMode: permissionMode,
             firstMessage: firstMessage,
