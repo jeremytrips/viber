@@ -468,14 +468,28 @@ public enum Adb {
         return names.map { "android.permission." + $0 }
     }
 
-    /// SystemUI's demo mode: a fixed clock, full battery and signal, no notification icons. Android 17's SystemUI ignores
-    /// the mobile part, so the cell type and bars stay real there.
-    public static func statusBarCommand(clean: Bool) -> String {
+    /// The subscription id the clean status bar's cell signal gets in SystemUI's newer mobile pipeline. Its demo mode
+    /// takes `slot` as the subscription id (1 when left out), and a demo subscription with the id of a real SIM keeps the
+    /// real SIM's icon: the emulator's SIM is subscription 1, so "3G" and the real bars stayed. Real ids count up from 1
+    /// per SIM the phone has seen, so this one is out of their way. (0 shows a no-service icon.)
+    static let demoMobileSubscription = 941
+
+    /// SystemUI's demo mode: a fixed clock, full battery and signal, no notification icons. It exits first, so a cell
+    /// signal left from an earlier clean doesn't stay next to the new one. `newMobilePipeline` is for SystemUIs whose
+    /// mobile icons come from MobileRepositorySwitcher (Android 17's): older ones read `slot` as a SIM index from 0 to 8
+    /// and add a SIM for every index up to it, so they get no slot.
+    public static func statusBarCommand(clean: Bool, newMobilePipeline: Bool = false) -> String {
         let demo = "am broadcast -a com.android.systemui.demo -e command"
         guard clean else { return "\(demo) exit" }
-        return ["settings put global sysui_demo_allowed 1", "\(demo) enter", "\(demo) clock -e hhmm 0941",
-                "\(demo) network -e wifi show -e level 4 -e fully true", "\(demo) network -e mobile show -e datatype none -e level 4 -e fully true",
+        let slot = newMobilePipeline ? " -e slot \(demoMobileSubscription)" : ""
+        return ["settings put global sysui_demo_allowed 1", "\(demo) exit", "\(demo) enter", "\(demo) clock -e hhmm 0941",
+                "\(demo) network -e wifi show -e level 4 -e fully true", "\(demo) network -e mobile show\(slot) -e datatype none -e level 4 -e fully true",
                 "\(demo) battery -e level 100 -e plugged false", "\(demo) notifications -e visible false"].joined(separator: " && ")
+    }
+
+    /// Whether SystemUI's demo mode receivers (its DemoModeController dump) include the newer mobile pipeline's.
+    public static func usesNewMobilePipeline(demoModeDump: String) -> Bool {
+        demoModeDump.contains("MobileRepositorySwitcher")
     }
 
     public static func set(_ serial: String, _ setting: DeviceSetting) async throws {
@@ -491,7 +505,12 @@ public enum Adb {
         case .grant(let service, let app):
             try await grant(serial, service, app: app)
         case .statusBar(let clean):
-            try await shell(serial, statusBarCommand(clean: clean), what: setting.what)
+            var newMobilePipeline = false
+            if clean {
+                let dump = await run(serial, ["shell", "dumpsys activity service com.android.systemui/.SystemUIService dependency DUMPABLE DemoModeController"], timeout: 10)
+                newMobilePipeline = usesNewMobilePipeline(demoModeDump: dump.stdout)
+            }
+            try await shell(serial, statusBarCommand(clean: clean, newMobilePipeline: newMobilePipeline), what: setting.what)
         }
     }
 
