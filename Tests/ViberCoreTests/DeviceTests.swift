@@ -419,6 +419,59 @@ final class DeviceArtifactTests: XCTestCase {
         XCTAssertEqual(DeviceArtifact.devClient(Self.devClient).label, "Open in the development build on device")
     }
 
+    func testFormsTheLinkWhenExpoPrintsNone() {
+        // `expo start --dev-client` through the Bash tool: no TTY, so no link or QR code.
+        let output = "\u{1B}[90mStarting project at /Users/me/nexus-cloud/apps/mobile\u{1B}[39m\nStarting Metro Bundler\n"
+            + "Waiting on \u{1B}[4mhttp://192.168.1.20:8081\u{1B}[24m\n\nLogs for your project will appear below."
+        var asked: [String?] = []
+        let devBuild = ExpoProject(devClient: true, scheme: "exp+nexus")
+        XCTAssertEqual(DeviceArtifact.detect(in: output, project: { asked.append($0); return devBuild }), .devClient(Self.devClient))
+        XCTAssertEqual(asked, ["/Users/me/nexus-cloud/apps/mobile"])
+        XCTAssertEqual(DeviceArtifact.detect(in: output, project: { _ in ExpoProject(devClient: false, scheme: nil) }),
+                       .expo("exp://192.168.1.20:8081"))
+        XCTAssertNil(DeviceArtifact.detect(in: output), "not an Expo app as far as anyone can tell")
+        XCTAssertNil(DeviceArtifact.detect(in: output, project: { _ in ExpoProject(devClient: true, scheme: nil) }),
+                     "Expo has no link for a development build without a scheme either")
+        asked = []
+        _ = DeviceArtifact.detect(in: "Waiting on http://localhost:8081", project: { asked.append($0); return nil })
+        XCTAssertEqual(asked, [nil], "the session's folder, then")
+        // A printed link wins: it is what Expo really opens.
+        XCTAssertEqual(DeviceArtifact.detect(in: "› Opening exp://10.0.0.1:8081 on iPhone 17\n\(output)", project: { _ in devBuild }),
+                       .expo("exp://10.0.0.1:8081"))
+        XCTAssertEqual(DeviceArtifact.link(to: "https://abc-anonymous-8081.exp.direct", in: devBuild),
+                       .devClient("exp+nexus://expo-development-client/?url=https%3A%2F%2Fabc-anonymous-8081.exp.direct"))
+        XCTAssertEqual(DeviceArtifact.link(to: "https://abc-anonymous-8081.exp.direct", in: ExpoProject(devClient: false, scheme: nil)),
+                       .expo("exp://abc-anonymous-8081.exp.direct"))
+    }
+
+    func testReadsTheDevelopmentBuildsScheme() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("expo-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        func write(_ path: String, _ text: String) throws {
+            let url = root.appendingPathComponent(path)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try text.write(to: url, atomically: true, encoding: .utf8)
+        }
+        try write("package.json", #"{"dependencies": {"react": "19.0.0"}}"#)
+        XCTAssertNil(ExpoProject.read(at: root.path), "not an Expo app")
+        try write("package.json", #"{"dependencies": {"expo": "~57.0.0"}}"#)
+        try write("app.json", #"{"expo": {"slug": "My_App-2"}}"#)
+        XCTAssertEqual(ExpoProject.read(at: root.path), ExpoProject(devClient: false, scheme: "exp+myapp-2"))
+        try write("package.json", #"{"dependencies": {"expo": "~57.0.0"}, "devDependencies": {"expo-dev-client": "~57.0.20"}}"#)
+        try write("app.config.ts", "export default { name: 'NEXUS', slug: 'nexus', scheme: 'nexus' }")
+        XCTAssertEqual(ExpoProject.read(at: root.path), ExpoProject(devClient: true, scheme: "exp+nexus"), "app.config wins")
+        // After prebuild the native project decides, an exp+ scheme first.
+        let plist = try PropertyListSerialization.data(fromPropertyList: ["CFBundleURLTypes": [
+            ["CFBundleURLSchemes": ["nexus", "com.pinsound.nexus"]], ["CFBundleURLSchemes": ["exp+nexus-dev"]]]], format: .xml, options: 0)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("ios/NEXUS"), withIntermediateDirectories: true)
+        try plist.write(to: root.appendingPathComponent("ios/NEXUS/Info.plist"))
+        try write("ios/Pods/Info.plist", "not a plist")
+        XCTAssertEqual(ExpoProject.read(at: root.path)?.scheme, "exp+nexus-dev")
+        try write("android/app/src/main/AndroidManifest.xml", #"<data android:scheme="https"/><data android:scheme="com.pinsound.nexus"/>"#)
+        XCTAssertEqual(ExpoProject.read(at: root.path)?.scheme, nil, "with both, a scheme they share")
+        XCTAssertEqual(ExpoProject.preferred(["nexus", "com.pinsound.nexus"]), ["com.pinsound.nexus", "nexus"], "else the longest")
+    }
+
     func testTheLastLinkWins() {
         let expoGo = "› Metro: \u{1B}[4mexp://192.168.1.20:8081\u{1B}[24m"
         let devBuild = "› Metro: \u{1B}[4m\(Self.devClient)\u{1B}[24m"

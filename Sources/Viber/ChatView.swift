@@ -487,11 +487,13 @@ struct ToolRow: View {
         return PreviewURL.detect(in: String(result.prefix(4000))).first
     }
 
-    /// A simulator build or an Expo URL in a command's output, offered for the device panel.
+    /// A simulator build or an Expo URL in a command's output, offered for the device panel. The start of a long
+    /// output counts too: that is where `expo start` says where it started and which address it waits on.
     private var artifact: DeviceArtifact? {
-        guard pane != nil, call.name == "Bash" || call.name.hasSuffix("Output") || call.name == "Monitor",
+        guard let pane, call.name == "Bash" || call.name.hasSuffix("Output") || call.name == "Monitor",
               let result = call.result else { return nil }
-        return DeviceArtifact.detect(in: String(result.suffix(6000)))
+        let text = result.utf8.count > 12000 ? String(result.prefix(6000)) + "\n" + String(result.suffix(6000)) : result
+        return DeviceArtifact.detect(in: text, project: pane.expoProject(at:))
     }
 
     private var detail: Bool { !ToolSummary.diff(name: call.name, input: call.input).isEmpty || !(call.result ?? "").isEmpty || call.name == "Bash" }

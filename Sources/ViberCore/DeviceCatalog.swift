@@ -144,11 +144,16 @@ public enum DeviceArtifact: Equatable, Sendable {
 
     /// The last simulator app, Android build or Expo URL the output mentions; an Expo URL wins over a build.
     /// The last Expo URL counts because Expo prints it again when it switches between Expo Go and a development build.
-    public static func detect(in text: String) -> DeviceArtifact? {
+    /// Without a TTY Expo prints no link, only `Waiting on <dev server>`: `project` reads the app in the folder Expo
+    /// named (nil when it named none) so the link can be formed from that.
+    public static func detect(in text: String, project: (String?) -> ExpoProject? = { _ in nil }) -> DeviceArtifact? {
         let plain = text.replacingOccurrences(of: "\u{1B}\\[[0-9;]*[A-Za-z]", with: "", options: .regularExpression)
         if let match = lastMatch(expoLink, in: plain), let range = Range(match.range, in: plain) {
             let url = String(plain[range])
             return match.range(at: 1).location != NSNotFound ? .devClient(url) : .expo(url)
+        }
+        if let server = devServer(in: plain), let app = project(server.root), let link = link(to: server.url, in: app) {
+            return link
         }
         if let match = lastMatch(#"/[^\s"'`<>]*-iphonesimulator/[^\s"'`<>/]+\.app(?=[\s"'`<>/]|$)"#, in: plain),
            let range = Range(match.range, in: plain) {
@@ -159,6 +164,32 @@ public enum DeviceArtifact: Equatable, Sendable {
             return .apk(String(plain[range]))
         }
         return nil
+    }
+
+    /// The dev server `expo start` waits on when it has no TTY, and the folder it started in.
+    static func devServer(in plain: String) -> (url: String, root: String?)? {
+        guard let match = lastMatch(#"Waiting on (https?://[^\s"'`<>]+)"#, in: plain),
+              let range = Range(match.range(at: 1), in: plain) else { return nil }
+        let before = String(plain[..<range.lowerBound])
+        let root = lastMatch(#"Starting project at (/[^\r\n]+)"#, in: before)
+            .flatMap { Range($0.range(at: 1), in: before) }.map { before[$0].trimmingCharacters(in: .whitespaces) }
+        return (String(plain[range]), root)
+    }
+
+    /// The link Expo prints in a terminal for its dev server at `server`: the development build's
+    /// (`<scheme>://expo-development-client/?url=<server>`), or Expo Go's (`exp://<host>:<port>`). Nil for a
+    /// development build without a scheme, as Expo has no link for it then either.
+    public static func link(to server: String, in project: ExpoProject) -> DeviceArtifact? {
+        guard let components = URLComponents(string: server), let host = components.host, !host.isEmpty else { return nil }
+        if project.devClient {
+            guard let scheme = project.scheme, !["http", "https"].contains(scheme.lowercased()), !scheme.contains("_") else { return nil }
+            // encodeURIComponent's unreserved characters
+            let unreserved = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.!~*'()")
+            let manifest = server.hasSuffix("/") ? String(server.dropLast()) : server
+            guard let encoded = manifest.addingPercentEncoding(withAllowedCharacters: unreserved) else { return nil }
+            return .devClient("\(scheme)://expo-development-client/?url=\(encoded)")
+        }
+        return .expo("exp://\(host)" + (components.port.map { ":\($0)" } ?? ""))
     }
 
     /// Group 1 is a development build's link, group 2 an Expo Go URL. Neither starts inside a longer scheme,

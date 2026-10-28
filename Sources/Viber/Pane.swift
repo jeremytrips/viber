@@ -479,6 +479,19 @@ final class Pane: Identifiable {
         }
     }
 
+    /// Expo apps read to form links to their dev servers, by folder. Read again after a few seconds: tool rows ask on
+    /// every redraw.
+    @ObservationIgnored private var expoProjects: [String: (read: Date, project: ExpoProject?)] = [:]
+
+    /// The Expo app in `root`, or in this session's folder when Expo didn't say where it started.
+    func expoProject(at root: String?) -> ExpoProject? {
+        let folder = root ?? cwd
+        if let cached = expoProjects[folder], Date().timeIntervalSince(cached.read) < 5 { return cached.project }
+        let project = ExpoProject.read(at: folder)
+        expoProjects[folder] = (Date(), project)
+        return project
+    }
+
     func attachDeviceScreenshot() {
         guard let controller = deviceController, let png = controller.screenshotPNG(),
               let image = ImageAttachment(data: png, label: "\(controller.device.name) screenshot") else { return }
