@@ -146,7 +146,7 @@ final class ChatTranscriptTests: XCTestCase {
         XCTAssertEqual(chat.state, .working)
     }
 
-    /// Like clauth's runtime folder: `runtime/projects` links to `real/projects`, where the memory folder is.
+    /// Like a Viber account's folder: `runtime/projects` links to `real/projects`, where the memory folder is.
     private func linkedMemoryFolder() throws -> (base: URL, folder: String) {
         let fm = FileManager.default
         let base = fm.temporaryDirectory.appendingPathComponent("viber-memory-\(UUID().uuidString)")
@@ -339,12 +339,12 @@ final class ChatTranscriptTests: XCTestCase {
         XCTAssertTrue(chat.controls.signInsUnfinished.isEmpty)
     }
 
-    func testOAuthSignInsLastOneSessionUnderClauth() {
+    func testOAuthSignInsBelongToTheAccount() {
         let own = McpServer(name: "atlassian", status: .needsAuth, transport: "http")
         let connector = McpServer(name: "claude.ai Atlassian MCP", status: .needsAuth, transport: "claudeai-proxy")
-        XCTAssertTrue(own.signInLastsOneSession(underClauth: true))
-        XCTAssertFalse(own.signInLastsOneSession(underClauth: false))
-        XCTAssertFalse(connector.signInLastsOneSession(underClauth: true))
+        XCTAssertTrue(own.signInIsPerAccount(onAccount: true))
+        XCTAssertFalse(own.signInIsPerAccount(onAccount: false))
+        XCTAssertFalse(connector.signInIsPerAccount(onAccount: true))
     }
 
     func testSettingsErrorsStayOutOfTheChat() {

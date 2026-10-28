@@ -1,6 +1,7 @@
 import Foundation
 
-/// How Viber starts one Claude Code session. A nil profile means plain `claude` with its default login.
+/// How Viber starts one Claude Code session. `profile` names the Viber account it runs on; nil means plain `claude`
+/// with its default login.
 public struct LaunchSpec: Codable, Equatable {
     public var profile: String?
     public var cwd: String
@@ -12,8 +13,8 @@ public struct LaunchSpec: Codable, Equatable {
     public var readOnly: Bool?
     /// Added to the end of Claude Code's system prompt.
     public var appendSystemPrompt: String?
-    /// clauth picks the account from its fallback chain at launch (`--auto`) and moves the session along the chain as each
-    /// runs out (`--with-fallback`). `profile` then only says where it runs, once clauth tells.
+    /// The project is on Automatic and Viber picked `profile`: it may pick again at a restart, and move the session to
+    /// another account as this one runs out.
     public var autoAccount: Bool?
 
     public init(profile: String?, cwd: String, resume: String? = nil, permissionMode: String? = nil,
@@ -44,12 +45,8 @@ public struct LaunchSpec: Codable, Equatable {
         return args
     }
 
-    /// Executable name and full argument list. clauth forwards everything after `--` to claude untouched.
-    public var command: (tool: String, arguments: [String]) {
-        if autoAccount == true { return ("clauth", ["start", "--auto", "--with-fallback", "--"] + claudeArguments) }
-        if let profile { return ("clauth", ["start", profile, "--"] + claudeArguments) }
-        return ("claude", claudeArguments)
-    }
+    /// Executable name and full argument list. The account is in the environment (`Accounts.environment`).
+    public var command: (tool: String, arguments: [String]) { ("claude", claudeArguments) }
 }
 
 public enum Executables {
@@ -70,7 +67,7 @@ public enum Executables {
         return nil
     }
 
-    /// Environment for child processes: the user's environment plus the search path, so clauth can find claude.
+    /// Environment for child processes: the user's environment plus the search path.
     public static func environment(adding extraPath: [String] = [], extra: [String: String] = [:]) -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         let existing = (env["PATH"] ?? "").split(separator: ":").map(String.init)
@@ -210,9 +207,10 @@ public enum ViberPaths {
     public static var trackers: URL { support.appendingPathComponent("trackers.json") }
     /// Project notes from before ideas, read once to turn them into ideas.
     public static var notes: URL { support.appendingPathComponent("notes.json") }
-    public static var clauthStatus: URL {
-        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".clauth/status.json")
-    }
+    /// The accounts Viber signs in to.
+    public static var accounts: URL { support.appendingPathComponent("accounts.json") }
+    /// The account Viber last ran each session on, by session ID.
+    public static var sessionAccounts: URL { support.appendingPathComponent("session-accounts.json") }
     /// Where the CLI stores a session's transcript.
     public static func transcript(sessionID: String, cwd: String) -> URL {
         let slug = cwd.map { $0.isLetter || $0.isNumber ? $0 : "-" }

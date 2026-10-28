@@ -33,8 +33,10 @@ enum Prefs {
 
     /// New worktrees' branch patterns, by the repository's main checkout. A missing one is Worktree.defaultBranchPattern.
     static let branchPatterns = "branchPatterns"
-    /// The account each project's sessions start with, by project, as `ProjectAccount.stored`. A missing one is clauth's default.
+    /// The account each project's sessions start with, by project, as `ProjectAccount.stored`. A missing one is Automatic.
     static let projectAccounts = "projectAccounts"
+    /// Accounts Automatic leaves out in a project, by project.
+    static let projectExcludedAccounts = "projectExcludedAccounts"
 
     static func register() {
         UserDefaults.standard.register(defaults: [

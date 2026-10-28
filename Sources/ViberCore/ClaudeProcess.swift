@@ -15,7 +15,6 @@ public final class ClaudeProcess {
     public var onExit: ((Int32, String) -> Void)?
 
     public var isRunning: Bool { process.isRunning }
-    public var pid: Int32 { process.processIdentifier }
 
     public init(spec: LaunchSpec, paneID: String, binDir: String?, project: String? = nil) throws {
         let command = spec.command
@@ -29,7 +28,8 @@ public final class ClaudeProcess {
         // Checkpoints let a session rewind files to before a message, as Esc Esc does in the terminal.
         var extra = ["VIBER_PANE_ID": paneID, "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING": "1"]
         if let project { extra["VIBER_PROJECT"] = project }
-        process.environment = Executables.environment(adding: binDir.map { [$0] } ?? [], extra: extra)
+        if let account = spec.profile { try Accounts.prepare(account) }
+        process.environment = Accounts.environment(Executables.environment(adding: binDir.map { [$0] } ?? [], extra: extra), account: spec.profile)
         process.standardInput = stdin
         process.standardOutput = stdout
         process.standardError = stderr

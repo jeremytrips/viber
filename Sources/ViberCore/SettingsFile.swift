@@ -88,7 +88,7 @@ public enum SettingsFile {
         return base + ["--transport", transport, name, target]
     }
 
-    /// The environment for `claude mcp`, aimed at ~/.claude.json even when Viber was started from a clauth shell.
+    /// The environment for `claude mcp`, aimed at ~/.claude.json even when Viber was started from a shell with another config folder. Viber copies it into each account's folder at the next start there.
     public static var mcpEnvironment: [String: String] {
         var env = Executables.environment()
         env["CLAUDE_CONFIG_DIR"] = nil

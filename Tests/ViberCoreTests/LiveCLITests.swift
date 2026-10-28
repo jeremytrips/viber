@@ -5,19 +5,17 @@ import XCTest
 @testable import ViberCore
 
 /// Talks to the real `claude` CLI (costs a few cents). Run with: VIBER_LIVE_TEST=1 swift test --filter LiveCLITests
-/// Set VIBER_LIVE_PROFILE to go through `clauth start <profile>` instead of plain `claude`.
+/// Set VIBER_LIVE_ACCOUNT to run them on one of Viber's accounts instead of plain `claude`.
 final class LiveCLITests: XCTestCase {
-    /// Needs clauth 0.16+ with a fallback chain: VIBER_LIVE_TEST=1 VIBER_LIVE_AUTO=1 swift test --filter testClauthPicksTheAccountAgainstRealCLI
-    func testClauthPicksTheAccountAgainstRealCLI() throws {
+    /// Needs an account signed in from Viber: VIBER_LIVE_TEST=1 VIBER_LIVE_ACCOUNT=Private swift test --filter testAccountRunsInItsOwnFolderAgainstRealCLI
+    func testAccountRunsInItsOwnFolderAgainstRealCLI() throws {
         let env = ProcessInfo.processInfo.environment
-        try XCTSkipUnless(env["VIBER_LIVE_TEST"] == "1" && env["VIBER_LIVE_AUTO"] == "1", "set VIBER_LIVE_TEST=1 VIBER_LIVE_AUTO=1 to run")
-        let status = try XCTUnwrap(ClauthStatus.decode(Data(contentsOf: ViberPaths.clauthStatus)))
-        try XCTSkipIf(status.chain.isEmpty, "clauth has no fallback chain")
+        try XCTSkipUnless(env["VIBER_LIVE_TEST"] == "1", "set VIBER_LIVE_TEST=1 to run")
+        let account = try XCTUnwrap(env["VIBER_LIVE_ACCOUNT"], "set VIBER_LIVE_ACCOUNT to an account signed in from Viber")
 
         var chat = ChatTranscript()
-        var spec = LaunchSpec(profile: nil, cwd: FileManager.default.temporaryDirectory.path, model: "haiku")
-        spec.autoAccount = true
-        let process = try ClaudeProcess(spec: spec, paneID: "live-auto", binDir: nil)
+        let spec = LaunchSpec(profile: account, cwd: FileManager.default.temporaryDirectory.path, model: "haiku")
+        let process = try ClaudeProcess(spec: spec, paneID: "live-account", binDir: nil)
         let finished = expectation(description: "turn finished")
         var result: JSON?
         process.onMessage = { message in
@@ -27,12 +25,36 @@ final class LiveCLITests: XCTestCase {
         process.send(chat.request("initialize"))
         process.send(chat.userMessage("Reply with the single word DONE."))
         wait(for: [finished], timeout: 120)
-        let session = ClauthLiveSession.load()[process.pid]
         process.terminate()
 
         XCTAssertEqual(result?["is_error"]?.bool, false, result?["result"]?.string ?? "")
-        let profile = try XCTUnwrap(session?.profile, "clauth files the session under its process")
-        XCTAssertTrue(status.chain.contains(profile), "\(profile) is a chain member")
+        let folder = try XCTUnwrap(chat.memoryFolder)
+        XCTAssertTrue(folder.hasPrefix(Accounts.directory(account).path), "\(folder) is under the account's folder")
+        let projects = try FileManager.default.destinationOfSymbolicLink(atPath: Accounts.directory(account).appendingPathComponent("projects").path)
+        XCTAssertEqual(projects, Paths.projects.path, "transcripts land in ~/.claude/projects, so any account can resume them")
+    }
+
+    /// Swaps the account's tokens for new ones as Viber does for an idle account whose token expired, then reads its usage
+    /// and has the CLI use the new login. VIBER_LIVE_TEST=1 VIBER_LIVE_ACCOUNT=Private swift test --filter testRefreshKeepsTheAccountSignedInAgainstRealAPI
+    func testRefreshKeepsTheAccountSignedInAgainstRealAPI() async throws {
+        let env = ProcessInfo.processInfo.environment
+        try XCTSkipUnless(env["VIBER_LIVE_TEST"] == "1", "set VIBER_LIVE_TEST=1 to run")
+        let account = try XCTUnwrap(env["VIBER_LIVE_ACCOUNT"], "set VIBER_LIVE_ACCOUNT to an account signed in from Viber")
+        let service = Accounts.keychainService(account)
+        let stored = try XCTUnwrap(Keychain.read(service), "\(account) is signed in")
+        let login = try XCTUnwrap(OAuthLogin(json: stored))
+
+        guard case .success(let reply) = await AccountUsage.refresh(login) else { return XCTFail("the refresh was turned away") }
+        let updated = try XCTUnwrap(OAuthLogin.refreshed(stored, with: reply, now: Date()))
+        XCTAssertTrue(Keychain.write(service, updated))
+        let fresh = try XCTUnwrap(OAuthLogin(json: try XCTUnwrap(Keychain.read(service))))
+        XCTAssertNotEqual(fresh.accessToken, login.accessToken)
+        XCTAssertNotNil(fresh.refreshToken)
+
+        guard case .success(let windows) = await AccountUsage.fetch(token: fresh.accessToken) else { return XCTFail("usage with the new token") }
+        XCTAssertTrue(windows.contains { $0.label == "5h" })
+        let status = Shell.run("claude", ["auth", "status", "--json"], environment: Accounts.environment(Executables.environment(), account: account))
+        XCTAssertEqual(JSON(data: Data(status.stdout.utf8))?["loggedIn"]?.bool, true, "the CLI reads the item Viber wrote")
     }
 
     func testPermissionRoundTripAgainstRealCLI() throws {
@@ -43,7 +65,7 @@ final class LiveCLITests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: dir) }
 
         var chat = ChatTranscript()
-        let spec = LaunchSpec(profile: env["VIBER_LIVE_PROFILE"], cwd: dir.path, model: "haiku")
+        let spec = LaunchSpec(profile: env["VIBER_LIVE_ACCOUNT"], cwd: dir.path, model: "haiku")
         let process = try ClaudeProcess(spec: spec, paneID: "live-test", binDir: nil)
         let finished = expectation(description: "turn finished")
         var sawPermission = false
@@ -71,7 +93,7 @@ final class LiveCLITests: XCTestCase {
         XCTAssertTrue(chat.items.contains { if case .assistant(let t) = $0.kind { return t.contains("DONE") }; return false })
     }
 
-    /// Through clauth (set VIBER_LIVE_PROFILE) the memory folder sits behind a symlink and the CLI asks; Viber answers.
+    /// On an account (set VIBER_LIVE_ACCOUNT) the memory folder sits behind a symlink and the CLI asks; Viber answers.
     func testMemoryWriteNeedsNoCardAgainstRealCLI() throws {
         let env = ProcessInfo.processInfo.environment
         try XCTSkipUnless(env["VIBER_LIVE_TEST"] == "1", "set VIBER_LIVE_TEST=1 to run")
@@ -81,7 +103,7 @@ final class LiveCLITests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: dir) }
 
         var chat = ChatTranscript()
-        let process = try ClaudeProcess(spec: LaunchSpec(profile: env["VIBER_LIVE_PROFILE"], cwd: dir.path, model: "haiku"),
+        let process = try ClaudeProcess(spec: LaunchSpec(profile: env["VIBER_LIVE_ACCOUNT"], cwd: dir.path, model: "haiku"),
                                         paneID: "live-memory", binDir: nil)
         let finished = expectation(description: "turn finished")
         process.onMessage = { message in
@@ -111,7 +133,7 @@ final class LiveCLITests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: dir) }
 
         var chat = ChatTranscript()
-        let process = try ClaudeProcess(spec: LaunchSpec(profile: env["VIBER_LIVE_PROFILE"], cwd: dir.path), paneID: "live-settings", binDir: nil)
+        let process = try ClaudeProcess(spec: LaunchSpec(profile: env["VIBER_LIVE_ACCOUNT"], cwd: dir.path), paneID: "live-settings", binDir: nil)
         let done = expectation(description: "replies arrived")
         process.onMessage = { message in
             for reply in chat.apply(message) { process.send(reply) }
@@ -139,7 +161,7 @@ final class LiveCLITests: XCTestCase {
         let env = ProcessInfo.processInfo.environment
         try XCTSkipUnless(env["VIBER_LIVE_TEST"] == "1", "set VIBER_LIVE_TEST=1 to run")
         var chat = ChatTranscript()
-        let spec = LaunchSpec(profile: env["VIBER_LIVE_PROFILE"], cwd: FileManager.default.temporaryDirectory.path, model: "haiku")
+        let spec = LaunchSpec(profile: env["VIBER_LIVE_ACCOUNT"], cwd: FileManager.default.temporaryDirectory.path, model: "haiku")
         let process = try ClaudeProcess(spec: spec, paneID: "live-relay", binDir: nil)
         let finished = expectation(description: "turn finished")
         process.onMessage = { message in
@@ -162,7 +184,7 @@ final class LiveCLITests: XCTestCase {
         let env = ProcessInfo.processInfo.environment
         try XCTSkipUnless(env["VIBER_LIVE_TEST"] == "1", "set VIBER_LIVE_TEST=1 to run")
         var chat = ChatTranscript()
-        let spec = LaunchSpec(profile: env["VIBER_LIVE_PROFILE"], cwd: FileManager.default.temporaryDirectory.path, model: "haiku")
+        let spec = LaunchSpec(profile: env["VIBER_LIVE_ACCOUNT"], cwd: FileManager.default.temporaryDirectory.path, model: "haiku")
         let process = try ClaudeProcess(spec: spec, paneID: "live-relay-mid-turn", binDir: nil)
         let finished = expectation(description: "turn finished")
         var received: String?
@@ -208,7 +230,7 @@ final class LiveCLITests: XCTestCase {
         driver.console.add(.error, "TypeError: cannot read properties of undefined (reading 'kiwi-42')")
 
         var chat = ChatTranscript()
-        let spec = LaunchSpec(profile: env["VIBER_LIVE_PROFILE"], cwd: FileManager.default.temporaryDirectory.path, model: "haiku")
+        let spec = LaunchSpec(profile: env["VIBER_LIVE_ACCOUNT"], cwd: FileManager.default.temporaryDirectory.path, model: "haiku")
         let process = try ClaudeProcess(spec: spec, paneID: "live-preview", binDir: nil)
         let finished = expectation(description: "turn finished")
         var mcpMethods: [String] = []
@@ -270,7 +292,7 @@ final class LiveCLITests: XCTestCase {
         let image = try XCTUnwrap(ImageAttachment(data: png as Data, label: "red.png"))
 
         var chat = ChatTranscript()
-        let spec = LaunchSpec(profile: env["VIBER_LIVE_PROFILE"], cwd: dir.path, model: "haiku")
+        let spec = LaunchSpec(profile: env["VIBER_LIVE_ACCOUNT"], cwd: dir.path, model: "haiku")
         let process = try ClaudeProcess(spec: spec, paneID: "live-image", binDir: nil)
         let finished = expectation(description: "turn finished")
         process.onMessage = { message in
@@ -302,7 +324,7 @@ final class LiveCLITests: XCTestCase {
         try Data("one\n".utf8).write(to: file)
 
         var chat = ChatTranscript()
-        let spec = LaunchSpec(profile: env["VIBER_LIVE_PROFILE"], cwd: dir.path, permissionMode: "acceptEdits", model: "haiku")
+        let spec = LaunchSpec(profile: env["VIBER_LIVE_ACCOUNT"], cwd: dir.path, permissionMode: "acceptEdits", model: "haiku")
         let process = try ClaudeProcess(spec: spec, paneID: "live-rewind", binDir: nil)
         var finished: XCTestExpectation? = expectation(description: "turn finished")
         var answered: XCTestExpectation?
@@ -341,7 +363,7 @@ final class LiveCLITests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: dir) }
 
         var chat = ChatTranscript()
-        let process = try ClaudeProcess(spec: LaunchSpec(profile: env["VIBER_LIVE_PROFILE"], cwd: dir.path, model: "haiku"),
+        let process = try ClaudeProcess(spec: LaunchSpec(profile: env["VIBER_LIVE_ACCOUNT"], cwd: dir.path, model: "haiku"),
                                         paneID: "live-tasks", binDir: nil)
         var finished: XCTestExpectation? = expectation(description: "turn finished")
         var answered: XCTestExpectation?
@@ -385,7 +407,7 @@ final class LiveCLITests: XCTestCase {
         try Data("The password is KUMQUAT.\n".utf8).write(to: other.appendingPathComponent("note.txt"))
 
         var chat = ChatTranscript()
-        let process = try ClaudeProcess(spec: LaunchSpec(profile: env["VIBER_LIVE_PROFILE"], cwd: cwd.path, model: "haiku"),
+        let process = try ClaudeProcess(spec: LaunchSpec(profile: env["VIBER_LIVE_ACCOUNT"], cwd: cwd.path, model: "haiku"),
                                         paneID: "live-dirs", binDir: nil)
         var listed: XCTestExpectation? = expectation(description: "rules re-read")
         var finished: XCTestExpectation?
@@ -422,7 +444,7 @@ final class LiveCLITests: XCTestCase {
         for name in ["a.txt", "b.txt"] { try Data().write(to: dir.appendingPathComponent(name)) }
 
         var chat = ChatTranscript()
-        let process = try ClaudeProcess(spec: LaunchSpec(profile: env["VIBER_LIVE_PROFILE"], cwd: dir.path, model: "haiku"),
+        let process = try ClaudeProcess(spec: LaunchSpec(profile: env["VIBER_LIVE_ACCOUNT"], cwd: dir.path, model: "haiku"),
                                         paneID: "live-agent", binDir: nil)
         let done = expectation(description: "Claude answered after the agent's report")
         var results = 0, sawRunningAfterTurn = false, sawSelfStartedTurn = false
@@ -479,7 +501,7 @@ final class LiveCLITests: XCTestCase {
 
         var chat = ChatTranscript()
         chat.keepsMode = true
-        let spec = LaunchSpec(profile: env["VIBER_LIVE_PROFILE"], cwd: dir.path, model: "haiku", readOnly: true,
+        let spec = LaunchSpec(profile: env["VIBER_LIVE_ACCOUNT"], cwd: dir.path, model: "haiku", readOnly: true,
                               appendSystemPrompt: ProjectChat.systemPrompt(project: dir.path, tracker: nil))
         let process = try ClaudeProcess(spec: spec, paneID: "live-chat", binDir: bin.path)
         let finished = expectation(description: "turn finished")

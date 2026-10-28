@@ -62,9 +62,9 @@ public struct McpServer: Equatable, Sendable, Identifiable {
 
     /// OAuth tokens the CLI holds itself; claude.ai connectors are signed out on claude.ai.
     public var canSignOut: Bool { transport == "http" || transport == "sse" }
-    /// clauth gives each session its own config folder and Keychain item, which is where the CLI keeps a server's
-    /// OAuth login, so a sign-in there is gone once Claude restarts. claude.ai connectors sign in with the account.
-    public func signInLastsOneSession(underClauth: Bool) -> Bool { underClauth && transport != "claudeai-proxy" }
+    /// The CLI keeps a server's OAuth login in the account's Keychain item, so each Viber account signs in on its own,
+    /// and a chat moved to another account signs in again. claude.ai connectors sign in with the Claude account.
+    public func signInIsPerAccount(onAccount: Bool) -> Bool { onAccount && transport != "claudeai-proxy" }
     public var needsAttention: Bool { status == .needsAuth || status == .failed }
 
     public static func parse(_ list: JSON?) -> [McpServer] {
