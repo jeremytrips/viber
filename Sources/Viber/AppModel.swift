@@ -1965,9 +1965,16 @@ final class AppModel {
     @ObservationIgnored private var fetching: Set<String> = []
     /// When each account was last asked, failed or not, so a broken login isn't retried every 30 seconds.
     @ObservationIgnored private var lastFetch: [String: Date] = [:]
+    @ObservationIgnored private var lastShare = Date.distantPast
 
-    /// Reads each account's login and usage, at most every two minutes each, or now for `force`.
+    /// Reads each account's login and usage, at most every two minutes each, or now for `force`. As often, hands MCP
+    /// sign-ins to every account, so a server's refreshed token reaches sessions already running elsewhere.
     func refreshAccounts(force: Set<String> = []) {
+        if !accountList.accounts.isEmpty, now.timeIntervalSince(lastShare) >= 120 {
+            lastShare = now
+            let services = MCPSignIns.services(accountList.accounts)
+            Task.detached { MCPSignIns.share(among: services) }
+        }
         let running = runningCounts
         for account in accountList.accounts where !fetching.contains(account.name) {
             let previous = accountStatuses[account.name]
