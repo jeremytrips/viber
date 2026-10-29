@@ -43,13 +43,11 @@ struct DevicePanel: View {
                 Button { pane.attachDeviceScreenshot() } label: { Image(systemName: "camera") }
                     .disabled(!controller.isStreaming)
                     .help("Attach a screenshot to your message")
-                if controller.canInteract {
-                    Button { pane.toggleDevicePicking() } label: {
-                        Image(systemName: "cursorarrow.rays").foregroundStyle(controller.picking ? Color.accentColor : Color.primary)
-                    }
-                    .disabled(!controller.isStreaming)
-                    .help("Pick an element to attach to your message")
+                Button { pane.toggleDevicePicking() } label: {
+                    Image(systemName: "cursorarrow.rays").foregroundStyle(controller.picking ? Color.accentColor : Color.primary)
                 }
+                .disabled(!controller.isStreaming)
+                .help("Pick an element to attach to your message")
             }
             Menu {
                 if let controller {

@@ -99,6 +99,21 @@ public enum Devicectl {
         return displays
     }
 
+    /// The phone's address in CoreDevice's tunnel (`fd71:…::1`), from `device info details`, while the tunnel is up.
+    /// Any process on the Mac reaches the phone's ports through it, over USB and Wi-Fi alike.
+    public static func parseTunnelAddress(_ data: Data) -> String? {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let result = root["result"] as? [String: Any],
+              let connection = result["connectionProperties"] as? [String: Any],
+              connection["tunnelState"] as? String == "connected",
+              let address = connection["tunnelIPAddress"] as? String, !address.isEmpty else { return nil }
+        return address
+    }
+
+    public static func tunnelAddress(_ id: String) async throws -> String? {
+        parseTunnelAddress(try await check(["device", "info", "details", "--device", id], timeout: 60, what: "connect to the phone"))
+    }
+
     // MARK: Apps
 
     /// What Viber needs from a built app's Info.plist.
