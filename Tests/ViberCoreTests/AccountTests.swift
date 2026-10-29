@@ -20,15 +20,6 @@ final class AccountTests: XCTestCase {
         XCTAssertFalse(Accounts.isValidName("a b"))
     }
 
-    func testProjectAccountStoresAutomaticAsNothing() {
-        for account in [ProjectAccount.automatic, .plain, .profile("creator1")] {
-            XCTAssertEqual(ProjectAccount(stored: account.stored), account)
-        }
-        XCTAssertNil(ProjectAccount.automatic.stored)
-        XCTAssertEqual(ProjectAccount.plain.stored, "")
-        XCTAssertEqual(ProjectAccount(stored: "creator1"), .profile("creator1"), "projects pinned under clauth keep their account")
-    }
-
     func testAccountListRoundTrips() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("viber-accounts-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: url) }

@@ -150,13 +150,6 @@ struct ContentView: View {
         .onChange(of: model.renamingProject) { _, path in
             if let path { renameDraft = model.projectName(path) }
         }
-        .alert(model.accountMove?.title ?? "", isPresented: Binding(get: { model.accountMove != nil }, set: { if !$0 { model.accountMove = nil } }),
-               presenting: model.accountMove) { move in
-            Button("Move") { model.moveSessions(move); model.accountMove = nil }
-            Button("Only New Sessions", role: .cancel) { model.accountMove = nil }
-        } message: { move in
-            Text(move.message)
-        }
         .alert("Still blocked", isPresented: Binding(get: { model.blockedStart != nil }, set: { if !$0 { model.blockedStart = nil } }),
                presenting: model.blockedStart) { issue in
             Button("Start Anyway") { model.plan(issue); model.blockedStart = nil }

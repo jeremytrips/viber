@@ -50,38 +50,6 @@ struct JiraRunSheetRequest: Identifiable {
     var id: String { project + "|" + (epic?.key ?? keys.joined(separator: ",")) }
 }
 
-/// A project's account changed while some of its open sessions run on another; an alert offers to move them.
-struct AccountMove: Identifiable {
-    var project: String
-    /// The account they would move to; nil for the plain `claude` login, or on Automatic, where each gets its own.
-    var profile: String?
-    /// The project is on Automatic: each moves to the account Automatic picks for it.
-    var automatic = false
-    var sessions: Int
-    /// How many of them wait out a usage limit, which they would carry on from at once.
-    var waiting: Int
-    /// An autopilot run is going in the project; its next sessions would move too.
-    var autopilot: Bool
-    var id: String { project }
-
-    var title: String {
-        "Move " + (sessions == 1 ? "the open session" : "the \(sessions) open sessions") + " to \(name)?"
-    }
-
-    private var name: String { automatic ? "an account Automatic picks" : profile ?? "the plain claude login" }
-
-    var message: String {
-        var text = sessions == 1
-            ? "Claude restarts on \(name) and keeps the conversation; if it is working, it moves once it's done. "
-                + "Its next message reads the whole conversation again, uncached."
-            : "Claude restarts in each on \(name) and keeps the conversation; one that is working moves once it's done. "
-                + "The next message in each reads the whole conversation again, uncached."
-        if waiting > 0 { text += " Sessions waiting out a usage limit carry on right away." }
-        if autopilot { text += " The autopilot starts its next sessions there too." }
-        return text
-    }
-}
-
 /// The settings sheet of one session, opened on a tab.
 struct SettingsSheetRequest: Identifiable {
     var paneID: String
@@ -92,6 +60,8 @@ struct SettingsSheetRequest: Identifiable {
 struct NewSessionRequest {
     var folder: String
     var profile: String?
+    /// `profile` is the account Viber picked, not one you chose: the session may move as it runs low.
+    var autoAccount = true
     var useWorktree: Bool
     var name: String
     /// The worktree's branch; nil for `branchPattern` filled in with the name.
@@ -136,13 +106,10 @@ final class AppModel {
     var newSessionFolder: String?
     /// The projects in the sidebar, kept while none of their sessions is open.
     var projects = ProjectList()
-    /// Each project's account by its path, as `ProjectAccount` stores it. One not in it is on Automatic.
-    var projectAccounts: [String: String] = [:]
-    /// The accounts Automatic leaves out in each project, by its path.
+    /// The accounts new chats in each project don't pick, by its path.
     var projectExclusions: [String: [String]] = [:]
     /// The account Viber last ran each session on, by session ID.
     @ObservationIgnored var sessionAccounts: [String: String] = [:]
-    var accountMove: AccountMove?
     /// The project being renamed, by its path.
     var renamingProject: String?
     /// The project each folder in `recent` belongs to.
@@ -228,11 +195,11 @@ final class AppModel {
     /// The project of whatever is selected: its page, one of its sessions, or a worktree being set up for it.
     var selectedProject: String? { selectedProjectPage ?? selectedPane?.projectPath ?? selectedJob?.project }
     var waitingCount: Int { panes.filter { $0.state.needsYou }.count + externals.filter { [.input, .plan, .permission].contains($0.state) }.count }
-    /// The account the top bar shows: the selected chat's, else the one a session in the selected project would start on,
-    /// else the one Automatic would pick. Nil means the plain `claude` login.
+    /// The account the top bar shows: the selected chat's, else the one a new chat in the selected project would start on,
+    /// else the least-used one. Nil means the plain `claude` login.
     var shownProfileName: String? {
         if let pane = selectedPane { return pane.spec.profile }
-        if let project = selectedProject { return launchProfile(for: project) }
+        if let project = selectedProject { return bestAccount(for: project) }
         return pickAutomatic(allowed: Set(accountList.accounts.filter(\.automatic).map(\.name)))
     }
 
@@ -286,19 +253,23 @@ final class AppModel {
             if selecting { select(.job(job.id)) }
             run(job)
         } else {
-            open(title: title, spec: LaunchSpec(profile: request.profile, cwd: request.folder, permissionMode: mode, model: launchModel,
-                                                readOnly: request.readOnly ? true : nil, appendSystemPrompt: request.systemPrompt),
+            var spec = LaunchSpec(profile: request.profile, cwd: request.folder, permissionMode: mode, model: launchModel,
+                                  readOnly: request.readOnly ? true : nil, appendSystemPrompt: request.systemPrompt)
+            spec.autoAccount = request.autoAccount ? true : nil
+            open(title: title, spec: spec,
                  worktree: nil, firstMessage: request.firstMessage, issueID: request.issueID, jiraRunKey: request.jiraRunKey,
                  rules: request.sessionRules, selecting: selecting)
         }
     }
 
-    func resume(_ session: SessionSummary, profile: String?) {
+    /// Opens an earlier session on `profile`; `autoAccount` when that is the account Viber picked rather than you.
+    func resume(_ session: SessionSummary, profile: String?, autoAccount: Bool = false) {
         if let existing = panes.first(where: { $0.spec.resume == session.id || $0.chat.sessionID == session.id }) {
             select(.pane(existing.id)); return
         }
         guard let folder = session.workspace else { errorMessage = "This session has no recorded folder."; return }
-        let spec = LaunchSpec(profile: profile, cwd: folder, resume: session.id)
+        var spec = LaunchSpec(profile: profile, cwd: folder, resume: session.id)
+        spec.autoAccount = autoAccount ? true : nil
         if isChatSession(session.id) {
             open(title: session.title, spec: chatSpec(spec), worktree: nil, firstMessage: "", rules: ProjectChat.sessionRules)
         } else {
@@ -311,7 +282,7 @@ final class AppModel {
     /// A read-only chat in the project's folder, for questions and planning. `message`, if any, is sent as its first.
     func newChat(in project: String, message: String = "") {
         let text = message.trimmingCharacters(in: .whitespacesAndNewlines)
-        createSession(NewSessionRequest(folder: project, profile: launchProfile(for: project), useWorktree: false,
+        createSession(NewSessionRequest(folder: project, profile: bestAccount(for: project), useWorktree: false,
                                         name: ProjectChat.title(from: text), sessionRules: ProjectChat.sessionRules, readOnly: true,
                                         systemPrompt: chatPrompt(project), permissionMode: PermissionMode.default.rawValue,
                                         firstMessage: text, issueID: nil))
@@ -360,7 +331,8 @@ final class AppModel {
             select(.pane(existing.id)); return
         }
         let title = recent.first(where: { $0.id == session.id })?.title ?? session.projectName
-        let spec = LaunchSpec(profile: launchProfile(for: ProjectRoot.resolve(session.project)), cwd: session.project, resume: session.id)
+        var spec = LaunchSpec(profile: bestAccount(for: ProjectRoot.resolve(session.project)), cwd: session.project, resume: session.id)
+        spec.autoAccount = true
         if isChatSession(session.id) {
             open(title: title, spec: chatSpec(spec), worktree: nil, firstMessage: "", rules: ProjectChat.sessionRules)
         } else {
@@ -444,8 +416,9 @@ final class AppModel {
         let model = Prefs.string(Prefs.newSessionModel)
         let watching = selection == .job(job.id)
         jobs.removeAll { $0.id == job.id }
-        let pane = open(title: job.title, spec: LaunchSpec(profile: request.profile, cwd: info.path, permissionMode: mode,
-                                                           model: model.isEmpty ? nil : model),
+        var spec = LaunchSpec(profile: request.profile, cwd: info.path, permissionMode: mode, model: model.isEmpty ? nil : model)
+        spec.autoAccount = request.autoAccount ? true : nil
+        let pane = open(title: job.title, spec: spec,
                         worktree: info, firstMessage: request.firstMessage, issueID: request.issueID, jiraRunKey: request.jiraRunKey,
                         rules: request.sessionRules, selecting: watching)
         // An autopilot's sessions start unwatched by design.
@@ -789,74 +762,44 @@ final class AppModel {
         saveProjects()
     }
 
-    func account(of project: String) -> ProjectAccount { ProjectAccount(stored: projectAccounts[project]) }
-
-    /// The account a new session in the project starts on; nil for the plain `claude` login. On Automatic, the one
-    /// Automatic picks; when the project allows none with a working login, the first it allows, whose chat then says
-    /// to log in.
-    func launchProfile(for project: String) -> String? {
-        switch account(of: project) {
-        case .plain: return nil
-        case .profile(let name): return name
-        case .automatic:
-            let allowed = automaticAccounts(in: project)
-            return pickAutomatic(allowed: allowed) ?? accountList.accounts.first { allowed.contains($0.name) }?.name
-        }
+    /// The account a new chat in the project starts on: the least-used one it allows with a working login, else the
+    /// first it allows, whose chat then says to log in. Nil, the plain `claude` login, when it allows none.
+    func bestAccount(for project: String) -> String? {
+        let allowed = automaticAccounts(in: project)
+        return pickAutomatic(allowed: allowed) ?? accountList.accounts.first { allowed.contains($0.name) }?.name
     }
 
-    /// Sets the account the project's new sessions start with. When open ones run on another, an alert offers to move them.
-    func setAccount(_ account: ProjectAccount, for project: String) {
-        guard account != self.account(of: project) else { return }
-        projectAccounts[project] = account.stored
-        UserDefaults.standard.set(projectAccounts, forKey: Prefs.projectAccounts)
-        offerMove(project)
+    /// Puts one chat on an account you chose, keeping the conversation. It stays there: Viber no longer moves it.
+    func setAccount(_ profile: String?, for pane: Pane) {
+        let moving = profile != pane.spec.profile
+        pane.spec.autoAccount = nil
+        pane.switchAccount(to: profile, binDir: binDir, pluginDir: pluginDir)
+        // The limit it was waiting out was the old account's. The next tick carries on once Claude is up again.
+        if moving, pane.continueAt != nil { pane.continueAt = now }
+        save()
     }
 
-    /// Whether Automatic may use an account in the project. Leaving one out offers to move the sessions on it.
+    /// Lets Viber move a chat to the least-used account when its own runs low, or keeps it where it is. Turned on, a
+    /// chat whose account is already out of room moves now.
+    func setAutoAccount(_ on: Bool, for pane: Pane) {
+        pane.spec.autoAccount = on ? true : nil
+        save()
+        if on { moveIfOutOfRoom(pane) }
+    }
+
+    /// Whether new chats in the project may pick an account. Chats already on it stay there.
     func setExcluded(_ name: String, _ excluded: Bool, in project: String) {
         var names = Set(projectExclusions[project] ?? [])
         if excluded { names.insert(name) } else { names.remove(name) }
         projectExclusions[project] = names.isEmpty ? nil : names.sorted()
         UserDefaults.standard.set(projectExclusions, forKey: Prefs.projectExcludedAccounts)
-        if excluded { offerMove(project) }
     }
 
     func isExcluded(_ name: String, in project: String) -> Bool { projectExclusions[project]?.contains(name) == true }
 
-    /// The accounts Automatic may use in the project: those Automatic uses, less the ones the project leaves out.
+    /// The accounts new chats in the project may pick: those Viber picks from, less the ones the project leaves out.
     func automaticAccounts(in project: String) -> Set<String> {
         Set(accountList.accounts.filter { $0.automatic && !isExcluded($0.name, in: project) }.map(\.name))
-    }
-
-    private func offerMove(_ project: String) {
-        let profile = launchProfile(for: project)
-        let others = panes.filter { $0.projectPath == project && runsElsewhere($0) }
-        accountMove = others.isEmpty ? nil
-            : AccountMove(project: project, profile: profile, automatic: account(of: project) == .automatic, sessions: others.count,
-                          waiting: others.filter { $0.continueAt != nil }.count,
-                          autopilot: autopilots[project] != nil || jiraRuns[project] != nil)
-    }
-
-    /// Moves the project's open sessions, and its autopilot runs' next ones, to the account the alert offered.
-    func moveSessions(_ move: AccountMove) {
-        autopilots[move.project]?.profile = move.profile
-        jiraRuns[move.project]?.profile = move.profile
-        for pane in panes where pane.projectPath == move.project && runsElsewhere(pane) {
-            pane.switchAccount(to: launchProfile(for: move.project), binDir: binDir, pluginDir: pluginDir)
-            // The limit it was waiting out was the old account's. The next tick carries on once Claude is up again.
-            if pane.continueAt != nil { pane.continueAt = now }
-        }
-        save()
-    }
-
-    /// Whether an open session runs on an account its project doesn't use. On Automatic, any account Automatic may use
-    /// there will do.
-    private func runsElsewhere(_ pane: Pane) -> Bool {
-        switch account(of: pane.projectPath) {
-        case .plain: return pane.spec.profile != nil
-        case .profile(let name): return pane.spec.profile != name
-        case .automatic: return pane.spec.profile.map { !automaticAccounts(in: pane.projectPath).contains($0) } ?? true
-        }
     }
 
     /// Opens the New Session sheet on a project, or on a folder in it.
@@ -868,7 +811,7 @@ final class AppModel {
     /// Starts a session in a worktree that already exists, such as one a session before it left behind.
     func openSession(inWorktree entry: WorktreeEntry) {
         let name = entry.branch.map { $0.split(separator: "/").last.map(String.init) ?? $0 } ?? Project.folderName(entry.path)
-        createSession(NewSessionRequest(folder: entry.path, profile: launchProfile(for: ProjectRoot.resolve(entry.path)), useWorktree: false, name: name,
+        createSession(NewSessionRequest(folder: entry.path, profile: bestAccount(for: ProjectRoot.resolve(entry.path)), useWorktree: false, name: name,
                                         permissionMode: Prefs.string(Prefs.newSessionMode), firstMessage: "", issueID: nil))
     }
 
@@ -944,7 +887,7 @@ final class AppModel {
             let key = root.map { WorktreeHooks.mainCheckout($0) ?? $0 }
             await MainActor.run {
                 let pattern = key.map { Prefs.branchPattern(project: $0) } ?? Worktree.defaultBranchPattern
-                let request = NewSessionRequest(folder: project, profile: self.launchProfile(for: project), useWorktree: root != nil,
+                let request = NewSessionRequest(folder: project, profile: self.bestAccount(for: project), useWorktree: root != nil,
                                                 name: issue.title, permissionMode: PermissionMode.plan.rawValue,
                                                 firstMessage: self.firstMessage(for: issue), issueID: issue.id, issueKey: issue.key,
                                                 branchPattern: pattern)
@@ -1088,7 +1031,7 @@ final class AppModel {
             let key = root.map { WorktreeHooks.mainCheckout($0) ?? $0 }
             await MainActor.run {
                 let pattern = key.map { Prefs.branchPattern(project: $0) } ?? Worktree.defaultBranchPattern
-                let request = NewSessionRequest(folder: project, profile: self.launchProfile(for: project), useWorktree: root != nil,
+                let request = NewSessionRequest(folder: project, profile: self.bestAccount(for: project), useWorktree: root != nil,
                                                 name: "\(issue.key) \(issue.summary)", permissionMode: Prefs.string(Prefs.newSessionMode),
                                                 firstMessage: tracker.firstMessage(for: issue), issueID: nil, issueKey: issue.key,
                                                 branchPattern: pattern)
@@ -1102,7 +1045,7 @@ final class AppModel {
     /// Ask Claude: a session in the project with the action's prompt. On Jira every call to the Jira servers asks.
     func askClaude(_ action: AskClaude, project: String) {
         let tracker = trackers.tracker(for: project)
-        createSession(NewSessionRequest(folder: project, profile: launchProfile(for: project), useWorktree: false, name: action.title,
+        createSession(NewSessionRequest(folder: project, profile: bestAccount(for: project), useWorktree: false, name: action.title,
                                         sessionRules: tracker.map { JiraRun.askRules(servers: $0.mcpServers) } ?? [],
                                         permissionMode: PermissionMode.auto.rawValue,
                                         firstMessage: action.prompt(project: project, tracker: tracker), issueID: nil))
@@ -1114,7 +1057,7 @@ final class AppModel {
         guard let tracker = trackers.tracker(for: project) else { return }
         let line = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !line.isEmpty else { return }
-        createSession(NewSessionRequest(folder: project, profile: launchProfile(for: project), useWorktree: false, name: "Draft: " + String(line.prefix(40)),
+        createSession(NewSessionRequest(folder: project, profile: bestAccount(for: project), useWorktree: false, name: "Draft: " + String(line.prefix(40)),
                                         permissionMode: PermissionMode.default.rawValue,
                                         firstMessage: ProjectTracker.draftPrompt(line, site: tracker.site), issueID: nil))
     }
@@ -1189,7 +1132,8 @@ final class AppModel {
         }
         jiraRuns[project] = run
         for issue in starting {
-            createSession(NewSessionRequest(folder: project, profile: run.profile, useWorktree: true, name: "\(issue.key) \(issue.summary)",
+            createSession(NewSessionRequest(folder: project, profile: run.autoAccount ? bestAccount(for: project) : run.profile,
+                                            autoAccount: run.autoAccount, useWorktree: true, name: "\(issue.key) \(issue.summary)",
                                             jiraRunKey: issue.key, sessionRules: JiraRun.askRules(servers: tracker.mcpServers),
                                             permissionMode: run.permissionMode, firstMessage: JiraRun.prompt(for: issue, tracker: tracker, check: requestCheck(for: project)),
                                             issueID: nil, issueKey: issue.key, branchPattern: run.branchPattern),
@@ -1400,7 +1344,8 @@ final class AppModel {
         }
         autopilots[project] = pilot
         for (issue, branch) in starting {
-            createSession(NewSessionRequest(folder: project, profile: pilot.profile, useWorktree: true, name: issue.title,
+            createSession(NewSessionRequest(folder: project, profile: pilot.autoAccount ? bestAccount(for: project) : pilot.profile,
+                                            autoAccount: pilot.autoAccount, useWorktree: true, name: issue.title,
                                             // Merged issues build on each other; pull requests each start from origin.
                                             base: pilot.finish == .merge ? .current : .originDefault, startBranch: branch,
                                             permissionMode: pilot.permissionMode,
@@ -1930,27 +1875,28 @@ final class AppModel {
         Set(panes.filter { $0 !== pane && $0.continueAt != nil }.compactMap(\.spec.profile))
     }
 
-    /// The account Automatic would start a session on among `allowed`; nil when none has a working login.
+    /// The least-used account among `allowed`, which a new chat starts on; nil when none has a working login.
     func pickAutomatic(allowed: Set<String>, avoiding: String? = nil, besides pane: Pane? = nil) -> String? {
         AccountChoice.pick(from: accounts, allowed: allowed, running: runningCounts, limited: limitedAccounts(besides: pane),
                            avoiding: avoiding, now: now)
     }
 
-    /// Where a session on Automatic runs when it starts: on the account it is on while that has room, else on the one
-    /// Automatic picks. Nil leaves it where it is: its project isn't on Automatic, or doesn't allow that account.
+    /// Where a chat whose account Viber picked runs when it starts: on the account it is on while the project allows it
+    /// and it has room, else on the least-used one. Nil leaves it where it is: you chose its account.
     private func automaticAccount(for pane: Pane, current: String?) -> String? {
+        guard pane.spec.autoAccount == true else { return nil }
         let allowed = automaticAccounts(in: pane.projectPath)
-        guard account(of: pane.projectPath) == .automatic, let current, allowed.contains(current) else { return nil }
-        if let status = status(of: current), status.loginProblem == nil, AccountChoice.hasRoom(status),
+        guard let current else { return pickAutomatic(allowed: allowed, besides: pane) }
+        if allowed.contains(current), let status = status(of: current), status.loginProblem == nil, AccountChoice.hasRoom(status),
            !limitedAccounts(besides: pane).contains(current) { return current }
         return pickAutomatic(allowed: allowed, avoiding: current, besides: pane) ?? current
     }
 
-    /// After a turn: a session on Automatic whose account ran out, or is about to, moves to one with room, keeping the
+    /// After a turn: a chat whose account Viber picked, and which ran out, or is about to, moves to one with room, keeping the
     /// conversation. One stopped at the limit then carries on there. Busy again (a check, an autopilot nudge), it moves
     /// once that request is over.
     private func moveIfOutOfRoom(_ pane: Pane) {
-        guard pane.spec.autoAccount == true, account(of: pane.projectPath) == .automatic, let current = pane.spec.profile else { return }
+        guard pane.spec.autoAccount == true, let current = pane.spec.profile else { return }
         let limited = pane.chat.usageLimit != nil
         guard limited || status(of: current).map({ !AccountChoice.hasRoom($0) }) == true else { return }
         guard let target = pickAutomatic(allowed: automaticAccounts(in: pane.projectPath), avoiding: current) else { return }
@@ -2058,7 +2004,7 @@ final class AppModel {
         do { try accountList.save() } catch { errorMessage = "Could not save accounts: \(error.localizedDescription)" }
     }
 
-    /// Account folders from before accounts.json, or made by hand, join the list; Automatic leaves them out until asked.
+    /// Account folders from before accounts.json, or made by hand, join the list; new chats don't pick them until asked.
     private func loadAccounts() {
         accountList = AccountList.load()
         let folders = (try? FileManager.default.contentsOfDirectory(atPath: Accounts.root.path)) ?? []
@@ -2129,7 +2075,6 @@ final class AppModel {
     private func restore() {
         issues = IssueList.load()
         trackers = TrackerList.load()
-        projectAccounts = UserDefaults.standard.dictionary(forKey: Prefs.projectAccounts) as? [String: String] ?? [:]
         projectExclusions = UserDefaults.standard.dictionary(forKey: Prefs.projectExcludedAccounts) as? [String: [String]] ?? [:]
         loadAccounts()
         if let data = try? Data(contentsOf: ViberPaths.sessionAccounts),
