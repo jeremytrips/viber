@@ -321,6 +321,60 @@ public enum Keychain {
     }
 }
 
+// MARK: - MCP sign-ins
+
+/// The CLI keeps MCP servers' sign-ins (`mcpOAuth`, one per server name and config) in the same Keychain item as the
+/// Claude login, so each account would sign in to Atlassian or PostHog on its own, and a session that lands on another
+/// account would ask again. They are the user's, not the account's: every item gets the newest of each. Signing out of
+/// a server on one account doesn't reach the others; it comes back from them.
+public enum MCPSignIns {
+    /// The item the CLI keeps the plain login in ~/.claude in.
+    public static let defaultService = "Claude Code-credentials"
+
+    /// The plain login's item and every account's.
+    public static func services(_ accounts: [Account]) -> [String] {
+        [defaultService] + accounts.map { Accounts.keychainService($0.name) }
+    }
+
+    public static func entries(in stored: Data) -> [String: Any] {
+        ((try? JSONSerialization.jsonObject(with: stored) as? [String: Any])?["mcpOAuth"] as? [String: Any]) ?? [:]
+    }
+
+    /// `own` with each sign-in of `others` it lacks, or that expires later than its copy: a server whose refresh token
+    /// turns over (Atlassian's does) leaves the older copies signed out, so the latest wins. A tie keeps its own.
+    public static func merged(own: [String: Any], others: [[String: Any]]) -> [String: Any] {
+        var merged = own
+        for other in others {
+            for (key, entry) in other where merged[key] == nil || expiry(entry) > expiry(merged[key]) { merged[key] = entry }
+        }
+        return merged
+    }
+
+    private static func expiry(_ entry: Any?) -> Double { ((entry as? [String: Any])?["expiresAt"] as? NSNumber)?.doubleValue ?? 0 }
+
+    /// The stored item with these MCP sign-ins, keeping the login.
+    public static func replacing(_ stored: Data, with entries: [String: Any]) -> Data? {
+        guard var object = try? JSONSerialization.jsonObject(with: stored) as? [String: Any] else { return nil }
+        object["mcpOAuth"] = entries
+        return try? JSONSerialization.data(withJSONObject: object)
+    }
+
+    /// Gives each signed-in item of `targets` (all of `services` by default) the newest of every MCP sign-in in
+    /// `services`. An item the CLI wrote since it was read is left for the next time rather than undo what it wrote.
+    public static func share(among services: [String], into targets: [String]? = nil) {
+        var stored: [String: Data] = [:]
+        for service in Set(services + (targets ?? [])) { stored[service] = Keychain.read(service) }
+        let signIns = stored.mapValues(entries(in:))
+        for service in targets ?? services {
+            guard let data = stored[service], OAuthLogin(json: data) != nil, let own = signIns[service] else { continue }
+            let wanted = merged(own: own, others: signIns.filter { $0.key != service }.map(\.value))
+            guard !(wanted as NSDictionary).isEqual(to: own), Keychain.read(service) == data,
+                  let updated = replacing(data, with: wanted) else { continue }
+            Keychain.write(service, updated)
+        }
+    }
+}
+
 extension Data {
     init?(hex: String) {
         guard hex.count.isMultiple(of: 2), hex.allSatisfy(\.isHexDigit) else { return nil }
