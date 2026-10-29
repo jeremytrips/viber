@@ -8,7 +8,7 @@ public struct Account: Codable, Equatable, Identifiable, Sendable {
     public var name: String
     /// The address the login belongs to, as `claude auth status` reported it after signing in.
     public var email: String?
-    /// Whether projects on Automatic may start sessions on it. Off for a personal account.
+    /// Whether Viber may pick it for a new chat, or move a chat to it. Off for a personal account, used only when chosen.
     public var automatic: Bool
     public var id: String { name }
 
@@ -569,7 +569,7 @@ public enum AccountUsage {
 
 // MARK: - Automatic
 
-/// Which account a session on Automatic starts on, and where it moves when its account runs low.
+/// Which account a new chat starts on, and where a chat Viber picked the account for moves when it runs low.
 public enum AccountChoice {
     /// An account at or past these has no room for more work: its 5-hour window, or its week.
     public static let fiveHourLine = 90.0
@@ -609,33 +609,5 @@ public enum AccountChoice {
             return window.label == "5h" ? pct >= fiveHourLine : window.label == "7d" ? pct >= weekLine : false
         }
         return full.compactMap(\.resetsAt).max() ?? now
-    }
-}
-
-/// The login a project's sessions start with, chosen on its Settings tab or under the toolbar's account button.
-public enum ProjectAccount: Hashable, Sendable {
-    /// Viber picks an account for each session among those Automatic may use, less any the project leaves out, and
-    /// moves it to another as its account runs out.
-    case automatic
-    /// Plain `claude` with its own login in ~/.claude.
-    case plain
-    /// One account, by name.
-    case profile(String)
-
-    /// How Viber stores it: nil for Automatic, an empty string for plain `claude`, else the account's name.
-    public init(stored: String?) {
-        switch stored {
-        case .none: self = .automatic
-        case .some(let name) where name.isEmpty: self = .plain
-        case .some(let name): self = .profile(name)
-        }
-    }
-
-    public var stored: String? {
-        switch self {
-        case .automatic: return nil
-        case .plain: return ""
-        case .profile(let name): return name
-        }
     }
 }

@@ -41,6 +41,9 @@ public struct Autopilot: Equatable, Sendable {
     public var target: String?
     public var permissionMode: String
     public var profile: String?
+    /// Each session starts on the least-used account the project allows when it starts, not on `profile`, and moves
+    /// when that one runs low: the account was left as Viber picked it.
+    public var autoAccount = false
     /// The branch pattern new worktrees get; see `usablePattern`.
     public var branchPattern: String
     /// How many issues it works on at once.
