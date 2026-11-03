@@ -186,7 +186,6 @@ public struct ChatTranscript {
     public var isThinking = false
     public var cache: CacheEstimate?
     public var lastUsage: TurnUsage?
-    public var costUSD: Double = 0
     public var lastTurnSeconds: Double?
     public var commands: [SlashCommand] = []
     public var models: [ModelOption] = []
@@ -1061,7 +1060,6 @@ public struct ChatTranscript {
     private mutating func applyResult(_ message: JSON, now: Date) {
         streamingText = ""
         isThinking = false
-        if let cost = message["total_cost_usd"]?.double { costUSD = cost }
         if let ms = message["duration_ms"]?.double { lastTurnSeconds = ms / 1000 }
         let isError = message["is_error"]?.bool ?? false
         let subtype = message["subtype"]?.string ?? "success"

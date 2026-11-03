@@ -88,6 +88,7 @@ struct ChatIntro: View {
 struct PaneHeader: View {
     @Environment(AppModel.self) private var model
     let pane: Pane
+    @State private var showingTokens = false
 
     var body: some View {
         HStack(alignment: .center, spacing: 16) {
@@ -105,12 +106,18 @@ struct PaneHeader: View {
                 .font(.caption)
             }
             Spacer()
-            Stat(label: "Account", value: pane.profileLabel)
+            AccountMenu(pane: pane)
             Stat(label: "Cache", value: cacheText, warn: cacheLow)
             if let usage = pane.chat.lastUsage {
                 Stat(label: "Context", value: "\(AppModel.compact(usage.contextTokens)) · \(AppModel.compact(usage.cacheRead)) cached")
             }
-            if pane.chat.costUSD > 0 { Stat(label: "Cost", value: String(format: "$%.2f", pane.chat.costUSD)) }
+            let tokens = pane.tokens.reduce(0) { $0 + $1.count.total }
+            if tokens > 0 {
+                Button { showingTokens.toggle() } label: { Stat(label: "Tokens", value: AppModel.compact(tokens)) }
+                    .buttonStyle(.plain)
+                    .help("Input, output and cache writes, subagents included. Click for each account's share, and cache reads.")
+                    .popover(isPresented: $showingTokens, arrowEdge: .bottom) { TokenBreakdown(pane: pane) }
+            }
             let running = pane.chat.controls.runningTasks.count
             if running > 0 {
                 Button { model.openSettings(.tasks, in: pane) } label: { Stat(label: "Tasks", value: "\(running) running") }
@@ -164,6 +171,74 @@ struct PaneHeader: View {
         guard let cache = pane.chat.cache else { return false }
         let remaining = cache.remaining(at: model.now)
         return remaining > 0 && remaining < 120
+    }
+}
+
+/// The header's Account stat, a menu that switches the chat: Automatic, an account, or the plain login.
+private struct AccountMenu: View {
+    @Environment(AppModel.self) private var model
+    let pane: Pane
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text("Account").font(.caption2).foregroundStyle(.secondary)
+            Menu {
+                AccountPicker(selection: Binding(get: { pane.spec.accountSelection }, set: { model.setAccount($0, for: pane) }))
+                    .pickerStyle(.inline)
+                    .labelsHidden()
+            } label: {
+                Text(pane.spec.autoAccount == true ? "Auto · " + pane.profileLabel : pane.profileLabel)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .font(.callout.weight(.medium))
+        }
+        .help(pane.spec.autoAccount == true
+              ? "Automatic: Viber moves this chat only when its account runs out. Click to switch it; a busy chat moves once its reply is done, and its next message reads the conversation again, uncached."
+              : "Click to switch this chat's account; a busy chat moves once its reply is done, and its next message reads the conversation again, uncached.")
+    }
+}
+
+/// A chat's tokens by account: its own calls and its subagents', with cache reads apart.
+private struct TokenBreakdown: View {
+    @Environment(AppModel.self) private var model
+    let pane: Pane
+
+    var body: some View {
+        let shares = model.tokenShares(pane)
+        let all = shares.reduce(TokenCount()) { $0 + $1.all }
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Tokens").font(.headline)
+            Grid(alignment: .trailing, horizontalSpacing: 14, verticalSpacing: 4) {
+                GridRow {
+                    Text("").gridColumnAlignment(.leading)
+                    Text("Input"); Text("Output"); Text("Cache writes"); Text("Cache reads")
+                }
+                .font(.caption).foregroundStyle(.secondary)
+                ForEach(shares) { share in
+                    Divider()
+                    row(share.owner.label, share.chat, bold: true)
+                    if !share.subagents.isEmpty { row("  Subagents", share.subagents) }
+                }
+                Divider()
+                row("All", all, bold: true)
+            }
+            .font(.callout.monospacedDigit())
+            Text("Total: \(AppModel.compact(all.total)) tokens, leaving out cache reads: each call reads the whole conversation from the cache again.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(14)
+        .frame(width: 440)
+    }
+
+    private func row(_ label: String, _ count: TokenCount, bold: Bool = false) -> some View {
+        GridRow {
+            Text(label).fontWeight(bold ? .medium : .regular).lineLimit(1).gridColumnAlignment(.leading)
+            Text(AppModel.compact(count.input))
+            Text(AppModel.compact(count.output))
+            Text(AppModel.compact(count.cacheWrite))
+            Text(AppModel.compact(count.cacheRead)).foregroundStyle(.secondary)
+        }
     }
 }
 

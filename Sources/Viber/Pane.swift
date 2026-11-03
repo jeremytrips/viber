@@ -94,6 +94,13 @@ final class Pane: Identifiable {
     private(set) var authFailed = false
     /// The session moved to another account while Claude was busy; it restarts on that one when the request is over.
     private(set) var accountChanged = false
+    /// The account the running Claude was started on (nil: the plain login), and when, for the session's account log.
+    @ObservationIgnored private(set) var ranOn: (account: String?, since: Date)?
+    /// The session's model calls so far, from its transcript and its subagents', which its token counts add up.
+    private(set) var tokens: [TokenEntry] = []
+    @ObservationIgnored private let tally = TokenTally()
+    @ObservationIgnored private var countingTokens = false
+    @ObservationIgnored private var countAgain = false
     @ObservationIgnored private var process: ClaudeProcess?
     /// Preview and device tool calls in flight, by control request ID.
     @ObservationIgnored private var mcpTasks: [String: Task<Void, Never>] = [:]
@@ -188,6 +195,7 @@ final class Pane: Identifiable {
             p.onMessage = { [weak self] message in self?.handle(message) }
             p.onExit = { [weak self] status, stderr in self?.exited(status: status, stderr: stderr) }
             process = p
+            ranOn = (spec.profile, Date())
             // The browser preview's and device panel's tools, served from this app over the same stdio channel.
             // Booting a simulator for the first time can take a minute or two, hence the long timeout.
             let preview = Prefs.bool(Prefs.previewTools), device = Prefs.bool(Prefs.deviceTools)
@@ -201,6 +209,7 @@ final class Pane: Identifiable {
             chat.state = .failed
         }
         notifyIfChanged(from: before)
+        countTokens()
     }
 
     private func handle(_ message: JSON) {
@@ -226,6 +235,7 @@ final class Pane: Identifiable {
                 authFailed = true
                 chat.note("Log in to \(profileLabel) again (under the account button in the toolbar), then send your message again. Viber will restart Claude with the new login and keep this conversation.", isError: true)
             }
+            countTokens()
             onTurnFinished?(self)
         }
         notifyIfChanged(from: before)
@@ -366,6 +376,7 @@ final class Pane: Identifiable {
         process = nil
         chat = ChatTranscript()
         checks = CheckProgress()
+        tokens = []
         spec.resume = nil
         started = false
         authFailed = false
@@ -589,7 +600,26 @@ final class Pane: Identifiable {
         }
     }
 
-    static func transcriptURL(sessionID: String, cwd: String) -> URL? {
+    /// Reads the session's token use again, in the background: only what its transcripts gained since the last time.
+    func countTokens() {
+        guard let session = chat.sessionID ?? spec.resume else { return }
+        guard !countingTokens else { countAgain = true; return }
+        countingTokens = true
+        let cwd = spec.cwd, tally = tally
+        Task.detached {
+            var entries: [TokenEntry]?
+            if let url = Pane.transcriptURL(sessionID: session, cwd: cwd) { entries = await tally.read(url) }
+            let found = entries
+            await MainActor.run {
+                self.countingTokens = false
+                // /clear started another conversation meanwhile.
+                if let found, session == self.chat.sessionID ?? self.spec.resume, found != self.tokens { self.tokens = found }
+                if self.countAgain { self.countAgain = false; self.countTokens() }
+            }
+        }
+    }
+
+    nonisolated static func transcriptURL(sessionID: String, cwd: String) -> URL? {
         let fm = FileManager.default
         let direct = ViberPaths.transcript(sessionID: sessionID, cwd: cwd)
         if fm.fileExists(atPath: direct.path) { return direct }

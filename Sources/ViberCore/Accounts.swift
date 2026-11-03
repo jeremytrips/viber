@@ -569,32 +569,64 @@ public enum AccountUsage {
 
 // MARK: - Automatic
 
-/// Which account a new chat starts on, and where a chat Viber picked the account for moves when it runs low.
+/// What a chat runs on: Automatic (the account with the most room when it starts, moved only when that one runs out),
+/// an account you chose, or the plain `claude` login in ~/.claude.
+public enum AccountSelection: Hashable, Sendable {
+    case automatic
+    case account(String)
+    case plain
+
+    /// The selection a chat's launch spec, or an autopilot run, stands for.
+    public init(profile: String?, automatic: Bool) {
+        self = automatic ? .automatic : profile.map(AccountSelection.account) ?? .plain
+    }
+
+    /// The account chosen; nil for Automatic and the plain login.
+    public var accountName: String? {
+        if case .account(let name) = self { return name }
+        return nil
+    }
+}
+
+/// Which account an Automatic chat starts on, and where it moves when its account runs out.
 public enum AccountChoice {
     /// An account at or past these has no room for more work: its 5-hour window, or its week.
     public static let fiveHourLine = 90.0
     public static let weekLine = 95.0
-    /// Accounts this close to the least-used week count as tied, and the one running the fewest sessions wins.
-    public static let tie = 10.0
+    /// Accounts scoring within this share of the best count as tied, and the one running the fewest chats wins.
+    public static let tie = 0.1
 
     public static func hasRoom(_ account: AccountStatus) -> Bool {
         account.fiveHour < fiveHourLine && account.week < weekLine
     }
 
-    /// The account with the least-used week, spreading sessions over accounts that are about as used; nil when the
-    /// project may use none. With `avoiding` (a move), only an account with room counts. Without, when none has room,
-    /// the one that frees up first: the session waits out its limit there.
-    public static func pick(from accounts: [AccountStatus], allowed: Set<String>, running: [String: Int] = [:],
+    /// How much an account's plan holds next to Max 5x's: Max 20x's limits are taken to be four times as big, its week
+    /// too (an assumption: Anthropic doesn't say), Pro's a fifth. An unknown plan counts as Max 5x.
+    public static func weight(_ account: AccountStatus) -> Double {
+        guard let tier = account.tier?.lowercased() else { return 1 }
+        if let range = tier.range(of: #"\d+(?=x)"#, options: .regularExpression), let times = Double(tier[range]) { return times / 5 }
+        return tier == "pro" ? 0.2 : 1
+    }
+
+    /// The room an account has left, in Max 5x accounts' worth: what is left of the fuller of its two windows, times its
+    /// plan's size.
+    public static func score(_ account: AccountStatus) -> Double {
+        weight(account) * (100 - max(account.fiveHour, account.week))
+    }
+
+    /// The Automatic account with the most room, spreading chats over accounts about as roomy; nil when there is none.
+    /// With `avoiding` (a move), only an account with room counts. Without, when none has room, the one that frees up
+    /// first: the chat waits out its limit there.
+    public static func pick(from accounts: [AccountStatus], running: [String: Int] = [:],
                             limited: Set<String> = [], avoiding: String? = nil, now: Date = Date()) -> String? {
-        let candidates = accounts.filter { allowed.contains($0.name) && $0.loginProblem == nil && $0.name != avoiding }
+        let candidates = accounts.filter { $0.automatic && $0.loginProblem == nil && $0.name != avoiding }
         let open = candidates.filter { hasRoom($0) && !limited.contains($0.name) }
-        if let least = open.map(\.week).min() {
-            return open.filter { $0.week <= least + tie }
+        if let best = open.map(score).max() {
+            return open.filter { score($0) >= best * (1 - tie) }
                 .min { a, b in
                     let (ra, rb) = (running[a.name] ?? 0, running[b.name] ?? 0)
                     if ra != rb { return ra < rb }
-                    if a.fiveHour != b.fiveHour { return a.fiveHour < b.fiveHour }
-                    if a.week != b.week { return a.week < b.week }
+                    if score(a) != score(b) { return score(a) > score(b) }
                     return a.name < b.name
                 }?.name
         }

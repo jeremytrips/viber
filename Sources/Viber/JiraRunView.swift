@@ -8,9 +8,7 @@ struct JiraRunSheet: View {
     let request: JiraRunSheetRequest
 
     @State private var mode = PermissionMode.auto.rawValue
-    @State private var profile: String?
-    /// The account was picked here; until then each session starts on the least-used one when it starts.
-    @State private var profileChosen = false
+    @State private var account = AccountSelection.automatic
     @State private var sessions = Prefs.int(Prefs.autopilotSessions)
     @State private var worktrees = Prefs.int(Prefs.autopilotWorktrees)
     @State private var removed: Set<String> = []
@@ -82,10 +80,9 @@ struct JiraRunSheet: View {
                     Picker("Mode", selection: $mode) {
                         ForEach(Self.modes, id: \.self) { Text($0.label).tag($0.rawValue) }
                     }
-                    AccountPicker(selection: Binding(get: { profile }, set: { profile = $0; profileChosen = true }),
-                                  best: model.bestAccount(for: request.project))
-                        .help(profileChosen ? "Every session runs on this account"
-                              : "Each session starts on the least-used account when it starts, and moves to another when that runs low")
+                    AccountPicker(selection: $account)
+                        .help(account == .automatic ? "Each session starts on the account with the most room, and moves only when that one runs out"
+                              : "Every session runs on this " + (account == .plain ? "login" : "account"))
                     Stepper("Sessions at once: \(sessions)", value: $sessions, in: 1...JiraRun.maxSessions)
                     Stepper("Worktrees at most: \(worktrees)", value: $worktrees, in: max(sessions, 1)...32)
                     Text("A shipped issue keeps its worktree until it is merged and cleaned up, so the run can't get further ahead of you than this.")
@@ -107,7 +104,6 @@ struct JiraRunSheet: View {
         .frame(width: 560)
         .fitsWindow()
         .task {
-            profile = model.bestAccount(for: request.project)
             let project = request.project
             let key = await Task.detached { Worktree.repoRoot(project).map { WorktreeHooks.mainCheckout($0) ?? $0 } }.value
             if let key { pattern = Prefs.branchPattern(project: key) }
@@ -127,9 +123,9 @@ struct JiraRunSheet: View {
         UserDefaults.standard.set(worktrees, forKey: Prefs.autopilotWorktrees)
         var run = JiraRun(project: request.project, keys: queue.map(\.key), epicKey: request.epic?.key,
                           label: request.epic.map { "\($0.key) \($0.summary)" } ?? "issues you picked",
-                          sessionsAtOnce: sessions, worktreesAtMost: worktrees, permissionMode: mode, profile: profile, branchPattern: pattern)
+                          sessionsAtOnce: sessions, worktreesAtMost: worktrees, permissionMode: mode, profile: account.accountName, branchPattern: pattern)
         run.leftOut = split.left.map { ($0.0.key, $0.1) }
-        run.autoAccount = !profileChosen
+        run.autoAccount = account == .automatic
         model.startJiraRun(run)
         dismiss()
     }

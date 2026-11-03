@@ -9,9 +9,7 @@ struct AutopilotSheet: View {
 
     @State private var finish = Autopilot.Finish.pullRequest
     @State private var mode = PermissionMode.auto.rawValue
-    @State private var profile: String?
-    /// The account was picked here; until then each session starts on the least-used one when it starts.
-    @State private var profileChosen = false
+    @State private var account = AccountSelection.automatic
     @State private var sessions = Prefs.int(Prefs.autopilotSessions)
     @State private var worktrees = Prefs.int(Prefs.autopilotWorktrees)
     /// Nil while it is read.
@@ -79,10 +77,9 @@ struct AutopilotSheet: View {
                         ForEach(Self.modes, id: \.self) { Text($0.label).tag($0.rawValue) }
                     }
                     note(modeNote)
-                    AccountPicker(selection: Binding(get: { profile }, set: { profile = $0; profileChosen = true }),
-                                  best: model.bestAccount(for: request.project))
-                    note(profileChosen ? "Every session runs on this account."
-                         : "Each session starts on the least-used account when it starts, and moves to another when that runs low.")
+                    AccountPicker(selection: $account)
+                    note(account == .automatic ? "Each session starts on the account with the most room, and moves only when that one runs out."
+                         : "Every session runs on this " + (account == .plain ? "login." : "account."))
                     Stepper("Sessions at once: \(sessions)", value: $sessions, in: 1...Autopilot.maxSessions)
                     note(sessions == 1 ? "One issue at a time." : "\(sessions) issues at a time, each in its own session and worktree. Each costs usage, and each runs the project's checks.")
                     Stepper("Worktrees at most: \(worktrees)", value: $worktrees, in: max(sessions, 1)...32)
@@ -155,7 +152,6 @@ struct AutopilotSheet: View {
     }
 
     private func load() async {
-        profile = model.bestAccount(for: request.project)
         let project = request.project
         let (found, key) = await Task.detached { () -> (Repo, String?) in
             guard let root = Worktree.repoRoot(project) else { return (Repo(), nil) }
@@ -174,9 +170,9 @@ struct AutopilotSheet: View {
         UserDefaults.standard.set(sessions, forKey: Prefs.autopilotSessions)
         UserDefaults.standard.set(worktrees, forKey: Prefs.autopilotWorktrees)
         var pilot = Autopilot(project: request.project, issues: issues.map(\.id), finish: finish, target: repo.current,
-                              permissionMode: mode, profile: profile, branchPattern: repo.pattern,
+                              permissionMode: mode, profile: account.accountName, branchPattern: repo.pattern,
                               sessionsAtOnce: sessions, worktreesAtMost: worktrees)
-        pilot.autoAccount = !profileChosen
+        pilot.autoAccount = account == .automatic
         model.startAutopilot(pilot)
         dismiss()
     }
