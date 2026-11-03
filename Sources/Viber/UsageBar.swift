@@ -1,16 +1,16 @@
 import SwiftUI
 import ViberCore
 
-/// The toolbar's account button: usage for the selected chat's account (else the one a new chat in the selected project
-/// would start on), with every account in a popover, where accounts are added and the chat's account is switched.
+/// The toolbar's account button: usage for the selected chat's account (else the one a new chat would start on), with
+/// every account in a popover, where accounts are added. A chat switches account in its header.
 struct UsageBar: View {
     @Environment(AppModel.self) private var model
     @State private var showing = false
 
     /// The chat's account; nil when the chat uses the plain `claude` login, which Viber has no usage for.
     private var active: AccountStatus? { model.shownProfileName.flatMap { model.status(of: $0) } }
-    /// The selected chat, or a new chat in the selected project, uses the plain `claude` login.
-    private var plain: Bool { model.shownProfileName == nil && (model.selectedPane != nil || model.selectedProject != nil) }
+    /// The selected chat, or a new chat, uses the plain `claude` login.
+    private var plain: Bool { model.shownProfileName == nil }
     private var brokenCount: Int { model.accounts.filter { $0.loginProblem != nil }.count }
 
     var body: some View {
@@ -37,7 +37,7 @@ struct UsageBar: View {
                         }
                     }
                 }
-            } else if plain || model.shownProfileName == nil {
+            } else if plain {
                 StatusDot(color: .secondary)
                 Text(model.accounts.isEmpty ? "Add an account" : "Default login").font(.callout.weight(.medium))
             } else {
@@ -57,8 +57,8 @@ struct UsageBar: View {
     }
 
     private var helpText: String {
-        let subject = model.selectedPane != nil ? "This chat's account. Click to switch it"
-            : model.selectedProject.map { "The account a new chat in \(model.projectName($0)) starts on" } ?? "Accounts"
+        let subject = model.selectedPane != nil ? "This chat's account. Switch it in the chat's header"
+            : "The account a new chat starts on"
         if brokenCount == 1 { return "\(subject). One account needs you to log in again" }
         if brokenCount > 1 { return "\(subject). \(brokenCount) accounts need you to log in again" }
         if active == nil, plain {
@@ -123,8 +123,8 @@ enum UsageWindows {
     }
 }
 
-/// Every account: usage, reset times, logging in, and whether new chats are picked onto it. With a chat selected, its
-/// account, to switch; with a project, the accounts its new chats may start on.
+/// Every account: usage, reset times, the chats that used it this 5-hour window, logging in, and whether Automatic
+/// picks it.
 private struct AccountsPopover: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
@@ -133,20 +133,6 @@ private struct AccountsPopover: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text("Accounts").font(.headline).padding([.horizontal, .top], 14).padding(.bottom, 8)
-            if let pane = model.selectedPane {
-                ChatAccount(pane: pane)
-                    .font(.callout)
-                    .padding(.horizontal, 14).padding(.bottom, 10)
-                Divider()
-            } else if let project = model.selectedProject {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("New chats in \(model.projectName(project)) start on the least used of").lineLimit(2)
-                    ProjectAutomaticAccounts(project: project).font(.caption)
-                }
-                .font(.callout)
-                .padding(.horizontal, 14).padding(.bottom, 10)
-                Divider()
-            }
             if model.accounts.isEmpty && !adding {
                 Text("No accounts yet. Add each Claude account once; Viber keeps it signed in.")
                     .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
@@ -155,8 +141,8 @@ private struct AccountsPopover: View {
             ForEach(Array(model.accounts.enumerated()), id: \.element.id) { index, account in
                 if index > 0 { Divider().padding(.horizontal, 14) }
                 AccountRow(account: account, active: account.name == model.shownProfileName,
-                           badge: account.name == model.shownProfileName && model.selectedPane != nil ? "This chat"
-                               : account.name == model.shownProfileName && model.selectedProject != nil ? "Next chat" : nil,
+                           badge: account.name != model.shownProfileName ? nil : model.selectedPane != nil ? "This chat" : "Next chat",
+                           chats: model.chatsInWindow(of: account).map { ($0.pane.id, $0.pane.title, $0.tokens) },
                            loggingIn: model.loggingIn.contains(account.name), now: model.now)
             }
             Divider()
@@ -179,30 +165,6 @@ private struct AccountsPopover: View {
         let seconds = model.now.timeIntervalSince(date)
         if seconds < 60 { return "Updated just now" }
         return "Updated " + RelativeDateTimeFormatter().localizedString(for: date, relativeTo: model.now)
-    }
-}
-
-/// The selected chat's account, to switch it, and whether Viber may move it to the least-used account when this one
-/// runs low.
-private struct ChatAccount: View {
-    @Environment(AppModel.self) private var model
-    let pane: Pane
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Text("This chat runs on").lineLimit(1).layoutPriority(1)
-                AccountPicker(selection: Binding(get: { pane.spec.profile }, set: { model.setAccount($0, for: pane) }),
-                              best: model.bestAccount(for: pane.projectPath))
-                    .labelsHidden()
-            }
-            Toggle("Move it to the least-used account when this one runs low",
-                   isOn: Binding(get: { pane.spec.autoAccount == true }, set: { model.setAutoAccount($0, for: pane) }))
-                .toggleStyle(.checkbox)
-                .font(.caption)
-            Text("Switching restarts Claude on the other account and keeps the conversation; a busy chat moves once it's done. Its next message reads the conversation again, uncached.")
-                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-        }
     }
 }
 
@@ -244,6 +206,8 @@ private struct AccountRow: View {
     let account: AccountStatus
     let active: Bool
     let badge: String?
+    /// Open chats that used it in its current 5-hour window, with their tokens there.
+    let chats: [(id: String, title: String, tokens: Int)]
     let loggingIn: Bool
     let now: Date
     @State private var confirmingRemove = false
@@ -283,6 +247,20 @@ private struct AccountRow: View {
                             WindowRow(window: window, now: now)
                         }
                     }
+                }
+                if !chats.isEmpty {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Chats this 5-hour window").foregroundStyle(.secondary)
+                        ForEach(chats, id: \.id) { chat in
+                            HStack {
+                                Text(chat.title).lineLimit(1).truncationMode(.tail)
+                                Spacer()
+                                Text(AppModel.compact(chat.tokens)).monospacedDigit().foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .font(.caption)
+                    .help("Input, output and cache writes each chat used here since the window started, subagents included")
                 }
             }
             .padding(.leading, 18)

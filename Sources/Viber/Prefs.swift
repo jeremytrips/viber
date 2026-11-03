@@ -33,8 +33,6 @@ enum Prefs {
 
     /// New worktrees' branch patterns, by the repository's main checkout. A missing one is Worktree.defaultBranchPattern.
     static let branchPatterns = "branchPatterns"
-    /// Accounts new chats in a project don't pick, by project.
-    static let projectExcludedAccounts = "projectExcludedAccounts"
 
     static func register() {
         UserDefaults.standard.register(defaults: [

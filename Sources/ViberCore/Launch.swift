@@ -13,8 +13,8 @@ public struct LaunchSpec: Codable, Equatable {
     public var readOnly: Bool?
     /// Added to the end of Claude Code's system prompt.
     public var appendSystemPrompt: String?
-    /// Viber picked `profile` (the least-used account the project allows) rather than you: it may pick again at a
-    /// restart, and move the session to another account as this one runs out. Choosing one for the chat clears it.
+    /// The chat is on Automatic: Viber picked `profile`, the account with the most room, rather than you. It moves the
+    /// chat to another only when this one runs out. Choosing an account, or the plain login, clears it.
     public var autoAccount: Bool?
 
     public init(profile: String?, cwd: String, resume: String? = nil, permissionMode: String? = nil,
@@ -23,6 +23,8 @@ public struct LaunchSpec: Codable, Equatable {
         self.permissionMode = permissionMode; self.model = model; self.pluginDir = pluginDir
         self.readOnly = readOnly; self.appendSystemPrompt = appendSystemPrompt
     }
+
+    public var accountSelection: AccountSelection { AccountSelection(profile: profile, automatic: autoAccount == true) }
 
     /// The `claude` arguments for a headless session that speaks the Agent SDK protocol on stdio.
     /// Replayed user messages carry the IDs that rewinding files needs; summarized thinking gives thinking blocks text to show.
@@ -209,8 +211,10 @@ public enum ViberPaths {
     public static var notes: URL { support.appendingPathComponent("notes.json") }
     /// The accounts Viber signs in to.
     public static var accounts: URL { support.appendingPathComponent("accounts.json") }
-    /// The account Viber last ran each session on, by session ID.
+    /// The account Viber last ran each session on, by session ID, before session-account-log.json replaced it.
     public static var sessionAccounts: URL { support.appendingPathComponent("session-accounts.json") }
+    /// Which account ran each session from when (SessionAccountLog).
+    public static var sessionAccountLog: URL { support.appendingPathComponent("session-account-log.json") }
     /// Where the CLI stores a session's transcript.
     public static func transcript(sessionID: String, cwd: String) -> URL {
         let slug = cwd.map { $0.isLetter || $0.isNumber ? $0 : "-" }

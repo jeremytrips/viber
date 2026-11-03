@@ -36,37 +36,50 @@ final class AccountTests: XCTestCase {
 
     // MARK: Picking
 
-    private func account(_ name: String, five: Double, week: Double, problem: String? = nil,
-                         weekResets: Date? = nil, fiveResets: Date? = nil) -> AccountStatus {
-        AccountStatus(name: name, loginProblem: problem, windows: [
+    private func account(_ name: String, five: Double, week: Double, tier: String? = nil, automatic: Bool = true,
+                         problem: String? = nil, weekResets: Date? = nil, fiveResets: Date? = nil) -> AccountStatus {
+        AccountStatus(name: name, automatic: automatic, tier: tier, loginProblem: problem, windows: [
             UsageWindow(label: "5h", utilizationPct: five, resetsAt: fiveResets),
             UsageWindow(label: "7d", utilizationPct: week, resetsAt: weekResets)])
     }
 
+    func testPlansWeighTheirRoom() {
+        XCTAssertEqual(AccountChoice.weight(account("a", five: 0, week: 0, tier: "Max 5x")), 1)
+        XCTAssertEqual(AccountChoice.weight(account("a", five: 0, week: 0, tier: "Max 20x")), 4)
+        XCTAssertEqual(AccountChoice.weight(account("a", five: 0, week: 0, tier: "Pro")), 0.2)
+        XCTAssertEqual(AccountChoice.weight(account("a", five: 0, week: 0)), 1, "an unknown plan counts as Max 5x")
+        XCTAssertEqual(AccountChoice.score(account("a", five: 30, week: 60, tier: "Max 20x")), 160, "the fuller window counts")
+    }
+
     /// As the accounts stood on 2026-10-28: creator's 5 hours spent, creator3's week spent, Private outside Automatic.
-    func testTheLeastUsedAccountWithRoomWins() {
-        let accounts = [account("Private", five: 0, week: 10), account("creator", five: 100, week: 42),
+    func testTheAccountWithTheMostRoomWins() {
+        let accounts = [account("Private", five: 0, week: 10, automatic: false), account("creator", five: 100, week: 42),
                         account("creator1", five: 0, week: 44), account("creator3", five: 0, week: 100)]
-        let allowed: Set = ["creator", "creator1", "creator3"]
-        XCTAssertEqual(AccountChoice.pick(from: accounts, allowed: allowed), "creator1")
-        XCTAssertNil(AccountChoice.pick(from: accounts, allowed: []), "a project that allows nothing gets nothing")
+        XCTAssertEqual(AccountChoice.pick(from: accounts), "creator1")
+        XCTAssertNil(AccountChoice.pick(from: accounts.filter { !$0.automatic }), "only Automatic's accounts are picked")
     }
 
-    func testSessionsStartedTogetherSpreadOverAccountsAboutAsUsed() {
+    func testABiggerPlanWinsWithLessOfItLeft() {
+        let accounts = [account("five", five: 0, week: 10, tier: "Max 5x"), account("twenty", five: 20, week: 70, tier: "Max 20x")]
+        XCTAssertEqual(AccountChoice.pick(from: accounts), "twenty", "30% of 20x is more than 90% of 5x")
+        let spent = [account("five", five: 0, week: 10, tier: "Max 5x"), account("twenty", five: 85, week: 70, tier: "Max 20x")]
+        XCTAssertEqual(AccountChoice.pick(from: spent), "five", "15% of 20x is less than 90% of 5x")
+    }
+
+    func testChatsStartedTogetherSpreadOverAccountsAboutAsRoomy() {
         let accounts = [account("a", five: 20, week: 10), account("b", five: 5, week: 15), account("c", five: 0, week: 40)]
-        let allowed: Set = ["a", "b", "c"]
-        XCTAssertEqual(AccountChoice.pick(from: accounts, allowed: allowed), "b", "a and b are tied on the week; b's 5 hours are emptier")
-        XCTAssertEqual(AccountChoice.pick(from: accounts, allowed: allowed, running: ["b": 1]), "a")
-        XCTAssertEqual(AccountChoice.pick(from: accounts, allowed: allowed, running: ["a": 1, "b": 1]), "b")
-        XCTAssertEqual(AccountChoice.pick(from: accounts, allowed: allowed, running: ["a": 3, "b": 3]), "b",
-                       "c's week is far more used, so the least-used rule still keeps it out")
+        XCTAssertEqual(AccountChoice.pick(from: accounts), "b", "a and b are within 10%; b has more room")
+        XCTAssertEqual(AccountChoice.pick(from: accounts, running: ["b": 1]), "a")
+        XCTAssertEqual(AccountChoice.pick(from: accounts, running: ["a": 1, "b": 1]), "b")
+        XCTAssertEqual(AccountChoice.pick(from: accounts, running: ["a": 3, "b": 3]), "b",
+                       "c has far less room, so the spreading still keeps it out")
     }
 
-    func testExcludedBrokenAndLimitedAccountsAreLeftOut() {
-        let accounts = [account("a", five: 0, week: 10), account("b", five: 0, week: 12, problem: "Login expired"),
-                        account("c", five: 0, week: 14), account("d", five: 0, week: 16)]
-        XCTAssertEqual(AccountChoice.pick(from: accounts, allowed: ["b", "c", "d"]), "c", "a is left out of the project, b can't log in")
-        XCTAssertEqual(AccountChoice.pick(from: accounts, allowed: ["c", "d"], limited: ["c"]), "d", "c turned a session away")
+    func testBrokenAndLimitedAccountsAreLeftOut() {
+        let accounts = [account("b", five: 0, week: 12, problem: "Login expired"), account("c", five: 0, week: 14),
+                        account("d", five: 0, week: 16)]
+        XCTAssertEqual(AccountChoice.pick(from: accounts), "c", "b can't log in")
+        XCTAssertEqual(AccountChoice.pick(from: accounts, limited: ["c"]), "d", "c turned a session away")
     }
 
     func testWithNoRoomTheFirstToFreeUpWinsAndAMoveFindsNothing() {
@@ -74,10 +87,15 @@ final class AccountTests: XCTestCase {
         let accounts = [account("a", five: 95, week: 50, fiveResets: now.addingTimeInterval(3600)),
                         account("b", five: 10, week: 99, weekResets: now.addingTimeInterval(86400)),
                         account("c", five: 100, week: 20, fiveResets: now.addingTimeInterval(600))]
-        XCTAssertEqual(AccountChoice.pick(from: accounts, allowed: ["a", "b", "c"], now: now), "c")
-        XCTAssertNil(AccountChoice.pick(from: accounts, allowed: ["a", "b", "c"], avoiding: "c", now: now),
-                     "moving only makes sense to an account with room")
-        XCTAssertEqual(AccountChoice.pick(from: [account("a", five: 0, week: 0)], allowed: ["a"], avoiding: "a"), nil)
+        XCTAssertEqual(AccountChoice.pick(from: accounts, now: now), "c")
+        XCTAssertNil(AccountChoice.pick(from: accounts, avoiding: "c", now: now), "moving only makes sense to an account with room")
+        XCTAssertEqual(AccountChoice.pick(from: [account("a", five: 0, week: 0)], avoiding: "a"), nil)
+    }
+
+    func testSelectionsComeFromTheSpec() {
+        XCTAssertEqual(AccountSelection(profile: "creator1", automatic: true), .automatic)
+        XCTAssertEqual(AccountSelection(profile: "creator1", automatic: false), .account("creator1"))
+        XCTAssertEqual(AccountSelection(profile: nil, automatic: false), .plain)
     }
 
     // MARK: Usage

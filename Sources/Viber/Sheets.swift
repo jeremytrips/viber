@@ -4,25 +4,27 @@ import ViberCore
 
 // MARK: - Shared pieces
 
-/// Account choice: nil is the plain `claude` login, otherwise an account's name. `best`, the one Viber would pick, is
-/// marked as the least used.
+/// What a chat runs on: Automatic, named with the account it would start on now, an account, or the plain `claude` login.
 struct AccountPicker: View {
     @Environment(AppModel.self) private var model
-    @Binding var selection: String?
+    @Binding var selection: AccountSelection
     var label = "Account"
-    var best: String? = nil
 
     var body: some View {
         Picker(label, selection: $selection) {
-            Text("Default login (plain claude)").tag(String?.none)
+            Text(Self.automaticTitle(model.bestAccount())).tag(AccountSelection.automatic)
             if !model.accounts.isEmpty { Divider() }
             ForEach(model.accounts) { account in
-                Text(Self.title(for: account) + (account.name == best ? " — least used" : ""))
-                    .tag(String?.some(account.name))
+                Text(Self.title(for: account))
+                    .tag(AccountSelection.account(account.name))
                     .disabled(account.loginProblem != nil)
             }
+            Divider()
+            Text("Plain claude login").tag(AccountSelection.plain)
         }
     }
+
+    static func automaticTitle(_ best: String?) -> String { "Automatic" + (best.map { " (now \($0))" } ?? "") }
 
     static func title(for account: AccountStatus) -> String {
         var text = account.name.capitalized
@@ -30,29 +32,13 @@ struct AccountPicker: View {
         if let problem = account.loginProblem { text += " — \(problem)" }
         return text
     }
-}
 
-/// The accounts new chats in a project may start on: a tick for each account Viber picks from.
-struct ProjectAutomaticAccounts: View {
-    @Environment(AppModel.self) private var model
-    let project: String
-
-    var body: some View {
-        let automatic = model.accounts.filter(\.automatic)
-        if automatic.isEmpty {
-            Text("No account is picked for new chats. Add one, or turn on Picked for New Chats for one, under the account button in the toolbar.")
-                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-        } else {
-            VStack(alignment: .leading, spacing: 4) {
-                ForEach(automatic) { status in
-                    Toggle(isOn: Binding(get: { !model.isExcluded(status.name, in: project) },
-                                         set: { model.setExcluded(status.name, !$0, in: project) })) {
-                        Text(status.name) + Text(status.email.map { "  \($0)" } ?? "").foregroundStyle(.secondary)
-                    }
-                    .toggleStyle(.checkbox)
-                }
-            }
-            .help("Accounts new chats in \(model.projectName(project)) may start on. Untick one to keep new chats off it.")
+    /// What a picker's choice means for the chats it starts.
+    static func note(_ selection: AccountSelection) -> String {
+        switch selection {
+        case .automatic: return "Starts on the account with the most room, and moves only when that one runs out."
+        case .account: return "Stays on this account."
+        case .plain: return "Runs on the login in ~/.claude, which Viber has no usage for, and stays there."
         }
     }
 }
@@ -101,10 +87,7 @@ struct NewSessionSheet: View {
     @State private var folder = ""
     /// The project `folder` belongs to, once looked up.
     @State private var projectRoot: String?
-    @State private var profile: String?
-    /// The account was picked here: the chat stays on it. Until then it is the least-used one the project allows, and
-    /// the chat moves when that runs low.
-    @State private var profileChosen = false
+    @State private var account = AccountSelection.automatic
     @State private var useWorktree = false
     @State private var repoRoot: String?
     @State private var creatingRepo = false
@@ -180,10 +163,8 @@ struct NewSessionSheet: View {
                                 .help("A folder or git repository. A new one is added to the sidebar's projects.")
                         }
                     }
-                    AccountPicker(selection: Binding(get: { profile }, set: { profile = $0; profileChosen = true }),
-                                  best: projectRoot.flatMap { model.bestAccount(for: $0) })
-                        .help(profileChosen ? "The chat stays on this account"
-                              : "The least-used account this project allows. The chat moves to another when it runs low.")
+                    AccountPicker(selection: $account)
+                        .help(AccountPicker.note(account))
                 }
 
                 Section {
@@ -405,8 +386,7 @@ struct NewSessionSheet: View {
         if let prefill = model.newSessionPrefill {
             model.newSessionPrefill = nil
             folder = prefill.folder
-            profile = prefill.profile
-            profileChosen = !prefill.autoAccount
+            account = prefill.account
             name = prefill.name
             permissionMode = prefill.permissionMode
             firstMessage = prefill.firstMessage
@@ -417,15 +397,9 @@ struct NewSessionSheet: View {
             let asked = model.newSessionFolder ?? ""
             model.newSessionFolder = nil
             folder = !asked.isEmpty ? asked : model.selectedProject ?? model.sidebarProjects.first?.path ?? model.recentFolders.first ?? ""
-            if !folder.isEmpty { followAccount(of: ProjectRoot.resolve(folder)) }
             permissionMode = Prefs.string(Prefs.newSessionMode)
         }
         branch = defaultBranch
-    }
-
-    /// The least-used account the project allows, until one is picked here.
-    private func followAccount(of project: String) {
-        if !profileChosen { profile = model.bestAccount(for: project) }
     }
 
     /// The worktree row's subtitle, or the error from creating a repository.
@@ -449,7 +423,6 @@ struct NewSessionSheet: View {
         guard !Task.isCancelled, dir == folder else { return }
         repoRoot = root
         projectRoot = home
-        followAccount(of: home)
         maker = found
         if project != patternProject {
             patternProject = project
@@ -496,8 +469,7 @@ struct NewSessionSheet: View {
         guard !folder.isEmpty else { return }
         model.createSession(NewSessionRequest(
             folder: folder,
-            profile: profile,
-            autoAccount: !profileChosen,
+            account: account,
             useWorktree: useWorktree && repoRoot != nil,
             name: name.trimmingCharacters(in: .whitespacesAndNewlines),
             branch: useWorktree ? chosenBranch : nil,
@@ -568,9 +540,7 @@ struct ResumeSheet: View {
 
     @State private var query = ""
     @State private var selected: String?
-    @State private var profile: String?
-    /// The account was picked here; until then it is the least-used one the session's project allows.
-    @State private var profileChosen = false
+    @State private var account = AccountSelection.automatic
 
     private var sessions: [SessionSummary] {
         let sorted = model.recent.sorted { ($0.updatedDate ?? .distantPast) > ($1.updatedDate ?? .distantPast) }
@@ -619,8 +589,9 @@ struct ResumeSheet: View {
 
             Divider()
             HStack {
-                AccountPicker(selection: Binding(get: { profile }, set: { profile = $0; profileChosen = true }), best: best)
+                AccountPicker(selection: $account)
                     .frame(maxWidth: 300)
+                    .help(AccountPicker.note(account))
                 Spacer()
                 Button("Cancel", role: .cancel) { dismiss() }
                     .keyboardShortcut(.cancelAction)
@@ -631,25 +602,12 @@ struct ResumeSheet: View {
             .padding(16)
         }
         .frame(width: 620, height: 520)
-        .onAppear {
-            model.reloadRecent()
-            profile = best
-        }
-        // The chosen session's project decides, as for a new chat there.
-        .onChange(of: selected) { if !profileChosen { profile = best } }
-    }
-
-    /// The least-used account the selected session's project allows, else among every account Viber picks from.
-    private var best: String? {
-        guard let folder = model.recent.first(where: { $0.id == selected })?.workspace else {
-            return model.pickAutomatic(allowed: Set(model.accounts.filter(\.automatic).map(\.name)))
-        }
-        return model.bestAccount(for: model.recentRoots[folder] ?? ProjectRoot.resolve(folder))
+        .onAppear { model.reloadRecent() }
     }
 
     private func resume(_ id: String) {
         guard let session = model.recent.first(where: { $0.id == id }) else { return }
-        model.resume(session, profile: profile, autoAccount: !profileChosen)
+        model.resume(session, account: account)
         dismiss()
     }
 }
