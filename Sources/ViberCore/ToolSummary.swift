@@ -20,8 +20,9 @@ public enum ToolSummary {
             var parts: [String] = []
             if let appearance = input["appearance"]?.string { parts.append(appearance) }
             if let latitude = input["latitude"]?.double, let longitude = input["longitude"]?.double { parts.append("\(latitude), \(longitude)") }
-            if let grant = input["grant"]?.array?.compactMap(\.string) ?? input["grant"]?.string.map({ [$0] }), !grant.isEmpty {
-                parts.append(grant.joined(separator: ", "))
+            for change in PermissionChange.allCases {
+                guard let names = input[change.rawValue]?.array?.compactMap(\.string) ?? input[change.rawValue]?.string.map({ [$0] }), !names.isEmpty else { continue }
+                parts.append((change == .grant ? "" : "\(change.rawValue) ") + names.joined(separator: ", "))
             }
             if let bar = input["status_bar"]?.string { parts.append("\(bar) status bar") }
             return parts.joined(separator: " · ")
