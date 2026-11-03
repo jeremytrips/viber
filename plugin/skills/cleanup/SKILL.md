@@ -33,7 +33,17 @@ Show a short checklist, one line each, with the evidence:
 - [x] or [ ] No unpushed commits
 - [x] or [ ] No stashes
 
-## 3. Act
+## 3. Update the project tracker
+
+Skip this if the branch is not merged.
+
+Many projects have no tracker. Look for a ticket reference in the branch name, the PR title or body, or the commit messages (for example `PROJ-123`, `ENG-42` or `#42`, but not the PR's own number). If there is none, skip this step without comment and do not ask the user about one.
+
+If there is a ticket in Jira, Linear, GitHub Issues or another project management tool, update it so it matches what was merged. If a tool for it is connected (an MCP server or `gh`), move the ticket to done or the project's next state, and add a short comment that links the PR and says what changed. If the work only covered part of the ticket, say what is left instead of closing it. If no tool is connected, tell the user which ticket to update and what to put in it.
+
+When there was a ticket, add one line to the report: what you updated, or what the user still has to update.
+
+## 4. Act
 
 **Not clean:** list exactly what blocks cleanup (files, commits, stashes, unmerged PR) and stop. Do not offer to discard anything.
 

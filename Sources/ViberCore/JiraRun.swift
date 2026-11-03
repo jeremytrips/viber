@@ -24,6 +24,9 @@ public struct JiraRun: Equatable, Sendable {
     public var worktreesAtMost: Int
     public var permissionMode: String
     public var profile: String?
+    /// Each session starts on the least-used account the project allows when it starts, not on `profile`, and moves
+    /// when that one runs low: the account was left as Viber picked it.
+    public var autoAccount = false
     public var branchPattern: String
     /// Keys still to do, in order.
     public private(set) var queue: [String]

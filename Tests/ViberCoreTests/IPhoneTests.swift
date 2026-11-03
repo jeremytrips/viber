@@ -189,31 +189,26 @@ final class AppConsoleTests: XCTestCase {
 final class PhoneToolboxTests: XCTestCase {
     final class PhoneHost: DeviceHost {
         let phone = DeviceInfo(id: "E3F4", name: "iPhone (2)", platform: .ios, kind: .physical, os: "iOS 18.7.8", state: .booted, wireless: true)
-        lazy var driver: FakeDevice = {
-            let driver = FakeDevice(phone)
-            driver.canInteract = false
-            return driver
-        }()
+        lazy var driver = FakeDevice(phone)
         var sessionDeviceID: String? = "E3F4"
         func listDevices() async throws -> [DeviceInfo] { [phone] }
         func use(_ device: DeviceInfo, reveal: Bool) throws -> DeviceDriver { driver }
     }
 
-    func testPhonesRefuseInputButLaunchAndLook() async throws {
+    func testPhonesTakeInputLikeSimulators() async throws {
         let host = PhoneHost()
-        for tool in ["device_snapshot", "device_tap", "device_swipe", "device_type", "device_press", "device_wait"] {
-            let result = await DeviceToolbox.call(tool, ["x": 1, "y": 1, "text": "a", "button": "home", "direction": "up"], host: host)
-            XCTAssertTrue(result.isError, tool)
-            XCTAssertTrue(result.text.contains("physical iPhone"), result.text)
-        }
-        XCTAssertTrue(host.driver.gestures.isEmpty && host.driver.typed.isEmpty && host.driver.pressed.isEmpty)
+        let tap = await DeviceToolbox.call("device_tap", ["text": "General"], host: host)
+        XCTAssertFalse(tap.isError, tap.text)
+        XCTAssertEqual(host.driver.gestures.count, 1)
+        let typed = await DeviceToolbox.call("device_type", ["text": "hi", "clear": true], host: host)
+        XCTAssertFalse(typed.isError, typed.text)
+        XCTAssertEqual(host.driver.typed, ["hi"])
+        XCTAssertEqual(host.driver.keys, [.selectAll, .delete])
         host.driver.tree = UITree(root: UIElement(role: "Application", label: "SpringBoard", frame: .zero))
-        let started = Date()
         let launch = await DeviceToolbox.call("device_launch", ["app_id": "com.example.app"], host: host)
-        XCTAssertEqual(launch.text, "Launched com.example.app.\nDevice: iPhone (2) · iOS 18.7.8")
-        XCTAssertLessThan(Date().timeIntervalSince(started), 2, "no waiting for a screen it can't read")
+        XCTAssertTrue(launch.text.hasPrefix("Launched com.example.app"), launch.text)
         let shot = await DeviceToolbox.call("device_screenshot", [:], host: host)
-        XCTAssertEqual(shot.text, "Screenshot of iPhone (2) · iOS 18.7.8 (402×874 points).")
+        XCTAssertEqual(shot.text, "Screenshot of iPhone (2) · iOS 18.7.8 (402×874 points; use these pixel coordinates as x and y).")
         let list = await DeviceToolbox.call("device_list", [:], host: host)
         XCTAssertEqual(list.text, "- iPhone (2) · iOS 18.7.8 · Wi-Fi · running · id E3F4 · this session's device")
         let dark = await DeviceToolbox.call("device_set", ["appearance": "dark"], host: host)

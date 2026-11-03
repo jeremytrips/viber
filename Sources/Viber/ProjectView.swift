@@ -323,17 +323,10 @@ struct ProjectView: View {
         let jira = model.trackers.tracker(for: path) != nil
         return PageSection(title: "Settings") {
             PageCard {
-                SettingRow(label: "Account",
-                           note: "The Claude login new sessions here start with, autopilot runs too. Automatic starts each on the least-used account it may use here. Changing it offers to move the open sessions."
+                SettingRow(label: "New chats pick from",
+                           note: "Each new chat here, autopilot sessions too, starts on the least-used of these accounts. Choose another in New Session, or switch a chat under the toolbar's account button. Unticking one keeps new chats off it; chats on it stay."
                                + (jira ? " Jira's skills need the account to have the Atlassian connector." : "")) {
-                    ProjectAccountPicker(project: path).labelsHidden().fixedSize()
-                }
-                if model.account(of: path) == .automatic {
-                    Divider()
-                    SettingRow(label: "Automatic uses",
-                               note: "Untick an account to keep this project's sessions off it. Sessions on it are offered a move.") {
-                        ProjectAutomaticAccounts(project: path)
-                    }
+                    ProjectAutomaticAccounts(project: path)
                 }
                 Divider()
                 TrackerSettingsRows(project: path)
@@ -589,7 +582,7 @@ private struct EarlierSessionRow: View {
             }
             Spacer(minLength: 8)
             if let profile = session.lastRanProfile, !profile.isEmpty { Chip(text: profile) }
-            Button("Resume") { model.resume(session, profile: profile) }
+            Button("Resume") { model.resume(session, profile: profile, autoAccount: true) }
                 .controlSize(.small)
                 .disabled(!exists)
                 .help(exists ? "Open this conversation again" : "Its folder is gone, probably a removed worktree")
@@ -597,8 +590,8 @@ private struct EarlierSessionRow: View {
         .padding(.horizontal, 12).padding(.vertical, 8)
     }
 
-    /// The account a new session in the project would start on.
-    private var profile: String? { model.launchProfile(for: project) }
+    /// The account a new chat in the project would start on.
+    private var profile: String? { model.bestAccount(for: project) }
 }
 
 private struct WorktreeEntryRow: View {

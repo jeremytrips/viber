@@ -8,7 +8,7 @@ public struct Account: Codable, Equatable, Identifiable, Sendable {
     public var name: String
     /// The address the login belongs to, as `claude auth status` reported it after signing in.
     public var email: String?
-    /// Whether projects on Automatic may start sessions on it. Off for a personal account.
+    /// Whether Viber may pick it for a new chat, or move a chat to it. Off for a personal account, used only when chosen.
     public var automatic: Bool
     public var id: String { name }
 
@@ -321,6 +321,60 @@ public enum Keychain {
     }
 }
 
+// MARK: - MCP sign-ins
+
+/// The CLI keeps MCP servers' sign-ins (`mcpOAuth`, one per server name and config) in the same Keychain item as the
+/// Claude login, so each account would sign in to Atlassian or PostHog on its own, and a session that lands on another
+/// account would ask again. They are the user's, not the account's: every item gets the newest of each. Signing out of
+/// a server on one account doesn't reach the others; it comes back from them.
+public enum MCPSignIns {
+    /// The item the CLI keeps the plain login in ~/.claude in.
+    public static let defaultService = "Claude Code-credentials"
+
+    /// The plain login's item and every account's.
+    public static func services(_ accounts: [Account]) -> [String] {
+        [defaultService] + accounts.map { Accounts.keychainService($0.name) }
+    }
+
+    public static func entries(in stored: Data) -> [String: Any] {
+        ((try? JSONSerialization.jsonObject(with: stored) as? [String: Any])?["mcpOAuth"] as? [String: Any]) ?? [:]
+    }
+
+    /// `own` with each sign-in of `others` it lacks, or that expires later than its copy: a server whose refresh token
+    /// turns over (Atlassian's does) leaves the older copies signed out, so the latest wins. A tie keeps its own.
+    public static func merged(own: [String: Any], others: [[String: Any]]) -> [String: Any] {
+        var merged = own
+        for other in others {
+            for (key, entry) in other where merged[key] == nil || expiry(entry) > expiry(merged[key]) { merged[key] = entry }
+        }
+        return merged
+    }
+
+    private static func expiry(_ entry: Any?) -> Double { ((entry as? [String: Any])?["expiresAt"] as? NSNumber)?.doubleValue ?? 0 }
+
+    /// The stored item with these MCP sign-ins, keeping the login.
+    public static func replacing(_ stored: Data, with entries: [String: Any]) -> Data? {
+        guard var object = try? JSONSerialization.jsonObject(with: stored) as? [String: Any] else { return nil }
+        object["mcpOAuth"] = entries
+        return try? JSONSerialization.data(withJSONObject: object)
+    }
+
+    /// Gives each signed-in item of `targets` (all of `services` by default) the newest of every MCP sign-in in
+    /// `services`. An item the CLI wrote since it was read is left for the next time rather than undo what it wrote.
+    public static func share(among services: [String], into targets: [String]? = nil) {
+        var stored: [String: Data] = [:]
+        for service in Set(services + (targets ?? [])) { stored[service] = Keychain.read(service) }
+        let signIns = stored.mapValues(entries(in:))
+        for service in targets ?? services {
+            guard let data = stored[service], OAuthLogin(json: data) != nil, let own = signIns[service] else { continue }
+            let wanted = merged(own: own, others: signIns.filter { $0.key != service }.map(\.value))
+            guard !(wanted as NSDictionary).isEqual(to: own), Keychain.read(service) == data,
+                  let updated = replacing(data, with: wanted) else { continue }
+            Keychain.write(service, updated)
+        }
+    }
+}
+
 extension Data {
     init?(hex: String) {
         guard hex.count.isMultiple(of: 2), hex.allSatisfy(\.isHexDigit) else { return nil }
@@ -515,7 +569,7 @@ public enum AccountUsage {
 
 // MARK: - Automatic
 
-/// Which account a session on Automatic starts on, and where it moves when its account runs low.
+/// Which account a new chat starts on, and where a chat Viber picked the account for moves when it runs low.
 public enum AccountChoice {
     /// An account at or past these has no room for more work: its 5-hour window, or its week.
     public static let fiveHourLine = 90.0
@@ -555,33 +609,5 @@ public enum AccountChoice {
             return window.label == "5h" ? pct >= fiveHourLine : window.label == "7d" ? pct >= weekLine : false
         }
         return full.compactMap(\.resetsAt).max() ?? now
-    }
-}
-
-/// The login a project's sessions start with, chosen on its Settings tab or under the toolbar's account button.
-public enum ProjectAccount: Hashable, Sendable {
-    /// Viber picks an account for each session among those Automatic may use, less any the project leaves out, and
-    /// moves it to another as its account runs out.
-    case automatic
-    /// Plain `claude` with its own login in ~/.claude.
-    case plain
-    /// One account, by name.
-    case profile(String)
-
-    /// How Viber stores it: nil for Automatic, an empty string for plain `claude`, else the account's name.
-    public init(stored: String?) {
-        switch stored {
-        case .none: self = .automatic
-        case .some(let name) where name.isEmpty: self = .plain
-        case .some(let name): self = .profile(name)
-        }
-    }
-
-    public var stored: String? {
-        switch self {
-        case .automatic: return nil
-        case .plain: return ""
-        case .profile(let name): return name
-        }
     }
 }

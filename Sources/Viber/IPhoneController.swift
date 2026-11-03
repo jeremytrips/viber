@@ -5,8 +5,8 @@ import Observation
 import ViberCore
 
 /// A physical iPhone or iPad, on USB or Wi-Fi. devicectl installs and launches apps and keeps their console for the logs;
-/// over USB the live screen comes through AVFoundation, the way QuickTime records an iPhone. Nothing public sends touches
-/// to a phone or reads its screen's elements, so the panel only shows the screen, and the tools that need input say so.
+/// over USB the live screen comes through AVFoundation, the way QuickTime records an iPhone. Touches, keys, buttons and
+/// the screen's elements go through WebDriverAgent, an XCUITest runner Viber builds and starts on the phone on first use.
 @MainActor @Observable
 final class IPhoneController: DeviceController {
     private(set) var device: DeviceInfo
@@ -15,6 +15,8 @@ final class IPhoneController: DeviceController {
     private(set) var isStreaming = false
     private(set) var failure: String?
     private(set) var inputFailure: String?
+    /// What starting WebDriverAgent is doing.
+    private(set) var busyNote: String?
     var picking = false
     var activity: String?
 
@@ -36,13 +38,21 @@ final class IPhoneController: DeviceController {
     @ObservationIgnored private var lastApp: String?
     /// Apps installed from here, by bundle id: their URL schemes and executable names.
     @ObservationIgnored private var installed: [String: Devicectl.AppBundle] = [:]
+    /// WebDriverAgent's server on the phone once it answers, the xcodebuild run that keeps it up, and its start.
+    @ObservationIgnored private var agentClient: WebDriverAgentClient?
+    @ObservationIgnored private var agentRun: WebDriverAgentRun?
+    @ObservationIgnored private var agentStart: Task<WebDriverAgentClient, Error>?
+    /// The user's touches and keys, sent one after another.
+    @ObservationIgnored private var userInputs: Task<Void, Never>?
+    @ObservationIgnored private var touchStart: (ratio: CGPoint, at: Date)?
+    @ObservationIgnored private var touchLast = CGPoint.zero
+    @ObservationIgnored private var scrollStart: CGPoint?
+    @ObservationIgnored private var scrollDelta = CGSize.zero
 
     let booting = false
-    let busyNote: String? = nil
     let homeApp: String? = "SpringBoard"
-    let toolbarButtons: [DeviceButton] = []
+    let toolbarButtons: [DeviceButton] = [.home]
     let canPowerCycle = false
-    let canInteract = false
     let externalApp: String? = nil
 
     init(device: DeviceInfo) {
@@ -55,7 +65,10 @@ final class IPhoneController: DeviceController {
     func update(_ info: DeviceInfo) {
         let old = device
         device = info
-        if old.isBooted && !info.isBooted { stopStream() }
+        if old.isBooted && !info.isBooted {
+            stopStream()
+            stopAgent()
+        }
         // Plugged in: try the screen again. Unplugging ends the stream by itself, and devicectl sometimes says Wi-Fi
         // while the cable is in, so a running stream is left alone.
         let pluggedIn = old.wireless && !info.wireless
@@ -207,18 +220,109 @@ final class IPhoneController: DeviceController {
 
     // MARK: DeviceDriver
 
+    /// From the live screen, else (over Wi-Fi) from WebDriverAgent when it is already running.
     func screenshot() async throws -> (data: Data, width: Int, height: Int) {
-        let buffer = try await latestFrame()
-        guard let cg = Self.image(buffer) else { throw DeviceError.failed("The screenshot could not be read.") }
+        let cg: CGImage
+        do {
+            let buffer = try await latestFrame()
+            guard let image = Self.image(buffer) else { throw DeviceError.failed("The screenshot could not be read.") }
+            cg = image
+        } catch {
+            guard let client = agentClient, await client.isUp(),
+                  let png = try? await client.screenshot(), let image = NSBitmapImageRep(data: png)?.cgImage else { throw error }
+            cg = image
+        }
         let size = screenSize ?? CGSize(width: cg.width / 3, height: cg.height / 3)
         return try ImageEncoding.jpeg(NSImage(cgImage: cg, size: size), maxWidth: size.width, maxPixels: .greatestFiniteMagnitude)
     }
 
-    func uiTree(thorough: Bool) async throws -> UITree { throw DeviceError.failed(DeviceToolbox.noInput(device)) }
-    func gesture(_ path: [CGPoint], duration: TimeInterval) async throws { throw DeviceError.failed(DeviceToolbox.noInput(device)) }
-    func type(_ text: String) async throws { throw DeviceError.failed(DeviceToolbox.noInput(device)) }
-    func key(_ key: DeviceKey) async throws { throw DeviceError.failed(DeviceToolbox.noInput(device)) }
-    func press(_ button: DeviceButton) async throws { throw DeviceError.failed(DeviceToolbox.noInput(device)) }
+    func uiTree(thorough: Bool) async throws -> UITree { try await agent().tree() }
+
+    func gesture(_ path: [CGPoint], duration: TimeInterval) async throws { try await agent().gesture(path, duration: duration) }
+
+    func type(_ text: String) async throws { try await agent().type(text) }
+
+    func key(_ key: DeviceKey) async throws {
+        let client = try await agent()
+        switch key {
+        case .returnKey: try await client.type("\n")
+        case .delete: try await client.type("\u{8}")
+        // device_type's clear selects all, then deletes. XCUITest can't select all on a phone, so this empties the
+        // focused field, and the delete after it finds nothing left.
+        case .selectAll: try await client.clearFocused()
+        }
+    }
+
+    func press(_ button: DeviceButton) async throws {
+        switch button {
+        case .home: try await agent().home()
+        case .lock: try await agent().lock()
+        case .volume_up: try await agent().pressButton("volumeup")
+        case .volume_down: try await agent().pressButton("volumedown")
+        case .siri, .back, .app_switch:
+            throw DeviceError.failed("Viber can't press \(button.rawValue.replacingOccurrences(of: "_", with: " ")) on a physical iPhone; it presses home, lock, volume up and volume down.")
+        }
+    }
+
+    // MARK: WebDriverAgent
+
+    /// WebDriverAgent's server on the phone, starting it if it isn't up: building it the first time, which takes minutes.
+    private func agent() async throws -> WebDriverAgentClient {
+        lastUsed = Date()
+        if let client = agentClient, await client.isUp() { return client }
+        agentClient = nil
+        if let agentStart { return try await agentStart.value }
+        let start = Task { try await self.startAgent() }
+        agentStart = start
+        defer { agentStart = nil; busyNote = nil }
+        do {
+            let client = try await start.value
+            agentClient = client
+            return client
+        } catch {
+            stopAgent()
+            throw error
+        }
+    }
+
+    private func startAgent() async throws -> WebDriverAgentClient {
+        try await prepare()
+        // One from before, such as before Viber restarted, may still be running.
+        if let address = try? await Devicectl.tunnelAddress(device.id), let url = WebDriverAgent.tunnelURL(address) {
+            let client = WebDriverAgentClient(base: url)
+            if await client.isUp() { return client }
+        }
+        let xctestrun = try await WebDriverAgent.xctestrun { [weak self] note in self?.busyNote = note }
+        busyNote = "Starting WebDriverAgent on \(device.name)…"
+        let run = try WebDriverAgentRun(xctestrun: xctestrun, udid: device.serial ?? device.id)
+        agentRun = run
+        // xcodebuild installs it, launches it and opens the tunnel; the server then prints where it listens.
+        let deadline = Date().addingTimeInterval(240)
+        var tunnel: URL?
+        var lastLookup = Date.distantPast
+        while Date() < deadline {
+            try Task.checkCancellation()
+            guard run.isRunning else { throw DeviceError.failed(run.failure) }
+            if tunnel == nil, Date().timeIntervalSince(lastLookup) > 5 {
+                lastLookup = Date()
+                tunnel = (try? await Devicectl.tunnelAddress(device.id)).flatMap(WebDriverAgent.tunnelURL)
+            }
+            if let announced = run.serverURL {
+                for url in [tunnel, announced].compactMap({ $0 }) {
+                    let client = WebDriverAgentClient(base: url)
+                    if await client.isUp() { return client }
+                }
+            }
+            try await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+        throw DeviceError.failed("WebDriverAgent did not start on \(device.name) within 4 minutes. Unlock the phone and keep it nearby, then try again.")
+    }
+
+    private func stopAgent() {
+        agentRun?.stop()
+        agentRun = nil
+        agentClient = nil
+    }
 
     func install(_ path: String) async throws -> String {
         try await prepare()
@@ -280,20 +384,88 @@ final class IPhoneController: DeviceController {
 
     // MARK: The user's mouse and keyboard
 
-    private func refuseInput() {
+    /// Sends one of the user's touches or keys after the ones before it, and says on the screen why it couldn't.
+    /// Each is a round trip to WebDriverAgent, so a click becomes one tap or drag when the button comes up.
+    private func userInput(_ send: @escaping (WebDriverAgentClient) async throws -> Void) {
         lastUsed = Date()
-        inputFailure = "Clicks and keys can't reach a physical iPhone. Use the phone itself."
+        let previous = userInputs
+        userInputs = Task { [weak self] in
+            await previous?.value
+            guard let self else { return }
+            do {
+                try await send(try await self.agent())
+                if self.inputFailure != nil { self.inputFailure = nil }
+            } catch {
+                self.inputFailure = error.localizedDescription
+            }
+        }
     }
 
-    func userTouch(_ phase: TouchPhase, at ratio: CGPoint) { if phase == .down { refuseInput() } }
+    private func points(_ ratio: CGPoint) -> CGPoint? {
+        guard let size = screenSize else { return nil }
+        return CGPoint(x: ratio.x * size.width, y: ratio.y * size.height)
+    }
 
-    func userKey(_ event: NSEvent, down: Bool) { if down, event.type == .keyDown { refuseInput() } }
+    func userTouch(_ phase: TouchPhase, at ratio: CGPoint) {
+        switch phase {
+        case .down:
+            touchStart = (ratio, Date())
+            touchLast = ratio
+        case .move:
+            touchLast = ratio
+        case .up:
+            guard let start = touchStart, let from = points(start.ratio), let to = points(ratio) else { return }
+            touchStart = nil
+            let held = Date().timeIntervalSince(start.at)
+            let path = hypot(to.x - from.x, to.y - from.y) < 8 ? [from] : [from, to]
+            userInput { try await $0.gesture(path, duration: path.count == 1 ? min(held, 2) : max(held, 0.1)) }
+        }
+    }
 
-    func userScroll(dx: CGFloat, dy: CGFloat, at ratio: CGPoint, ended: Bool) { if !ended, dx != 0 || dy != 0 { refuseInput() } }
+    func userKey(_ event: NSEvent, down: Bool) {
+        guard down, event.type == .keyDown else { return }
+        let text: String
+        switch event.keyCode {
+        case 0x24, 0x4C: text = "\n"
+        case 0x33: text = "\u{8}"
+        default:
+            guard let characters = event.characters, !characters.isEmpty,
+                  !event.modifierFlags.contains(.command), characters.unicodeScalars.allSatisfy({ $0.value >= 0x20 && $0.value != 0x7F && !(0xF700...0xF8FF).contains($0.value) })
+            else { return }
+            text = characters
+        }
+        userInput { try await $0.type(text) }
+    }
 
-    func pasteFromMac() { refuseInput() }
+    /// A scroll wheel or trackpad pan as one drag once it ends.
+    func userScroll(dx: CGFloat, dy: CGFloat, at ratio: CGPoint, ended: Bool) {
+        if !ended {
+            if scrollStart == nil { scrollStart = ratio; scrollDelta = .zero }
+            scrollDelta.width += dx
+            scrollDelta.height += dy
+            return
+        }
+        guard let start = scrollStart, let from = points(start), let size = screenSize else { return }
+        scrollStart = nil
+        let to = CGPoint(x: min(max(from.x + scrollDelta.width, size.width * 0.05), size.width * 0.95),
+                         y: min(max(from.y + scrollDelta.height, size.height * 0.05), size.height * 0.95))
+        guard hypot(to.x - from.x, to.y - from.y) >= 8 else { return }
+        userInput { try await $0.gesture([from, to], duration: 0.3) }
+    }
 
-    func pick(at ratio: CGPoint) { picking = false }
+    func pasteFromMac() {
+        guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else { return }
+        userInput { try await $0.type(text) }
+    }
+
+    func pick(at ratio: CGPoint) {
+        picking = false
+        guard let point = points(ratio) else { return }
+        Task {
+            guard let tree = try? await agent().tree(), let element = tree.element(at: point) else { return }
+            onPick?(element, tree.app)
+        }
+    }
 
     private static let imageContext = CIContext()
 

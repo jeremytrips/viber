@@ -28,7 +28,10 @@ public final class ClaudeProcess {
         // Checkpoints let a session rewind files to before a message, as Esc Esc does in the terminal.
         var extra = ["VIBER_PANE_ID": paneID, "CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING": "1"]
         if let project { extra["VIBER_PROJECT"] = project }
-        if let account = spec.profile { try Accounts.prepare(account) }
+        if let account = spec.profile {
+            try Accounts.prepare(account)
+            MCPSignIns.share(among: MCPSignIns.services(AccountList.load().accounts), into: [Accounts.keychainService(account)])
+        }
         process.environment = Accounts.environment(Executables.environment(adding: binDir.map { [$0] } ?? [], extra: extra), account: spec.profile)
         process.standardInput = stdin
         process.standardOutput = stdout

@@ -13,8 +13,8 @@ public struct LaunchSpec: Codable, Equatable {
     public var readOnly: Bool?
     /// Added to the end of Claude Code's system prompt.
     public var appendSystemPrompt: String?
-    /// The project is on Automatic and Viber picked `profile`: it may pick again at a restart, and move the session to
-    /// another account as this one runs out.
+    /// Viber picked `profile` (the least-used account the project allows) rather than you: it may pick again at a
+    /// restart, and move the session to another account as this one runs out. Choosing one for the chat clears it.
     public var autoAccount: Bool?
 
     public init(profile: String?, cwd: String, resume: String? = nil, permissionMode: String? = nil,

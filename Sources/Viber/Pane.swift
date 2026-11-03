@@ -116,8 +116,8 @@ final class Pane: Identifiable {
     @ObservationIgnored var jiraServers: [String] = []
     /// Opens a sign-in page for an MCP server.
     @ObservationIgnored var onOpenURL: ((URL) -> Void)?
-    /// The account Automatic runs the session on when it starts, given the one it is on; nil when the project isn't on
-    /// Automatic or doesn't allow that account, so the session stays where it is.
+    /// The account a session whose account Viber picked runs on when it starts, given the one it is on; nil leaves it
+    /// where it is.
     @ObservationIgnored var automaticAccount: ((String?) -> String?)?
 
     init(id: String = UUID().uuidString, title: String, spec: LaunchSpec, worktree: WorktreeInfo? = nil) {
@@ -175,13 +175,10 @@ final class Pane: Identifiable {
         started = true
         accountChanged = false
         spec.pluginDir = pluginDir
-        if let picked = automaticAccount?(spec.profile) {
+        if spec.autoAccount == true, let picked = automaticAccount?(spec.profile) {
             if picked != spec.profile { chat.forgetLiveUsage() }
-            if restarting, let old = spec.profile, picked != old { chat.note("Automatic moved this chat from \(old) to \(picked), which has more room.") }
+            if restarting, let old = spec.profile, picked != old { chat.note("Moved this chat from \(old) to \(picked), which has more room.") }
             spec.profile = picked
-            spec.autoAccount = true
-        } else {
-            spec.autoAccount = nil
         }
         chat.keepsMode = isChat
         let before = chat.state
@@ -477,6 +474,19 @@ final class Pane: Identifiable {
                 chat.note(error.localizedDescription, isError: true)
             }
         }
+    }
+
+    /// Expo apps read to form links to their dev servers, by folder. Read again after a few seconds: tool rows ask on
+    /// every redraw.
+    @ObservationIgnored private var expoProjects: [String: (read: Date, project: ExpoProject?)] = [:]
+
+    /// The Expo app in `root`, or in this session's folder when Expo didn't say where it started.
+    func expoProject(at root: String?) -> ExpoProject? {
+        let folder = root ?? cwd
+        if let cached = expoProjects[folder], Date().timeIntervalSince(cached.read) < 5 { return cached.project }
+        let project = ExpoProject.read(at: folder)
+        expoProjects[folder] = (Date(), project)
+        return project
     }
 
     func attachDeviceScreenshot() {

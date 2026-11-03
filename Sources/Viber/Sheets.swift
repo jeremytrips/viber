@@ -4,18 +4,20 @@ import ViberCore
 
 // MARK: - Shared pieces
 
-/// Account choice: nil is the plain `claude` login, otherwise an account's name.
+/// Account choice: nil is the plain `claude` login, otherwise an account's name. `best`, the one Viber would pick, is
+/// marked as the least used.
 struct AccountPicker: View {
     @Environment(AppModel.self) private var model
     @Binding var selection: String?
     var label = "Account"
+    var best: String? = nil
 
     var body: some View {
         Picker(label, selection: $selection) {
             Text("Default login (plain claude)").tag(String?.none)
             if !model.accounts.isEmpty { Divider() }
             ForEach(model.accounts) { account in
-                Text(Self.title(for: account))
+                Text(Self.title(for: account) + (account.name == best ? " — least used" : ""))
                     .tag(String?.some(account.name))
                     .disabled(account.loginProblem != nil)
             }
@@ -30,32 +32,7 @@ struct AccountPicker: View {
     }
 }
 
-/// The account a project's new sessions start with. A profile with a broken login can be chosen: logging in again
-/// fixes it, and Viber doesn't swap it for another account.
-struct ProjectAccountPicker: View {
-    @Environment(AppModel.self) private var model
-    let project: String
-
-    var body: some View {
-        let account = model.account(of: project)
-        Picker("Account", selection: Binding(get: { account }, set: { model.setAccount($0, for: project) })) {
-            Text("Automatic").tag(ProjectAccount.automatic)
-            Text("Default login (plain claude)").tag(ProjectAccount.plain)
-            if !model.accounts.isEmpty { Divider() }
-            ForEach(model.accounts) { status in
-                Text(AccountPicker.title(for: status)).tag(ProjectAccount.profile(status.name))
-            }
-            if case .profile(let name) = account, model.status(of: name) == nil {
-                Text("\(name) — not added in Viber").tag(account)
-            }
-        }
-        .help(account == .automatic
-            ? "Each new session in \(model.projectName(project)) starts on the least-used account Automatic may use here, and moves to another as that one runs out"
-            : "The Claude login new sessions in \(model.projectName(project)) start with")
-    }
-}
-
-/// The accounts Automatic may use in a project: a tick for each account Automatic uses.
+/// The accounts new chats in a project may start on: a tick for each account Viber picks from.
 struct ProjectAutomaticAccounts: View {
     @Environment(AppModel.self) private var model
     let project: String
@@ -63,7 +40,7 @@ struct ProjectAutomaticAccounts: View {
     var body: some View {
         let automatic = model.accounts.filter(\.automatic)
         if automatic.isEmpty {
-            Text("No account is set for Automatic. Add one, or turn Automatic on for one, under the account button in the toolbar.")
+            Text("No account is picked for new chats. Add one, or turn on Picked for New Chats for one, under the account button in the toolbar.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         } else {
             VStack(alignment: .leading, spacing: 4) {
@@ -75,7 +52,7 @@ struct ProjectAutomaticAccounts: View {
                     .toggleStyle(.checkbox)
                 }
             }
-            .help("Accounts Automatic may use in \(model.projectName(project)). Untick one to keep its sessions off it.")
+            .help("Accounts new chats in \(model.projectName(project)) may start on. Untick one to keep new chats off it.")
         }
     }
 }
@@ -125,7 +102,8 @@ struct NewSessionSheet: View {
     /// The project `folder` belongs to, once looked up.
     @State private var projectRoot: String?
     @State private var profile: String?
-    /// The account was picked here, so it no longer follows the project's.
+    /// The account was picked here: the chat stays on it. Until then it is the least-used one the project allows, and
+    /// the chat moves when that runs low.
     @State private var profileChosen = false
     @State private var useWorktree = false
     @State private var repoRoot: String?
@@ -140,6 +118,9 @@ struct NewSessionSheet: View {
     @State private var branch = ""
     @State private var branchEdited = false
     @State private var branchProblem: String?
+    /// The typed branch already exists and can be checked out; it is used once `useExisting` is ticked.
+    @State private var existing: ExistingBranch?
+    @State private var useExisting = false
     /// The project's branch pattern, and the main checkout it is saved for.
     @State private var pattern = Worktree.defaultBranchPattern
     @State private var patternProject: String?
@@ -199,7 +180,10 @@ struct NewSessionSheet: View {
                                 .help("A folder or git repository. A new one is added to the sidebar's projects.")
                         }
                     }
-                    AccountPicker(selection: Binding(get: { profile }, set: { profile = $0; profileChosen = true }))
+                    AccountPicker(selection: Binding(get: { profile }, set: { profile = $0; profileChosen = true }),
+                                  best: projectRoot.flatMap { model.bestAccount(for: $0) })
+                        .help(profileChosen ? "The chat stays on this account"
+                              : "The least-used account this project allows. The chat moves to another when it runs low.")
                 }
 
                 Section {
@@ -233,7 +217,10 @@ struct NewSessionSheet: View {
                         VStack(alignment: .leading, spacing: 4) {
                             LabeledContent("Branch") {
                                 HStack(spacing: 6) {
-                                    TextField("Branch", text: Binding(get: { branch }, set: { branch = $0; branchEdited = !$0.isEmpty && $0 != defaultBranch }),
+                                    TextField("Branch", text: Binding(get: { branch }, set: {
+                                        if $0 != branch { useExisting = false }
+                                        branch = $0; branchEdited = !$0.isEmpty && $0 != defaultBranch
+                                    }),
                                               prompt: Text(defaultBranch))
                                         .labelsHidden()
                                         .font(.body.monospaced())
@@ -257,8 +244,15 @@ struct NewSessionSheet: View {
                                     .foregroundStyle(Worktree.placeholders(in: chosenBranch ?? defaultBranch).isEmpty ? .red : .secondary)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
+                            if let existing, let name = chosenBranch { existingBranchRow(existing, name: name) }
                         }
-                        if !maker.usesHook { basePicker }
+                        if !maker.usesHook {
+                            if usesExistingBranch, let name = chosenBranch {
+                                LabeledContent("Start from") { Text(existing == .remote ? "origin/\(name) (fetched first)" : "\(name) as it is") }
+                            } else {
+                                basePicker
+                            }
+                        }
                     }
                     Picker("Mode", selection: $permissionMode) {
                         ForEach(PermissionMode.offered, id: \.self) { Text($0.label).tag($0.rawValue) }
@@ -282,6 +276,7 @@ struct NewSessionSheet: View {
                 Button("Start", action: start)
                     .keyboardShortcut(.defaultAction)
                     .disabled(folder.isEmpty || (useWorktree && repoRoot != nil && (maker.blocksWorktree || branchProblem != nil
+                                                                                   || (existing != nil && !useExisting)
                                                                                    || (!branchEdited && Worktree.needsInput(pattern, key: issueKey)))))
             }
             .padding(16)
@@ -327,6 +322,22 @@ struct NewSessionSheet: View {
         .fixedSize()
     }
 
+    /// Offers to check out a typed branch that already exists, instead of refusing the name.
+    private func existingBranchRow(_ found: ExistingBranch, name: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(found == .remote ? "\(name) is on origin." : "A branch named \(name) already exists.")
+                .font(.caption).foregroundStyle(.secondary)
+            Toggle("Use the existing branch", isOn: $useExisting)
+                .toggleStyle(.checkbox)
+                .help(found == .remote
+                    ? "Fetches \(name) from origin and checks it out in the new worktree, as a local branch that tracks origin/\(name)"
+                    : "Checks \(name) out in the new worktree as it is (git worktree add <path> \(name))")
+        }
+    }
+
+    /// The worktree checks out the typed branch, which exists, instead of making one.
+    private var usesExistingBranch: Bool { useExisting && existing != nil && chosenBranch != nil && !maker.usesHook }
+
     /// Where a git worktree's branch starts: origin's default branch (fetched first) or what is checked out here.
     /// A WorktreeCreate hook decides that itself, so this isn't shown then.
     @ViewBuilder private var basePicker: some View {
@@ -358,21 +369,34 @@ struct NewSessionSheet: View {
         return branchEdited && !typed.isEmpty ? typed : nil
     }
 
-    /// `git check-ref-format --branch`, that it doesn't exist yet, and what a hook can take, after a short pause in typing.
+    /// `git check-ref-format --branch`, that it doesn't exist yet (or, made with git, that an existing one is free to
+    /// check out), and what a hook can take, after a short pause in typing.
     private func checkBranch() async {
-        guard useWorktree, let root = repoRoot else { branchProblem = nil; return }
+        guard useWorktree, let root = repoRoot else { branchProblem = nil; existing = nil; return }
         try? await Task.sleep(for: .milliseconds(250))
         guard !Task.isCancelled else { return }
-        let name = chosenBranch ?? defaultBranch, hook = maker.usesHook
+        let name = chosenBranch ?? defaultBranch, hook = maker.usesHook, typed = chosenBranch != nil
         // An untouched default is numbered if taken, so only a typed name has to be new. A default with a part
         // like <id> left still has to be filled in.
-        let check = chosenBranch != nil || Worktree.needsInput(pattern, key: issueKey)
-        let problem = await Task.detached { () -> String? in
-            if check, case .problem(let problem) = Worktree.checkBranch(name, repo: root) { return problem }
-            return hook ? Worktree.hookNameProblem(name) : nil
+        let check = typed || Worktree.needsInput(pattern, key: issueKey)
+        let (problem, found) = await Task.detached { () -> (String?, ExistingBranch?) in
+            // git can check out a typed branch that exists, such as one pushed for a Jira issue; a hook only makes new ones.
+            switch typed ? Worktree.existingBranch(name, repo: root) : nil {
+            case .checkedOut(let path)?:
+                return ("\(name) is already checked out in \((path as NSString).abbreviatingWithTildeInPath).", nil)
+            case .local? where hook:
+                return ("A branch named \(name) already exists, and the project's WorktreeCreate hook only makes new ones.", nil)
+            case let found? where !hook:
+                return (nil, found)
+            default:
+                break
+            }
+            if check, case .problem(let problem) = Worktree.checkBranch(name, repo: root) { return (problem, nil) }
+            return (hook ? Worktree.hookNameProblem(name) : nil, nil)
         }.value
         guard !Task.isCancelled else { return }
         branchProblem = problem
+        existing = found
     }
 
     private func load() {
@@ -382,7 +406,7 @@ struct NewSessionSheet: View {
             model.newSessionPrefill = nil
             folder = prefill.folder
             profile = prefill.profile
-            profileChosen = true
+            profileChosen = !prefill.autoAccount
             name = prefill.name
             permissionMode = prefill.permissionMode
             firstMessage = prefill.firstMessage
@@ -399,9 +423,9 @@ struct NewSessionSheet: View {
         branch = defaultBranch
     }
 
-    /// The project's account, until one is picked here.
+    /// The least-used account the project allows, until one is picked here.
     private func followAccount(of project: String) {
-        if !profileChosen { profile = model.launchProfile(for: project) }
+        if !profileChosen { profile = model.bestAccount(for: project) }
     }
 
     /// The worktree row's subtitle, or the error from creating a repository.
@@ -473,9 +497,11 @@ struct NewSessionSheet: View {
         model.createSession(NewSessionRequest(
             folder: folder,
             profile: profile,
+            autoAccount: !profileChosen,
             useWorktree: useWorktree && repoRoot != nil,
             name: name.trimmingCharacters(in: .whitespacesAndNewlines),
             branch: useWorktree ? chosenBranch : nil,
+            useExistingBranch: useWorktree && usesExistingBranch,
             base: baseChoices.available(base),
             permissionMode: permissionMode,
             firstMessage: firstMessage,
@@ -543,6 +569,8 @@ struct ResumeSheet: View {
     @State private var query = ""
     @State private var selected: String?
     @State private var profile: String?
+    /// The account was picked here; until then it is the least-used one the session's project allows.
+    @State private var profileChosen = false
 
     private var sessions: [SessionSummary] {
         let sorted = model.recent.sorted { ($0.updatedDate ?? .distantPast) > ($1.updatedDate ?? .distantPast) }
@@ -591,7 +619,7 @@ struct ResumeSheet: View {
 
             Divider()
             HStack {
-                AccountPicker(selection: $profile)
+                AccountPicker(selection: Binding(get: { profile }, set: { profile = $0; profileChosen = true }), best: best)
                     .frame(maxWidth: 300)
                 Spacer()
                 Button("Cancel", role: .cancel) { dismiss() }
@@ -605,18 +633,23 @@ struct ResumeSheet: View {
         .frame(width: 620, height: 520)
         .onAppear {
             model.reloadRecent()
-            profile = model.pickAutomatic(allowed: Set(model.accounts.filter(\.automatic).map(\.name)))
+            profile = best
         }
-        // The chosen session's project decides, as for a new session there.
-        .onChange(of: selected) {
-            guard let folder = model.recent.first(where: { $0.id == selected })?.workspace else { return }
-            profile = model.launchProfile(for: model.recentRoots[folder] ?? ProjectRoot.resolve(folder))
+        // The chosen session's project decides, as for a new chat there.
+        .onChange(of: selected) { if !profileChosen { profile = best } }
+    }
+
+    /// The least-used account the selected session's project allows, else among every account Viber picks from.
+    private var best: String? {
+        guard let folder = model.recent.first(where: { $0.id == selected })?.workspace else {
+            return model.pickAutomatic(allowed: Set(model.accounts.filter(\.automatic).map(\.name)))
         }
+        return model.bestAccount(for: model.recentRoots[folder] ?? ProjectRoot.resolve(folder))
     }
 
     private func resume(_ id: String) {
         guard let session = model.recent.first(where: { $0.id == id }) else { return }
-        model.resume(session, profile: profile)
+        model.resume(session, profile: profile, autoAccount: !profileChosen)
         dismiss()
     }
 }

@@ -20,15 +20,6 @@ final class AccountTests: XCTestCase {
         XCTAssertFalse(Accounts.isValidName("a b"))
     }
 
-    func testProjectAccountStoresAutomaticAsNothing() {
-        for account in [ProjectAccount.automatic, .plain, .profile("creator1")] {
-            XCTAssertEqual(ProjectAccount(stored: account.stored), account)
-        }
-        XCTAssertNil(ProjectAccount.automatic.stored)
-        XCTAssertEqual(ProjectAccount.plain.stored, "")
-        XCTAssertEqual(ProjectAccount(stored: "creator1"), .profile("creator1"), "projects pinned under clauth keep their account")
-    }
-
     func testAccountListRoundTrips() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("viber-accounts-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: url) }
@@ -151,6 +142,23 @@ final class AccountTests: XCTestCase {
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: updated) as? [String: Any])
         XCTAssertNotNil(object["mcpOAuth"], "MCP sign-ins in the same item survive")
         XCTAssertNil(OAuthLogin(json: Data("{}".utf8)))
+    }
+
+    func testMCPSignInsAreSharedAndTheLatestWins() throws {
+        let own: [String: Any] = ["atlassian|1": ["accessToken": "a-old", "expiresAt": 1000], "notion|3": ["accessToken": "n"]]
+        let other: [String: Any] = ["atlassian|1": ["accessToken": "a-new", "expiresAt": 2000], "plugin:posthog:posthog|2": ["accessToken": "p"],
+                                    "notion|3": ["accessToken": "n-other"]]
+        let stale: [String: Any] = ["atlassian|1": ["accessToken": "a-older", "expiresAt": 500]]
+        let merged = MCPSignIns.merged(own: own, others: [other, stale])
+        XCTAssertEqual((merged["atlassian|1"] as? [String: Any])?["accessToken"] as? String, "a-new", "the one that expires last")
+        XCTAssertEqual((merged["plugin:posthog:posthog|2"] as? [String: Any])?["accessToken"] as? String, "p", "one it lacked")
+        XCTAssertEqual((merged["notion|3"] as? [String: Any])?["accessToken"] as? String, "n", "a tie keeps its own")
+
+        let stored = #"{"claudeAiOauth":{"accessToken":"t","refreshToken":"r"},"mcpOAuth":{"atlassian|1":{"accessToken":"a-old"}}}"#
+        let updated = try XCTUnwrap(MCPSignIns.replacing(Data(stored.utf8), with: merged))
+        XCTAssertEqual(OAuthLogin(json: updated)?.refreshToken, "r", "the login stays")
+        XCTAssertEqual(MCPSignIns.entries(in: updated).count, 3)
+        XCTAssertTrue(MCPSignIns.entries(in: Data("{}".utf8)).isEmpty)
     }
 
     // MARK: Folders
