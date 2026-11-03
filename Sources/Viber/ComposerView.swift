@@ -386,8 +386,7 @@ struct ComposerView: View {
             add(urls)
             return true
         }
-        if board.string(forType: .string) == nil, let data = board.data(forType: .png) ?? board.data(forType: .tiff),
-           let image = ImageAttachment(data: data, label: "Pasted image") {
+        if let data = board.imageData, let image = ImageAttachment(data: data, label: "Pasted image") {
             attachments.append(image)
             return true
         }
