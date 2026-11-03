@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 import SwiftUI
 
 /// The message box's text area. SwiftUI's multi-line `TextField` measures all of its text on every keystroke,
@@ -185,8 +186,24 @@ final class InputTextView: NSTextView {
         pasteAsPlainText(sender)
     }
 
+    /// A plain-text view only enables Paste for text, so ⌘V did nothing with just an image on the pasteboard.
+    override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == #selector(paste(_:)), NSPasteboard.general.imageData != nil { return true }
+        return super.validateUserInterfaceItem(item)
+    }
+
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
         if owner?.parent.onPaste(sender.draggingPasteboard) == true { return true }
         return super.performDragOperation(sender)
+    }
+}
+
+extension NSPasteboard {
+    /// The first image on the pasteboard in any format (PNG, TIFF from screenshots, JPEG or HEIC from Photos),
+    /// unless it also has text: copies from documents and spreadsheets carry a picture of the text, and paste as text.
+    var imageData: Data? {
+        guard string(forType: .string) == nil,
+              let type = types?.first(where: { UTType($0.rawValue)?.conforms(to: .image) == true }) else { return nil }
+        return data(forType: type)
     }
 }
