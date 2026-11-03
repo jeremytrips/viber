@@ -109,8 +109,17 @@ final class AdbCatalogTests: XCTestCase {
         XCTAssertEqual(Set(all).count, all.count, "no duplicates")
         for service in PrivacyService.allCases { XCTAssertTrue(Set(Adb.permissions(for: service)).isSubset(of: all), "\(service)") }
         let clean = Adb.statusBarCommand(clean: true)
-        XCTAssertTrue(clean.hasPrefix("settings put global sysui_demo_allowed 1 && am broadcast -a com.android.systemui.demo -e command enter && "), clean)
+        XCTAssertTrue(clean.hasPrefix("settings put global sysui_demo_allowed 1 && am broadcast -a com.android.systemui.demo -e command exit && am broadcast -a com.android.systemui.demo -e command enter && "), clean)
         XCTAssertTrue(clean.contains("-e command clock -e hhmm 0941"))
+        XCTAssertTrue(clean.contains("-e command network -e mobile show -e datatype none -e level 4"), "older SystemUIs get no slot: " + clean)
+        let newPipeline = Adb.statusBarCommand(clean: true, newMobilePipeline: true)
+        XCTAssertTrue(newPipeline.contains("-e command network -e mobile show -e slot 941 -e datatype none -e level 4"), "not the real SIM's subscription 1: " + newPipeline)
+        let dump = """
+              receivers=[BatteryControllerImplGoogle, WifiRepositorySwitcher$isDemoMode$1$callback$1, MobileRepositorySwitcher$isDemoMode$1$callback$1, StatusBarIconControllerImpl]
+            """
+        XCTAssertTrue(Adb.usesNewMobilePipeline(demoModeDump: dump))
+        XCTAssertFalse(Adb.usesNewMobilePipeline(demoModeDump: "receivers=[NetworkControllerImpl, StatusBarIconControllerImpl]"))
+        XCTAssertFalse(Adb.usesNewMobilePipeline(demoModeDump: ""))
         XCTAssertEqual(Adb.statusBarCommand(clean: false), "am broadcast -a com.android.systemui.demo -e command exit")
     }
 
@@ -328,7 +337,9 @@ final class LiveAdbTests: XCTestCase {
     func runningEmulator() async throws -> (DeviceInfo, String) {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["VIBER_LIVE_ANDROID"] == "1", "set VIBER_LIVE_ANDROID=1 to run")
         let devices = await Adb.devices()
-        let emulator = try XCTUnwrap(devices.first { $0.kind == .emulator && $0.isBooted }, "boot an AVD first: \(devices)")
+        // ANDROID_SERIAL picks one when another session has an emulator of its own running.
+        let wanted = ProcessInfo.processInfo.environment["ANDROID_SERIAL"]
+        let emulator = try XCTUnwrap(devices.first { $0.kind == .emulator && $0.isBooted && (wanted == nil || $0.serial == wanted) }, "boot an AVD first: \(devices)")
         return (emulator, try XCTUnwrap(emulator.serial))
     }
 
@@ -381,6 +392,11 @@ final class LiveAdbTests: XCTestCase {
             try await Adb.set(serial, .statusBar(clean: true))
             let demo = await shell("settings get global sysui_demo_allowed")
             XCTAssertEqual(demo, "1")
+            let sysui = "dumpsys activity service com.android.systemui/.SystemUIService"
+            if Adb.usesNewMobilePipeline(demoModeDump: await shell("\(sysui) dependency DUMPABLE DemoModeController")) {
+                let dumpables = await shell("\(sysui) --list")
+                XCTAssertTrue(dumpables.contains("DemoMobileConnectionLog[941]"), "the demo cell signal has a subscription of its own")
+            }
         } catch {
             failure = error
         }
