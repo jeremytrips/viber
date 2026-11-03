@@ -233,4 +233,39 @@ final class AgentRunTests: XCTestCase {
         XCTAssertEqual(chat.findTool("toolu_ls")?.result, "a.txt\nb.txt")
         XCTAssertEqual(chat.items.count, 1)
     }
+
+    /// A fork's transcript starts with a copy of its parent's last message, the Agent call that started the fork included.
+    func testForkRepeatingItsOwnAgentCallLoads() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("viber-agents-\(UUID().uuidString)")
+        let subagents = dir.appendingPathComponent("session/subagents")
+        try FileManager.default.createDirectory(at: subagents, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        func write(_ name: String, meta: String, _ rows: [JSON]) throws {
+            try Data(meta.utf8).write(to: subagents.appendingPathComponent("\(name).meta.json"))
+            try Data(rows.map { $0.line() }.joined(separator: "\n").utf8).write(to: subagents.appendingPathComponent("\(name).jsonl"))
+        }
+        let launch: JSON = ["type": "assistant", "uuid": "s1", "isSidechain": true, "message": ["id": "sm1", "role": "assistant", "content": [
+            ["type": "tool_use", "id": "toolu_ls", "name": "Bash", "input": ["command": "ls"]],
+            ["type": "tool_use", "id": "toolu_fork", "name": "Agent", "input": ["description": "Read a.txt", "subagent_type": "fork"]]]]]
+        let listed: JSON = ["type": "user", "uuid": "s2", "isSidechain": true, "message": ["role": "user", "content": [
+            ["type": "tool_result", "tool_use_id": "toolu_ls", "content": "a.txt\nb.txt"]]]]
+        try write("agent-a98", meta: #"{"agentType":"general-purpose","toolUseId":"toolu_agent","spawnDepth":1}"#, [launch, listed])
+        try write("agent-a99", meta: #"{"agentType":"fork","isFork":true,"toolUseId":"toolu_fork","parentAgentId":"a98","spawnDepth":2}"#, [
+            // Copied rows get new uuids, as the Agent call's copy does in real fork transcripts.
+            launch.setting("uuid", "c1"), listed.setting("uuid", "c2"),
+            ["type": "assistant", "uuid": "f1", "isSidechain": true, "message": ["id": "fm1", "role": "assistant", "content": [
+                ["type": "tool_use", "id": "toolu_cat", "name": "Bash", "input": ["command": "cat a.txt"]]]]],
+            ["type": "user", "uuid": "f2", "isSidechain": true, "message": ["role": "user", "content": [
+                ["type": "tool_result", "tool_use_id": "toolu_cat", "content": "hello"]]]],
+            ["type": "assistant", "uuid": "f3", "isSidechain": true, "message": ["id": "fm2", "role": "assistant", "content": [
+                ["type": "text", "text": "It says hello."]]]]
+        ])
+
+        let chat = load(launchRows(), transcript: dir.appendingPathComponent("session.jsonl"))
+        XCTAssertEqual(card(chat)?.run.steps.map(\.id), ["tool:toolu_ls", "tool:toolu_fork"])
+        XCTAssertEqual(card(chat, "toolu_fork")?.run.steps.map(\.id), ["tool:toolu_cat", "a:fm2:0"])
+        XCTAssertEqual(chat.findTool("toolu_ls")?.result, "a.txt\nb.txt")
+        XCTAssertEqual(chat.findTool("toolu_cat")?.result, "hello")
+        XCTAssertEqual(chat.items.count, 1)
+    }
 }

@@ -498,17 +498,18 @@ public struct ChatTranscript {
     }
 
     /// Changes a tool call wherever it sits: in the chat, or among a subagent's steps.
+    /// `seen` holds the calls already walked through, so a call that ends up its own parent can't loop.
     @discardableResult
-    private mutating func updateTool(_ id: String, _ change: (inout ToolCall) -> Void) -> Bool {
+    private mutating func updateTool(_ id: String, seen: Set<String> = [], _ change: (inout ToolCall) -> Void) -> Bool {
         if let index = toolIndex[id] {
             guard case .tool(var call) = items[index].kind else { return false }
             change(&call)
             items[index].kind = .tool(call)
             return true
         }
-        guard let parent = stepParent[id] else { return false }
+        guard let parent = stepParent[id], !seen.contains(parent) else { return false }
         var found = false
-        updateTool(parent) { agent in
+        updateTool(parent, seen: seen.union([id])) { agent in
             guard let step = agent.agent?.steps.firstIndex(where: { $0.id == "tool:\(id)" }),
                   case .tool(var call)? = agent.agent?.steps[step].kind else { return }
             change(&call)
@@ -519,12 +520,15 @@ public struct ChatTranscript {
     }
 
     /// A tool call wherever it sits.
-    public func findTool(_ id: String) -> ToolCall? {
+    public func findTool(_ id: String) -> ToolCall? { findTool(id, seen: []) }
+
+    private func findTool(_ id: String, seen: Set<String>) -> ToolCall? {
         if let index = toolIndex[id] {
             if case .tool(let call) = items[index].kind { return call }
             return nil
         }
-        guard let parent = stepParent[id], let step = findTool(parent)?.agent?.steps.first(where: { $0.id == "tool:\(id)" }),
+        guard let parent = stepParent[id], !seen.contains(parent),
+              let step = findTool(parent, seen: seen.union([id]))?.agent?.steps.first(where: { $0.id == "tool:\(id)" }),
               case .tool(let call) = step.kind else { return nil }
         return call
     }
@@ -872,6 +876,8 @@ public struct ChatTranscript {
                 step = ChatItem(id: "a:\(messageID):\(n)", kind: .assistant(text))
             case "tool_use":
                 let id = block["id"]?.string ?? "\(messageID):\(n)"
+                // A fork's transcript starts with a copy of the conversation that started it, its own Agent call included.
+                guard id != parent, toolIndex[id] == nil, stepParent[id] == nil else { continue }
                 step = ChatItem(id: "tool:\(id)", kind: .tool(Self.newToolCall(id: id, block)))
                 stepParent[id] = parent
             default: continue
