@@ -70,29 +70,75 @@ public enum Accounts {
         return env
     }
 
-    /// Runs `claude auth login` in the account's folder. Its standard input stays open, as the CLI reads a pasted code
-    /// from it when the browser can't hand the login back; it gives up after ten minutes.
-    public static func signIn(_ name: String, email: String?) -> ShellResult {
-        guard let claude = Executables.find("claude") else { return ShellResult(status: 127, stdout: "", stderr: "claude was not found.") }
+    /// The page the CLI prints for signing in by hand: the browser it opened hands the login back to it on localhost,
+    /// while this one ends on a code to paste, for when that hand-back doesn't arrive.
+    public static func manualSignInLink(in output: String) -> URL? {
+        let links = output.matches(of: #/https://\S+/oauth/authorize\?\S+/#).map { String($0.output) }
+        return links.first { !$0.contains("redirect_uri=http%3A%2F%2Flocalhost") }.flatMap(URL.init(string:))
+    }
+}
+
+/// `claude auth login` in an account's folder, waiting for the browser to hand the login back or for the code the
+/// sign-in page shows to be pasted into it. It gives up after ten minutes, or when cancelled.
+public final class SignIn: @unchecked Sendable {
+    private let process = Process()
+    private let input = Pipe(), output = Pipe()
+    private let lock = NSLock()
+    private var cancelled = false
+
+    public init() {}
+
+    /// Runs it to the end. Blocking: call it off the main thread. `onLink` gets the page for signing in by hand.
+    public func run(_ name: String, email: String?, root: URL = Accounts.root, home: URL = FileManager.default.homeDirectoryForCurrentUser,
+                    claude: String? = Executables.find("claude"), onLink: @escaping @Sendable (URL) -> Void) -> ShellResult {
+        guard let claude else { return ShellResult(status: 127, stdout: "", stderr: "claude was not found.") }
         // Linked first, so nothing the CLI makes while signing in ends up apart from ~/.claude.
-        do { try prepare(name, creating: true) } catch { return ShellResult(status: 1, stdout: "", stderr: error.localizedDescription) }
-        let process = Process()
+        do { try Accounts.prepare(name, creating: true, root: root, home: home) } catch { return ShellResult(status: 1, stdout: "", stderr: error.localizedDescription) }
         process.executableURL = URL(fileURLWithPath: claude)
         process.arguments = ["auth", "login", "--claudeai"] + (email.map { ["--email", $0] } ?? [])
-        process.environment = environment(Executables.environment(), account: name)
-        let input = Pipe(), output = Pipe()
+        var env = Executables.environment()
+        env["CLAUDE_CONFIG_DIR"] = Accounts.directory(name, root: root).path
+        process.environment = env
         process.standardInput = input
         process.standardOutput = output
         process.standardError = output
-        do { try process.run() } catch { return ShellResult(status: 126, stdout: "", stderr: error.localizedDescription) }
-        let timer = DispatchWorkItem { if process.isRunning { process.terminate() } }
+        do {
+            try lock.withLock {
+                guard !cancelled else { throw CocoaError(.userCancelled) }
+                try process.run()
+            }
+        } catch { return ShellResult(status: 126, stdout: "", stderr: error.localizedDescription) }
+        let timer = DispatchWorkItem { [process] in if process.isRunning { process.terminate() } }
         DispatchQueue.global().asyncAfter(deadline: .now() + 600, execute: timer)
-        let data = output.fileHandleForReading.readDataToEndOfFile()
+        var data = Data(), linked = false
+        while case let chunk = output.fileHandleForReading.availableData, !chunk.isEmpty {
+            data.append(chunk)
+            if !linked, let link = Accounts.manualSignInLink(in: String(decoding: data, as: UTF8.self)) { linked = true; onLink(link) }
+        }
         process.waitUntilExit()
         timer.cancel()
         try? input.fileHandleForWriting.close()
         return ShellResult(status: process.terminationStatus, stdout: String(decoding: data, as: UTF8.self), stderr: "")
     }
+
+    /// Hands it the code the sign-in page showed.
+    public func submit(code: String) {
+        let code = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !code.isEmpty else { return }
+        try? input.fileHandleForWriting.write(contentsOf: Data((code + "\n").utf8))
+    }
+
+    public func cancel() {
+        lock.withLock {
+            cancelled = true
+            if process.isRunning { process.terminate() }
+        }
+    }
+
+    public var wasCancelled: Bool { lock.withLock { cancelled } }
+}
+
+extension Accounts {
 
     /// Entries of ~/.claude that stay the account's own: its login, its copy of the config (which names the account),
     /// the backups the CLI makes of that copy, and the lock around it.
