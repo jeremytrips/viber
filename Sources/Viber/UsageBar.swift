@@ -229,10 +229,7 @@ private struct AccountRow: View {
             Group {
                 if let email = account.email { Text(email).font(.caption).foregroundStyle(.secondary) }
                 if loggingIn {
-                    HStack(spacing: 6) {
-                        ProgressView().controlSize(.small)
-                        Text("Finish signing in in your browser…").font(.caption).foregroundStyle(.secondary)
-                    }
+                    LoginProgress(name: account.name)
                 } else if let problem = account.loginProblem {
                     HStack {
                         Label(problem, systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(.red)
@@ -298,5 +295,39 @@ private struct WindowRow: View {
             .font(.caption.monospacedDigit())
             UsageBarShape(pct: pct).frame(height: 5)
         }
+    }
+}
+
+/// A login in flight: the browser should hand it back; if it doesn't, the sign-in page opened by hand shows a code to
+/// paste here. Cancel stops it so it can be started again.
+private struct LoginProgress: View {
+    @Environment(AppModel.self) private var model
+    let name: String
+    @State private var code = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Finish signing in in your browser…").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("Cancel") { model.cancelLogin(name) }.controlSize(.small)
+            }
+            if let link = model.loginLinks[name] {
+                Text("Browser didn't come back here? [Open the sign-in page](\(link.absoluteString)), then paste the code it shows.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 6) {
+                    TextField("Code", text: $code).textFieldStyle(.roundedBorder).font(.caption)
+                        .onSubmit(submit)
+                    Button("Log In", action: submit).controlSize(.small)
+                        .disabled(code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+        }
+    }
+
+    private func submit() {
+        model.submitLoginCode(name, code)
+        code = ""
     }
 }

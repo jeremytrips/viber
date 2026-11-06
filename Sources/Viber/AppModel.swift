@@ -95,6 +95,9 @@ final class AppModel {
     var accountStatuses: [String: AccountStatus] = [:]
     /// Accounts with a browser login in flight.
     var loggingIn: Set<String> = []
+    /// The page for signing in by hand, for each login in flight that printed it.
+    var loginLinks: [String: URL] = [:]
+    @ObservationIgnored var signIns: [String: SignIn] = [:]
     var externals: [Session] = []
     var recent: [SessionSummary] = []
     var now = Date()
@@ -1977,13 +1980,20 @@ final class AppModel {
     func login(_ name: String) {
         guard loggingIn.insert(name).inserted else { return }
         let hint = accountList.account(name)?.email
+        let signIn = SignIn()
+        signIns[name] = signIn
         Task.detached {
-            let result = Accounts.signIn(name, email: hint)
+            let result = signIn.run(name, email: hint) { link in
+                Task { @MainActor in if self.signIns[name] === signIn { self.loginLinks[name] = link } }
+            }
             let check = Shell.run("claude", ["auth", "status", "--json"],
                                   environment: Accounts.environment(Executables.environment(), account: name), timeout: 30)
             let email = JSON(data: Data(check.stdout.utf8))?["email"]?.string
             await MainActor.run {
                 self.loggingIn.remove(name)
+                self.loginLinks[name] = nil
+                self.signIns[name] = nil
+                guard !signIn.wasCancelled else { return }
                 guard result.ok, let email else {
                     let detail = (result.stderr.isEmpty ? result.stdout : result.stderr).trimmingCharacters(in: .whitespacesAndNewlines)
                     self.errorMessage = "Login for \(name) failed." + (detail.isEmpty ? "" : "\n\n\(String(detail.suffix(600)))")
@@ -2004,6 +2014,17 @@ final class AppModel {
         }
     }
 
+    /// Hands a login in flight the code its sign-in page showed, for when the browser couldn't hand it back.
+    func submitLoginCode(_ name: String, _ code: String) {
+        guard let signIn = signIns[name] else { return }
+        Task.detached { signIn.submit(code: code) }
+    }
+
+    /// Stops a login in flight, so it can be started again.
+    func cancelLogin(_ name: String) {
+        signIns[name]?.cancel()
+    }
+
     func setAutomatic(_ name: String, _ automatic: Bool) {
         guard var account = accountList.account(name) else { return }
         account.automatic = automatic
@@ -2013,6 +2034,7 @@ final class AppModel {
 
     /// Forgets an account: its folder and its login in the Keychain. Sessions on it stay there, and say to log in.
     func removeAccount(_ name: String) {
+        cancelLogin(name)
         accountList.accounts.removeAll { $0.name == name }
         accountStatuses[name] = nil
         saveAccounts()

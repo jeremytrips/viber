@@ -195,6 +195,95 @@ final class AccountTests: XCTestCase {
         XCTAssertNil(Accounts.mergedConfig(shared: shared, own: [:])["oauthAccount"], "a folder not signed in yet names no account")
     }
 
+    // MARK: Signing in
+
+    func testTheManualSignInLinkIsTheOneThatEndsOnACode() {
+        // What `claude auth login` 2.1.308 prints when its output isn't a terminal.
+        let output = """
+        Opening browser to sign in…
+        If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&state=s1&login_hint=a%40b.c
+        Paste code here if prompted >
+        """
+        XCTAssertEqual(Accounts.manualSignInLink(in: output)?.absoluteString,
+                       "https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&state=s1&login_hint=a%40b.c")
+        XCTAssertNil(Accounts.manualSignInLink(in: "Opening browser to sign in…\n"))
+        XCTAssertNil(Accounts.manualSignInLink(in: "https://claude.com/cai/oauth/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A5000%2Fcallback"),
+                     "the browser's own link hands back to localhost, not to a code")
+    }
+
+    /// A stand-in for `claude auth login`: prints the CLI's lines, then waits for a pasted code (or, with `reply`,
+    /// takes a moment as the browser's hand-back would and logs in on its own).
+    private func fakeCLI(in base: URL, reply: Bool = false) throws -> String {
+        let script = base.appendingPathComponent("claude")
+        let wait = reply ? "sleep 1; echo \"Login successful.\"; exit 0" : "read code; echo \"got $code\"; [ \"$code\" = good ]"
+        try """
+        #!/bin/sh
+        echo "Opening browser to sign in…"
+        echo "If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&state=s1"
+        printf "Paste code here if prompted > "
+        \(wait)
+        """.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        return script.path
+    }
+
+    private func signInFolders() throws -> (base: URL, home: URL, root: URL) {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("viber-signin-\(UUID().uuidString)")
+        let home = base.appendingPathComponent("home")
+        try FileManager.default.createDirectory(at: home.appendingPathComponent(".claude"), withIntermediateDirectories: true)
+        return (base, home, base.appendingPathComponent("accounts"))
+    }
+
+    func testAPastedCodeReachesTheLogin() throws {
+        let (base, home, root) = try signInFolders()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let claude = try fakeCLI(in: base)
+        let signIn = SignIn()
+        let linked = expectation(description: "link")
+        let done = expectation(description: "done")
+        nonisolated(unsafe) var result: ShellResult?
+        DispatchQueue.global().async {
+            result = signIn.run("a1", email: nil, root: root, home: home, claude: claude) { link in
+                XCTAssertTrue(link.absoluteString.contains("platform.claude.com"))
+                linked.fulfill()
+                signIn.submit(code: "  good\n")
+            }
+            done.fulfill()
+        }
+        wait(for: [linked, done], timeout: 10, enforceOrder: true)
+        XCTAssertEqual(result?.status, 0)
+        XCTAssertTrue(result?.stdout.contains("got good") == true, result?.stdout ?? "")
+        XCTAssertFalse(signIn.wasCancelled)
+    }
+
+    func testTheBrowsersHandBackNeedsNoCode() throws {
+        let (base, home, root) = try signInFolders()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let result = SignIn().run("a1", email: nil, root: root, home: home, claude: try fakeCLI(in: base, reply: true)) { _ in }
+        XCTAssertTrue(result.ok, result.stdout)
+    }
+
+    func testCancellingStopsAWaitingLogin() throws {
+        let (base, home, root) = try signInFolders()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let claude = try fakeCLI(in: base)
+        let signIn = SignIn()
+        let start = Date()
+        let result = signIn.run("a1", email: nil, root: root, home: home, claude: claude) { _ in signIn.cancel() }
+        XCTAssertFalse(result.ok)
+        XCTAssertTrue(signIn.wasCancelled)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 5, "it doesn't wait out the ten minutes")
+    }
+
+    func testCancellingBeforeItStartsRunsNothing() throws {
+        let (base, home, root) = try signInFolders()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let signIn = SignIn()
+        signIn.cancel()
+        let result = signIn.run("a1", email: nil, root: root, home: home, claude: try fakeCLI(in: base)) { _ in XCTFail("it ran") }
+        XCTAssertFalse(result.ok)
+    }
+
     func testPrepareLinksTheSharedFolderAndTakesBackFilesTheCLIReplaced() throws {
         let fm = FileManager.default
         let base = fm.temporaryDirectory.appendingPathComponent("viber-prepare-\(UUID().uuidString)")
